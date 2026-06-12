@@ -245,7 +245,7 @@ export class AnnotationModal extends Modal {
 
     console.log(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
 
-    // ① 更新 IndexedDB（先写 DB，再写 Markdown）
+    // ① 更新 AnnotationStore（先写 Store，再写 Markdown）
     await updateAnnotation(this.annotation.uuid, updates);
 
     // ② 更新 Markdown — 设置防重入标志，阻止 onFileOpen() 在此期间触发 syncFromMarkdown()
@@ -282,13 +282,12 @@ export class AnnotationModal extends Modal {
 
       // 验证内容确实发生了变化
       if (newContent !== content) {
-        this.plugin._isInternalModify = true;
+        this.plugin.modifyGuard.acquire(this.annotation.filePath);
         try {
           await this.app.vault.modify(file, newContent);
           console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
         } finally {
-          // 延迟重置防重入标志，确保 onFileOpen 事件被正确跳过
-          setTimeout(() => { this.plugin._isInternalModify = false; }, 500);
+          this.plugin.modifyGuard.release(this.annotation.filePath);
         }
       } else {
         console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
@@ -304,7 +303,7 @@ export class AnnotationModal extends Modal {
   }
 
   private async remove() {
-    // 从 IndexedDB 删除
+    // 从 AnnotationStore 删除
     await deleteAnnotation(this.annotation.uuid);
 
     // 从 Markdown 移除标注
@@ -328,11 +327,11 @@ export class AnnotationModal extends Modal {
       }
 
       if (newContent) {
-        this.plugin._isInternalModify = true;
+        this.plugin.modifyGuard.acquire(this.annotation.filePath);
         try {
           await this.app.vault.modify(file, newContent);
         } finally {
-          setTimeout(() => { this.plugin._isInternalModify = false; }, 500);
+          this.plugin.modifyGuard.release(this.annotation.filePath);
         }
       }
     }

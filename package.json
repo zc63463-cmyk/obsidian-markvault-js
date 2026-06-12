@@ -23,8 +23,5 @@
     "obsidian": "latest",
     "tslib": "^2.8.0",
     "typescript": "^5.7.0"
-  },
-  "dependencies": {
-    "dexie": "^4.0.10"
   }
 }

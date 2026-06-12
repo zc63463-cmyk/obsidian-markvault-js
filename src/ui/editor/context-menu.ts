@@ -153,7 +153,7 @@ export async function createAnnotationWithNote(
 }
 
 /**
- * 创建标注：双写 Markdown + IndexedDB
+ * 创建标注：双写 Markdown + AnnotationStore
  *
  * 🆕 v2.0 智能路由：
  * - 纯文本 → 原逻辑（单个 <mark> 包裹）
@@ -161,7 +161,7 @@ export async function createAnnotationWithNote(
  * - 纯特殊内容（整个选区都是公式/代码） → Track B 块级锚点
  *
  * 流程：
- * 1. 扫描选区上下文 → 2. 路由选择 → 3. 写入 Markdown + IndexedDB
+ * 1. 扫描选区上下文 → 2. 路由选择 → 3. 写入 Markdown + AnnotationStore
  */
 export async function createAnnotation(
   plugin: MarkVaultPlugin,
@@ -244,7 +244,7 @@ async function createSimpleAnnotation(
     kind: 'inline',
   };
 
-  plugin._isInternalModify = true;
+  plugin.modifyGuard.acquire(filePath);
 
   try {
     const markTag = buildMarkTag(annotation);
@@ -256,7 +256,7 @@ async function createSimpleAnnotation(
     await addAnnotation(annotation);
     await plugin.refreshSidebar();
   } finally {
-    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+    plugin.modifyGuard.release(filePath);
   }
 
   return annotation;
@@ -346,7 +346,7 @@ async function createSpanAnnotation(
     spanRanges,
   };
 
-  plugin._isInternalModify = true;
+  plugin.modifyGuard.acquire(filePath);
 
   try {
     // 在选区起始行前插入锚点（不修改选区内容！）
@@ -368,7 +368,7 @@ async function createSpanAnnotation(
 
     await plugin.refreshSidebar();
   } finally {
-    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+    plugin.modifyGuard.release(filePath);
   }
 
   return annotation;
@@ -444,7 +444,7 @@ async function createBlockAnnotation(
     anchorLine,
   };
 
-  plugin._isInternalModify = true;
+  plugin.modifyGuard.acquire(filePath);
 
   try {
     // 在目标行上方插入锚点
@@ -458,7 +458,7 @@ async function createBlockAnnotation(
     await addAnnotation(annotation);
     await plugin.refreshSidebar();
   } finally {
-    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+    plugin.modifyGuard.release(filePath);
   }
 
   return annotation;

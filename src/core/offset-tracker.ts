@@ -3,7 +3,7 @@
  *
  * 监听 CodeMirror 6 的 Transaction 变更，
  * 精确计算文本编辑对标注偏移量的影响，
- * 增量更新 IndexedDB 中受影响标注的 startOffset/endOffset。
+ * 增量更新 AnnotationStore 中受影响标注的 startOffset/endOffset。
  *
  * 设计要点：
  * - 使用 CM6 Transaction.changes 而非 Obsidian 的 editor-change 事件
@@ -67,7 +67,7 @@ export function extractChangesFromUpdate(update: ViewUpdate): ChangeInfo[] {
 }
 
 /**
- * 对一组变更应用增量偏移修正到 IndexedDB
+ * 对一组变更应用增量偏移修正到 AnnotationStore
  */
 export async function applyIncrementalOffsetFix(
   filePath: string,

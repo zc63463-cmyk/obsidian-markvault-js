@@ -27,8 +27,11 @@ export class AnnotationStore {
   /** filePath → Set<uuid>，按文件索引 */
   private _byFile: Map<string, Set<string>> = new Map();
 
-  /** kind → Set<uuid>，按标注类型索引 */
+  /** kind → Set<uuid>，按标注类型索引（inline/block/span） */
   private _byKind: Map<string, Set<string>> = new Map();
+
+  /** type → Set<uuid>，按标注样式索引（highlight/bold/underline） */
+  private _byType: Map<string, Set<string>> = new Map();
 
   /** color → Set<uuid>，按颜色索引 */
   private _byColor: Map<string, Set<string>> = new Map();
@@ -57,7 +60,7 @@ export class AnnotationStore {
     if (!this._adapter) {
       throw new Error('AnnotationStore: not initialized. Call init(vault) first.');
     }
-    return this.adapter;
+    return this._adapter;
   }
 
   /** 插件目录路径（如 .obsidian/plugins/markvault-js） */
@@ -65,6 +68,9 @@ export class AnnotationStore {
 
   /** 防抖延迟（毫秒） */
   private _flushDebounceMs: number = 2000;
+
+  /** 索引是否需要写回 */
+  private _indexDirty: boolean = false;
 
   /** 元数据 */
   private _meta: StoreMeta = {
@@ -198,6 +204,7 @@ export class AnnotationStore {
 
   /**
    * 添加标注，更新索引并标记 dirty。
+   * 自动过滤非标准字段（如 _source、_needsUpgrade）。
    */
   async addAnnotation(annotation: Annotation): Promise<void> {
     this._assertInitialized();
@@ -205,14 +212,17 @@ export class AnnotationStore {
     // 确保文件已加载
     await this.ensureFileLoaded(annotation.filePath);
 
+    // 过滤非标准字段，防止 _source/_needsUpgrade 等临时标记写入存储
+    const clean = AnnotationStore._stripExtraFields(annotation);
+
     // 存入索引
-    this._byUuid.set(annotation.uuid, annotation);
-    this._addToIndex(annotation);
+    this._byUuid.set(clean.uuid, clean);
+    this._addToIndex(clean);
 
     // 更新 _indexData
-    this._updateIndexEntry(annotation.filePath);
+    this._updateIndexEntry(clean.filePath);
 
-    this._markDirty(annotation.filePath);
+    this._markDirty(clean.filePath);
   }
 
   /**
@@ -248,6 +258,7 @@ export class AnnotationStore {
           this._loadedFiles.delete(oldAnn.filePath);
           const oldKey = FileEncoder.encodeFilePath(oldAnn.filePath);
           delete this._indexData.entries[oldKey];
+          this._indexDirty = true;
           // 删除旧分片文件
           const oldShardPath = FileEncoder.getShardPath(this._baseDir, oldAnn.filePath);
           try {
@@ -315,6 +326,7 @@ export class AnnotationStore {
         this._loadedFiles.delete(filePath);
         const key = FileEncoder.encodeFilePath(filePath);
         delete this._indexData.entries[key];
+        this._indexDirty = true;
 
         // 删除分片文件
         const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
@@ -341,11 +353,11 @@ export class AnnotationStore {
     // 收集候选 uuid 集合（取交集）
     let candidateUuids: Set<string> | null = null;
 
-    // 按类型过滤（使用 _byKind 索引）
+    // 按样式类型过滤（使用 _byType 索引：highlight/bold/underline）
     if (filter.type && filter.type !== 'all') {
-      const kindSet = this._byKind.get(filter.type);
-      if (!kindSet) return [];
-      candidateUuids = new Set(kindSet);
+      const typeSet = this._byType.get(filter.type);
+      if (!typeSet) return [];
+      candidateUuids = new Set(typeSet);
     }
 
     // 按颜色过滤（使用 _byColor 索引）
@@ -495,14 +507,24 @@ export class AnnotationStore {
       this._byFile.set(filePath, new Set());
     }
 
-    // 逐个添加到内存索引
+    // 逐个添加到内存索引（清理可能残留的非标准字段）
     for (const ann of annotations) {
-      this._byUuid.set(ann.uuid, ann);
-      this._byFile.get(filePath)!.add(ann.uuid);
-      this._addToIndex(ann);
+      const clean = AnnotationStore._stripExtraFields(ann);
+      this._byUuid.set(clean.uuid, clean);
+      this._byFile.get(filePath)!.add(clean.uuid);
+      this._addToIndex(clean);
     }
 
     this._loadedFiles.add(filePath);
+
+    // 如果分片有标注但 _indexData 中没有条目，更新索引并标记 dirty
+    if (annotations.length > 0) {
+      const key = FileEncoder.encodeFilePath(filePath);
+      if (!this._indexData.entries[key]) {
+        this._updateIndexEntry(filePath);
+        this._indexDirty = true;
+      }
+    }
   }
 
   /**
@@ -538,6 +560,12 @@ export class AnnotationStore {
       await this._writeFileShard(filePath);
       this._dirtyFiles.delete(filePath);
     }
+
+    // 如果索引也需要写回，一并处理
+    if (this._indexDirty) {
+      await this._writeIndexFile();
+      this._indexDirty = false;
+    }
   }
 
   /**
@@ -560,8 +588,9 @@ export class AnnotationStore {
     // 更新 _meta 时间戳
     this._meta.lastSyncAt = Date.now();
 
-    // 写回索引和元数据
+    // 写回索引（无论是否 dirty，flushAll 都保证索引落盘）
     await this._writeIndexFile();
+    this._indexDirty = false;
     await this._writeMetaFile();
   }
 
@@ -573,6 +602,7 @@ export class AnnotationStore {
     this._byUuid.clear();
     this._byFile.clear();
     this._byKind.clear();
+    this._byType.clear();
     this._byColor.clear();
     this._byTag.clear();
     this._byField.clear();
@@ -649,6 +679,7 @@ export class AnnotationStore {
     // 从 _indexData 中移除
     const key = FileEncoder.encodeFilePath(filePath);
     delete this._indexData.entries[key];
+    this._indexDirty = true;
 
     // 删除分片文件
     const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
@@ -747,6 +778,14 @@ export class AnnotationStore {
     }
     kindSet.add(uuid);
 
+    // _byType（highlight/bold/underline）
+    let typeSet = this._byType.get(annotation.type);
+    if (!typeSet) {
+      typeSet = new Set();
+      this._byType.set(annotation.type, typeSet);
+    }
+    typeSet.add(uuid);
+
     // _byColor
     let colorSet = this._byColor.get(annotation.color);
     if (!colorSet) {
@@ -809,6 +848,15 @@ export class AnnotationStore {
       }
     }
 
+    // _byType
+    const typeSet = this._byType.get(ann.type);
+    if (typeSet) {
+      typeSet.delete(uuid);
+      if (typeSet.size === 0) {
+        this._byType.delete(ann.type);
+      }
+    }
+
     // _byColor
     const colorSet = this._byColor.get(ann.color);
     if (colorSet) {
@@ -859,9 +907,11 @@ export class AnnotationStore {
 
   /**
    * 标记文件为 dirty + scheduleFlush。
+   * 同时标记索引需要写回（因为索引包含 count 信息）。
    */
   private _markDirty(filePath: string): void {
     this._dirtyFiles.add(filePath);
+    this._indexDirty = true;
     this._scheduleFlush(filePath);
   }
 
@@ -992,6 +1042,38 @@ export class AnnotationStore {
     };
 
     this._indexData.entries[key] = entry;
+  }
+
+  /**
+   * 过滤非标准字段（以 _ 开头的临时标记如 _source、_needsUpgrade），
+   * 防止解析器的临时标记被写入分片 JSON。
+   */
+  private static _stripExtraFields(annotation: Annotation): Annotation {
+    const clean: Annotation = {
+      uuid: annotation.uuid,
+      filePath: annotation.filePath,
+      type: annotation.type,
+      color: annotation.color,
+      text: annotation.text,
+      note: annotation.note,
+      tags: annotation.tags,
+      startOffset: annotation.startOffset,
+      endOffset: annotation.endOffset,
+      startLine: annotation.startLine,
+      contextBefore: annotation.contextBefore,
+      contextAfter: annotation.contextAfter,
+      createdAt: annotation.createdAt,
+      updatedAt: annotation.updatedAt,
+    };
+    // 可选字段
+    if (annotation.kind !== undefined) clean.kind = annotation.kind;
+    if (annotation.groupUuid !== undefined) clean.groupUuid = annotation.groupUuid;
+    if (annotation.blockType !== undefined) clean.blockType = annotation.blockType;
+    if (annotation.targetLine !== undefined) clean.targetLine = annotation.targetLine;
+    if (annotation.anchorLine !== undefined) clean.anchorLine = annotation.anchorLine;
+    if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges;
+    if (annotation.fields !== undefined) clean.fields = annotation.fields;
+    return clean;
   }
 
   /**

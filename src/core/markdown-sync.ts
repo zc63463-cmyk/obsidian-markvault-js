@@ -5,16 +5,16 @@ import { recoverOffsets, batchRecoverOffsets } from './offset-recovery';
 import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation, deleteAnnotation as dbDeleteAnnotation } from '../db/annotation-repo';
 
 /**
- * Markdown ↔ IndexedDB 双写同步引擎
+ * Markdown ↔ AnnotationStore 双写同步引擎
  *
  * 策略：
  * - Markdown 是 source of truth（保证可移植性）
- * - IndexedDB 是查询加速层（支持跨笔记搜索、过滤、统计）
+ * - AnnotationStore 是查询加速层（支持跨笔记搜索、过滤、统计）
  * - data-uuid 是双向关联的桥梁
  */
 
 /**
- * 同步：从 Markdown 解析标注，与 IndexedDB 做增量同步
+ * 同步：从 Markdown 解析标注，与 AnnotationStore 做增量同步
  * 用于文件打开时调用
  *
  * 升级策略：

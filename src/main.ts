@@ -7,12 +7,12 @@ import { MarkVaultSettingTab } from './ui/settings/settings-tab';
 import { syncFromMarkdown, recoverAndSyncOffsets, upgradeMarkdownAnnotations } from './core/markdown-sync';
 import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
-import { getAllAnnotations, getAnnotationsForFile, getAnnotationByUuid, deleteAnnotation, updateAnnotation } from './db/annotation-repo';
 import { AnnotationModal } from './ui/editor/annotation-modal';
 import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { migrateFromIndexedDB } from './db/migration';
 import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor, buildSpanAnchor } from './core/annotation-parser';
 import { updateSpanCacheForFile, clearSpanCache, type SpanAnnotationData } from './core/highlight-applier';
+import { ModifyGuard } from './utils/modify-guard';
 
 export default class MarkVaultPlugin extends Plugin {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
@@ -21,13 +21,13 @@ export default class MarkVaultPlugin extends Plugin {
   // 当前活跃文件的路径，用于偏移修正
   private activeFilePath: string | null = null;
 
-  // 🆕 防重入标志：当插件自身在修改文件时（创建标注、保存批注），
+  // 🆕 防重入保护：当插件自身在修改文件时（创建标注、保存批注），
   // 阻止 onFileOpen() 重新触发 syncFromMarkdown()，避免竞态条件覆盖数据
-  // 注意：public 以便 annotation-modal.ts 和 context-menu.ts 访问
-  public _isInternalModify = false;
+  // per-file Map + 自动过期，比全局布尔值 + setTimeout 更安全
+  public modifyGuard = new ModifyGuard(800);
 
   // 🆕 防重入扩展：记录正在编辑的标注 uuid 集合
-  // 当用户在 Modal 中编辑标注时，即使 _isInternalModify 已重置，
+  // 当用户在 Modal 中编辑标注时，即使 modifyGuard 已释放，
   // 也要保护这些标注不被 syncFromMarkdown 覆盖
   private _activeAnnotationUuids = new Set<string>();
 
@@ -69,7 +69,7 @@ export default class MarkVaultPlugin extends Plugin {
    */
   public async updateSpanCache(filePath: string): Promise<void> {
     try {
-      const annotations = await getAnnotationsForFile(filePath);
+      const annotations = await annotationStore.getAnnotationsForFile(filePath);
       const spanAnnotations = annotations.filter(a => a.kind === 'span' && a.spanRanges && a.spanRanges.length > 0);
       const spanData: SpanAnnotationData[] = spanAnnotations.map(a => ({
         uuid: a.uuid,
@@ -400,9 +400,9 @@ export default class MarkVaultPlugin extends Plugin {
   // ─── 文件打开时同步 ────────────────────────────
 
   async onFileOpen(file: TFile) {
-    // 防重入：如果当前是插件自身在修改文件，跳过此次同步
-    if (this._isInternalModify) {
-      console.log(`MarkVault: onFileOpen skipped — internal modify in progress`);
+    // 防重入：如果当前文件正在被插件自身修改，跳过此次同步
+    if (this.modifyGuard.isLocked(file.path)) {
+      console.log(`MarkVault: onFileOpen skipped — internal modify in progress for ${file.path}`);
       return;
     }
 
@@ -430,22 +430,22 @@ export default class MarkVaultPlugin extends Plugin {
       const upgradedContent = await upgradeMarkdownAnnotations(content, file.path);
       if (upgradedContent !== null && upgradedContent !== content) {
         // 🔧 P1 修复：升级操作触发 vault.modify，需要防重入
-        this._isInternalModify = true;
+        this.modifyGuard.acquire(file.path);
         try {
           await this.app.vault.modify(file, upgradedContent);
         } finally {
-          setTimeout(() => { this._isInternalModify = false; }, 500);
+          this.modifyGuard.release(file.path);
         }
         content = upgradedContent;
         console.log(`MarkVault: upgraded old-format annotations in ${file.path}`);
       }
 
-      // 1. 从 Markdown 解析标注，同步到 IndexedDB
+      // 1. 从 Markdown 解析标注，同步到 AnnotationStore
       const syncResult = await syncFromMarkdown(content, file.path);
       console.log(`MarkVault: synced ${file.path} — added: ${syncResult.added}, removed: ${syncResult.removed}, updated: ${syncResult.updated}, upgraded: ${syncResult.upgraded}`);
 
       // 1b. 验证：查询 DB 中当前文件的标注数
-      const dbAnnotations = await getAnnotationsForFile(file.path);
+      const dbAnnotations = await annotationStore.getAnnotationsForFile(file.path);
       console.log(`MarkVault: DB now has ${dbAnnotations.length} annotations for ${file.path}`);
 
       // 1c. 检查是否有标注的 note 在 sync 过程中被意外覆盖
@@ -487,7 +487,7 @@ export default class MarkVaultPlugin extends Plugin {
         const filePath = this.activeFilePath;
         if (!filePath) return;
 
-        const annotations = await getAnnotationsForFile(filePath);
+        const annotations = await annotationStore.getAnnotationsForFile(filePath);
         if (annotations.length === 0) return;
 
         const result = await applyIncrementalOffsetFix(filePath, changes, annotations);
@@ -642,7 +642,7 @@ export default class MarkVaultPlugin extends Plugin {
 
   async exportAnnotations() {
     try {
-      const annotations = await getAllAnnotations();
+      const annotations = await annotationStore.getAllAnnotations();
       const json = JSON.stringify(annotations, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -665,7 +665,7 @@ export default class MarkVaultPlugin extends Plugin {
    */
   async openAnnotationModal(uuid: string) {
     try {
-      const annotation = await getAnnotationByUuid(uuid);
+      const annotation = await annotationStore.getAnnotationByUuid(uuid);
       if (!annotation) {
         console.warn('MarkVault: annotation not found for uuid', uuid);
         return;
@@ -696,33 +696,33 @@ export default class MarkVaultPlugin extends Plugin {
                 // 块级标注：移除 %%markvault:...%% 锚点
                 const newContent = removeBlockAnchor(content, deletedUuid);
                 if (newContent !== content) {
-                  this._isInternalModify = true;
+                  this.modifyGuard.acquire(annotation.filePath);
                   try {
                     await this.app.vault.modify(file, newContent);
                   } finally {
-                    setTimeout(() => { this._isInternalModify = false; }, 500);
+                    this.modifyGuard.release(annotation.filePath);
                   }
                 }
               } else if (annotation.kind === 'span') {
                 // Span 标注：移除 %%markvault-span:...%% 锚点
                 const newContent = removeSpanAnchor(content, deletedUuid);
                 if (newContent !== content) {
-                  this._isInternalModify = true;
+                  this.modifyGuard.acquire(annotation.filePath);
                   try {
                     await this.app.vault.modify(file, newContent);
                   } finally {
-                    setTimeout(() => { this._isInternalModify = false; }, 500);
+                    this.modifyGuard.release(annotation.filePath);
                   }
                 }
               } else {
                 // 行内标注：移除 <mark> 标签
                 const result = removeMarkTag(content, deletedUuid);
                 if (result) {
-                  this._isInternalModify = true;
+                  this.modifyGuard.acquire(annotation.filePath);
                   try {
                     await this.app.vault.modify(file, result.content);
                   } finally {
-                    setTimeout(() => { this._isInternalModify = false; }, 500);
+                    this.modifyGuard.release(annotation.filePath);
                   }
                 }
               }
@@ -731,7 +731,7 @@ export default class MarkVaultPlugin extends Plugin {
               await this.updateSpanCache(annotation.filePath);
             }
           } catch (err) {
-            this._isInternalModify = false;
+            this.modifyGuard.releaseNow(annotation.filePath);
             console.error('MarkVault: failed to remove annotation from markdown', err);
           }
           await this.refreshSidebar();

@@ -43,8 +43,8 @@ export class AnnotationSidebar extends ItemView {
   // 缓存
   private allAnnotationsCache: Annotation[] = [];
 
-  // Plugin 实例引用（用于访问 _isInternalModify 等保护机制）
-  private pluginInstance: any = null;
+  // Plugin 实例引用（用于访问 modifyGuard 等保护机制）
+  private pluginInstance: import('../../utils/plugin-interface').MarkVaultPluginInterface | null = null;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -59,7 +59,7 @@ export class AnnotationSidebar extends ItemView {
    * 设置 plugin 实例引用。
    * 在 main.ts 注册视图时调用，避免硬编码插件 ID。
    */
-  setPluginInstance(plugin: any): void {
+  setPluginInstance(plugin: import('../../utils/plugin-interface').MarkVaultPluginInterface): void {
     this.pluginInstance = plugin;
   }
 
@@ -550,7 +550,7 @@ export class AnnotationSidebar extends ItemView {
       const confirmed = confirm(`Delete ${this.selectedUuids.size} annotations?`);
       if (!confirmed) return;
 
-      // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
+      // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
       const plugin = this.pluginInstance;
 
       for (const uuid of this.selectedUuids) {
@@ -575,16 +575,16 @@ export class AnnotationSidebar extends ItemView {
               }
 
               if (newContent && plugin) {
-                plugin._isInternalModify = true;
+                plugin.modifyGuard.acquire(annotation.filePath);
                 try {
                   await this.app.vault.modify(file, newContent);
                 } finally {
-                  setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                  plugin.modifyGuard.release(annotation.filePath);
                 }
               }
             }
           } catch (err) {
-            if (plugin) plugin._isInternalModify = false;
+            if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
             console.error('MarkVault: batch delete mark error', err);
           }
         }
@@ -622,7 +622,7 @@ export class AnnotationSidebar extends ItemView {
   private async batchChangeColor(colorId: string) {
     if (this.selectedUuids.size === 0) return;
 
-    // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
+    // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
     const plugin = this.pluginInstance;
 
     for (const uuid of this.selectedUuids) {
@@ -637,16 +637,16 @@ export class AnnotationSidebar extends ItemView {
             const { updateMarkTag } = await import('../../core/annotation-parser');
             const newContent = updateMarkTag(content, uuid, { color: colorId });
             if (newContent !== content && plugin) {
-              plugin._isInternalModify = true;
+              plugin.modifyGuard.acquire(annotation.filePath);
               try {
                 await this.app.vault.modify(file, newContent);
               } finally {
-                setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                plugin.modifyGuard.release(annotation.filePath);
               }
             }
           }
         } catch (err) {
-          if (plugin) plugin._isInternalModify = false;
+          if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
           console.error('MarkVault: batch color change error', err);
         }
       }
@@ -838,15 +838,6 @@ export class AnnotationSidebar extends ItemView {
     // 操作按钮区
     const actionsHeader = header.createDiv({ cls: 'markvault-card-header-actions' });
 
-    const jumpBtn = actionsHeader.createEl('button', {
-      cls: 'markvault-card-jump',
-      text: '⏎',
-    });
-    jumpBtn.title = 'Jump to annotation';
-    jumpBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.jumpToAnnotation(annotation);
-    });
 
     // 快速改色按钮
     const colorBtn = actionsHeader.createEl('button', {
@@ -915,6 +906,13 @@ export class AnnotationSidebar extends ItemView {
       this.editAnnotation(annotation);
     });
 
+    const jumpBtn = actions.createEl('button', { cls: 'markvault-action-btn', text: '↩️' });
+    jumpBtn.title = 'Jump to source';
+    jumpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.jumpToAnnotation(annotation);
+    });
+
     const deleteBtn = actions.createEl('button', { cls: 'markvault-action-btn markvault-delete-btn', text: '🗑️' });
     deleteBtn.title = 'Delete annotation';
     deleteBtn.addEventListener('click', async (e) => {
@@ -922,7 +920,7 @@ export class AnnotationSidebar extends ItemView {
       await this.deleteAnnotationWithConfirm(annotation);
     });
 
-    // 卡片点击 → 打开编辑 Modal（用户最期望的操作）
+    // 卡片点击 → 跳转到原文锚点位置
     card.addEventListener('click', () => {
       if (this.batchMode) {
         // 批量模式下点击 = 切换选中
@@ -932,8 +930,7 @@ export class AnnotationSidebar extends ItemView {
           cb.dispatchEvent(new Event('change'));
         }
       } else {
-        // 🔧 修复：点击标注卡片直接打开编辑Modal，而不是仅跳转
-        this.editAnnotation(annotation);
+        this.jumpToAnnotation(annotation);
       }
     });
   }
@@ -957,7 +954,7 @@ export class AnnotationSidebar extends ItemView {
   private async quickChangeColor(annotation: Annotation, colorId: string) {
     await updateAnnotation(annotation.uuid, { color: colorId });
     // 更新 Markdown
-    // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
+    // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
     const plugin = this.pluginInstance;
     try {
       const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
@@ -980,11 +977,11 @@ export class AnnotationSidebar extends ItemView {
         }
 
         if (newContent !== content && plugin) {
-          plugin._isInternalModify = true;
+          plugin.modifyGuard.acquire(annotation.filePath);
           try {
             await this.app.vault.modify(file, newContent);
           } finally {
-            setTimeout(() => { plugin._isInternalModify = false; }, 500);
+            plugin.modifyGuard.release(annotation.filePath);
           }
         }
 
@@ -994,7 +991,7 @@ export class AnnotationSidebar extends ItemView {
         }
       }
     } catch (err) {
-      if (plugin) plugin._isInternalModify = false;
+      if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
       console.error('MarkVault: quick color change error', err);
     }
     await this.refreshListOnly();
@@ -1166,8 +1163,6 @@ export class AnnotationSidebar extends ItemView {
       }
     }
 
-    // 🔧 修复：跳转后同时打开编辑Modal
-    await this.editAnnotation(annotation);
   }
 
   private async editAnnotation(annotation: Annotation) {
@@ -1205,40 +1200,40 @@ export class AnnotationSidebar extends ItemView {
                 // 块级标注：移除 %%markvault:...%% 锚点
                 const newContent = removeBlockAnchor(content, uuid);
                 if (newContent !== content) {
-                  plugin._isInternalModify = true;
+                  plugin.modifyGuard.acquire(ann.filePath);
                   try {
                     await this.app.vault.modify(file, newContent);
                   } finally {
-                    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                    plugin.modifyGuard.release(ann.filePath);
                   }
                 }
               } else if (ann.kind === 'span') {
                 // Span 标注：移除 %%markvault-span:...%% 锚点
                 const newContent = removeSpanAnchor(content, uuid);
                 if (newContent !== content) {
-                  plugin._isInternalModify = true;
+                  plugin.modifyGuard.acquire(ann.filePath);
                   try {
                     await this.app.vault.modify(file, newContent);
                   } finally {
-                    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                    plugin.modifyGuard.release(ann.filePath);
                   }
                 }
               } else {
                 // 行内标注：移除 <mark> 标签
                 const result = removeMarkTag(content, uuid);
                 if (result) {
-                  plugin._isInternalModify = true;
+                  plugin.modifyGuard.acquire(ann.filePath);
                   try {
                     await this.app.vault.modify(file, result.content);
                   } finally {
-                    setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                    plugin.modifyGuard.release(ann.filePath);
                   }
                 }
               }
             }
           }
         } catch (err) {
-          plugin._isInternalModify = false;
+          plugin.modifyGuard.releaseNow(annotation.filePath);
           console.error('MarkVault: sidebar delete annotation error', err);
         }
         await this.refreshListOnly();
@@ -1259,7 +1254,7 @@ export class AnnotationSidebar extends ItemView {
     const confirmed = confirm(`Delete annotation "${annotation.text.substring(0, 50)}..."?`);
     if (confirmed) {
       await deleteAnnotation(annotation.uuid);
-      // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
+      // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
       const plugin = this.pluginInstance;
       try {
         const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
@@ -1271,39 +1266,39 @@ export class AnnotationSidebar extends ItemView {
             // 块级标注：移除 %%markvault:...%% 锚点
             const newContent = removeBlockAnchor(content, annotation.uuid);
             if (newContent !== content && plugin) {
-              plugin._isInternalModify = true;
+              plugin.modifyGuard.acquire(annotation.filePath);
               try {
                 await this.app.vault.modify(file, newContent);
               } finally {
-                setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                plugin.modifyGuard.release(annotation.filePath);
               }
             }
           } else if (annotation.kind === 'span') {
             // Span 标注：移除 %%markvault-span:...%% 锚点
             const newContent = removeSpanAnchor(content, annotation.uuid);
             if (newContent !== content && plugin) {
-              plugin._isInternalModify = true;
+              plugin.modifyGuard.acquire(annotation.filePath);
               try {
                 await this.app.vault.modify(file, newContent);
               } finally {
-                setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                plugin.modifyGuard.release(annotation.filePath);
               }
             }
           } else {
             // 行内标注：移除 <mark> 标签
             const result = removeMarkTag(content, annotation.uuid);
             if (result && plugin) {
-              plugin._isInternalModify = true;
+              plugin.modifyGuard.acquire(annotation.filePath);
               try {
                 await this.app.vault.modify(file, result.content);
               } finally {
-                setTimeout(() => { plugin._isInternalModify = false; }, 500);
+                plugin.modifyGuard.release(annotation.filePath);
               }
             }
           }
         }
       } catch (err) {
-        if (plugin) plugin._isInternalModify = false;
+        if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
         console.error('MarkVault: sidebar delete annotation error', err);
       }
       await this.refreshListOnly();
