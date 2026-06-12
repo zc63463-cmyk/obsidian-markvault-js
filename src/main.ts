@@ -9,6 +9,8 @@ import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { getAllAnnotations, getAnnotationsForFile, getAnnotationByUuid, deleteAnnotation, updateAnnotation } from './db/annotation-repo';
 import { AnnotationModal } from './ui/editor/annotation-modal';
+import { initAnnotationStore, annotationStore } from './db/annotation-store';
+import { migrateFromIndexedDB } from './db/migration';
 import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor, buildSpanAnchor } from './core/annotation-parser';
 import { updateSpanCacheForFile, clearSpanCache, type SpanAnnotationData } from './core/highlight-applier';
 
@@ -92,6 +94,19 @@ export default class MarkVaultPlugin extends Plugin {
     } catch (err) {
       console.error('MarkVault: failed to load settings, using defaults', err);
       this.settings = DEFAULT_SETTINGS;
+    }
+
+    // ── AnnotationStore 初始化（Phase 2: 分片 JSON + 内存索引） ──
+    try {
+      initAnnotationStore(this.app.vault);
+      await annotationStore.initialize();
+      const migratedCount = await migrateFromIndexedDB();
+      if (migratedCount > 0) {
+        console.log(`MarkVault: migrated ${migratedCount} annotations from IndexedDB`);
+      }
+    } catch (err) {
+      console.error('MarkVault: failed to initialize AnnotationStore', err);
+      // 不阻止插件其余部分加载
     }
 
     // ── CM6 扩展注册 ──────────────────────────────
@@ -330,6 +345,11 @@ export default class MarkVaultPlugin extends Plugin {
 
   async onunload() {
     console.log('MarkVault: unloading plugin');
+    try {
+      await annotationStore.shutdown();
+    } catch (err) {
+      console.error('MarkVault: failed to shutdown AnnotationStore', err);
+    }
   }
 
   // ─── 设置 ──────────────────────────────────────
@@ -399,6 +419,9 @@ export default class MarkVaultPlugin extends Plugin {
     }
 
     try {
+      // Phase 2: 确保文件的标注分片已加载到内存
+      await annotationStore.ensureFileLoaded(file.path);
+
       let content = await this.app.vault.read(file);
       console.log(`MarkVault: onFileOpen — ${file.path} (${content.length} chars)`);
 

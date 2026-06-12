@@ -1,0 +1,104 @@
+classDiagram
+    class AnnotationStore {
+        -_byUuid: Map~string, Annotation~
+        -_byFile: Map~string, Set~string~~
+        -_byKind: Map~string, Set~string~~
+        -_byColor: Map~string, Set~string~~
+        -_byTag: Map~string, Set~string~~
+        -_byField: Map~string, Map~string, Set~string~~~
+        -_dirtyFiles: Set~string~
+        -_loadedFiles: Set~string~
+        -_debounceTimers: Map~string, ReturnType~setTimeout~~
+        -_adapter: DataManager
+        -_baseDir: string
+        -_flushDebounceMs: number
+        -_meta: StoreMeta
+        -_initialized: boolean
+        +initialize(): Promise~void~
+        +shutdown(): Promise~void~
+        +getAnnotationByUuid(uuid: string): Annotation | undefined
+        +getAnnotationsForFile(filePath: string): Annotation[]
+        +getAllAnnotations(): Annotation[]
+        +addAnnotation(annotation: Annotation): Promise~void~
+        +updateAnnotation(uuid: string, changes: Partial~Annotation~): Promise~void~
+        +deleteAnnotation(uuid: string): Promise~void~
+        +queryAnnotations(filter?: AnnotationFilter): Annotation[]
+        +getAnnotationStats(filePath?: string): AnnotationStats
+        +batchUpdateOffsets(updates: Array~BatchUpdateItem~): Promise~void~
+        +adjustOffsetsAfterEdit(filePath: string, fromLine: number, fromCh: number, toLine: number, toCh: number, oldContent: string, newContent: string): Promise~void~
+        +addTagToAnnotation(uuid: string, tag: string): Promise~void~
+        +removeTagFromAnnotation(uuid: string, tag: string): Promise~void~
+        +ensureFileLoaded(filePath: string): Promise~void~
+        +flushFile(filePath: string): Promise~void~
+        +flushAll(): Promise~void~
+        +rebuildIndex(): Promise~void~
+        +deleteAnnotationsForFile(filePath: string): Promise~void~
+        -_addToIndex(annotation: Annotation): void
+        -_removeFromIndex(uuid: string): void
+        -_updateIndex(oldAnn: Annotation, newAnn: Annotation): void
+        -_markDirty(filePath: string): void
+        -_scheduleFlush(filePath: string): void
+        -_writeFileShard(filePath: string): Promise~void~
+        -_readFileShard(filePath: string): Promise~Annotation[]~
+        -_readIndexFile(): Promise~IndexData~
+        -_writeIndexFile(): Promise~void~
+        -_readMetaFile(): Promise~StoreMeta~
+        -_writeMetaFile(): Promise~void~
+    }
+
+    class StoreMeta {
+        +schemaVersion: number
+        +lastSyncAt: number
+        +createdAt: number
+    }
+
+    class IndexData {
+        +version: number
+        +entries: Map~string, IndexEntry~
+    }
+
+    class IndexEntry {
+        +filePath: string
+        +count: number
+        +lastModified: number
+    }
+
+    class FileEncoder {
+        +encodeFilePath(filePath: string): string$
+        +decodeFilePath(encoded: string): string$
+        +getShardPath(baseDir: string, filePath: string): string$
+    }
+
+    class MigrationHelper {
+        +needsMigration(): Promise~boolean~
+        +migrateFromIndexedDB(store: AnnotationStore): Promise~MigrationResult~
+    }
+
+    class Annotation {
+        +uuid: string
+        +filePath: string
+        +kind: string
+        +type: AnnotationType
+        +color: string
+        +text: string
+        +note: string
+        +tags: string[]
+        +fields: Record~string, string~
+        +groupUuid: string
+        +startOffset: number
+        +endOffset: number
+        +startLine: number
+        +endLine: number
+        +spanRanges: SpanRange[]
+        +contextBefore: string
+        +contextAfter: string
+        +createdAt: number
+        +updatedAt: number
+    }
+
+    AnnotationStore --> StoreMeta : _meta
+    AnnotationStore --> IndexData : _indexData
+    AnnotationStore --> FileEncoder : uses
+    AnnotationStore --> MigrationHelper : uses during init
+    AnnotationStore --> Annotation : manages in _byUuid
+    IndexData --> IndexEntry : entries

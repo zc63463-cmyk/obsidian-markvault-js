@@ -1,0 +1,75 @@
+sequenceDiagram
+    participant Main as MarkVaultPlugin
+    participant Store as AnnotationStore
+    participant Adapter as vault.adapter
+    participant Migration as MigrationHelper
+    participant Repo as annotation-repo.ts
+
+    Main->>Main: onload()
+    Main->>Store: new AnnotationStore(app.vault)
+    Main->>Store: initialize()
+    Store->>Adapter: read(_meta.json)
+    alt _meta.json 不存在
+        Store->>Adapter: mkdir(annotations/)
+        Store->>Adapter: write(_meta.json, {schemaVersion:1, ...})
+        Store->>Adapter: write(_index.json, {version:1, entries:{}})
+    else _meta.json 存在
+        Store->>Adapter: read(_index.json)
+        Store->>Store: 构建空 _byFile Map（不加载分片）
+    end
+    Store->>Migration: needsMigration()
+    Migration->>Migration: 检测 IndexedDB 是否有 markvault-db
+    alt 需要迁移
+        Main->>Migration: migrateFromIndexedDB(store)
+        Migration->>Migration: 读取所有 IndexedDB 标注
+        Migration->>Store: addAnnotation() 批量写入
+        Migration->>Migration: 删除 IndexedDB 数据库
+    end
+    Main->>Repo: setStore(store)
+    Main->>Main: 继续注册 CM6 扩展、事件等
+
+    Note over Main,Store: ─── 文件打开（懒加载） ───
+
+    Main->>Main: onFileOpen(file)
+    Main->>Repo: syncFromMarkdown(content, filePath)
+    Repo->>Store: getAnnotationsForFile(filePath)
+    Store->>Store: ensureFileLoaded(filePath)
+    alt 文件未加载
+        Store->>Adapter: read({encoded}.json)
+        Store->>Store: 解析 JSON → Annotation[]
+        Store->>Store: 构建内存索引
+        Store->>Store: _loadedFiles.add(filePath)
+    end
+    Store-->>Repo: annotations[]
+    Repo->>Repo: 与 MD 解析结果做增量同步
+    Repo->>Store: addAnnotation() / updateAnnotation()
+    Store->>Store: 更新内存索引 + _markDirty()
+    Store->>Store: _scheduleFlush(filePath)
+
+    Note over Main,Store: ─── 创建标注 ───
+
+    participant Menu as context-menu.ts
+    participant Timer as debounce timer
+
+    Menu->>Repo: addAnnotation(annotation)
+    Repo->>Store: addAnnotation(annotation)
+    Store->>Store: _byUuid.set(uuid, ann)
+    Store->>Store: _byFile.get(fp).add(uuid)
+    Store->>Store: 更新所有倒排索引
+    Store->>Store: _markDirty(filePath)
+    Store->>Store: _scheduleFlush(filePath)
+    Note over Store,Timer: 设置 2s 防抖计时器
+    Timer-->>Store: 2s 后触发
+    Store->>Adapter: write({encoded}.json, JSON.stringify(shard))
+
+    Note over Main,Store: ─── 插件卸载 ───
+
+    Main->>Main: onunload()
+    Main->>Store: flushAll()
+    Store->>Store: 清除所有防抖计时器
+    loop 每个 dirty 文件
+        Store->>Adapter: write({encoded}.json)
+    end
+    Store->>Adapter: write(_index.json)
+    Store->>Adapter: write(_meta.json)
+    Store-->>Main: done

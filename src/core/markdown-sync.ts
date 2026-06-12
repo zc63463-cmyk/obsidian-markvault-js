@@ -1,4 +1,4 @@
-import { db, toPlain } from '../db/database';
+import { annotationStore } from '../db/annotation-store';
 import type { Annotation } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, parseBlockAnchors, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor } from './annotation-parser';
 import { recoverOffsets, batchRecoverOffsets } from './offset-recovery';
@@ -56,7 +56,7 @@ export async function syncFromMarkdown(
     const { contextBefore, contextAfter } = extractContextFromContent(fullText, startOffset, ann.text);
 
     // 确保 note 是字符串而不是 undefined
-    const annotationToAdd = toPlain({
+    const annotationToAdd: Annotation = {
       ...ann,
       note: ann.note || '',
       tags: ann.tags || [],
@@ -65,7 +65,7 @@ export async function syncFromMarkdown(
       contextAfter,
       createdAt: ann.createdAt || Date.now(),
       updatedAt: ann.updatedAt || Date.now(),
-    });
+    };
 
     await addAnnotation(annotationToAdd);
     added++;
@@ -136,7 +136,7 @@ export async function syncFromMarkdown(
 
     if (Object.keys(updates).length > 0) {
       console.log(`MarkVault sync: updating annotation ${mdAnn.uuid} with`, updates);
-      await db.annotations.where('uuid').equals(mdAnn.uuid).modify({
+      await annotationStore.updateAnnotation(mdAnn.uuid, {
         ...updates,
         updatedAt: Date.now(),
       });

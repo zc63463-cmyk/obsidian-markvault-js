@@ -21,7 +21,7 @@ import {
 } from '@codemirror/view';
 import type { Text } from '@codemirror/state';
 import type { Annotation, SpanRange } from '../types/annotation';
-import { db } from '../db/database';
+import { annotationStore } from '../db/annotation-store';
 
 /**
  * Change 信息：一次编辑操作对文档的影响
@@ -231,31 +231,30 @@ export async function applyIncrementalOffsetFix(
     }
   }
 
-  // 批量执行数据库更新
+  // 批量执行存储更新
   let updatedCount = 0;
   let deletedCount = 0;
 
   try {
     if (toDelete.length > 0 || toUpdate.length > 0) {
-      await db.transaction('rw', db.annotations, async () => {
-        for (const uuid of toDelete) {
-          await db.annotations.where('uuid').equals(uuid).delete();
-          deletedCount++;
-        }
+      // AnnotationStore 不需要事务，内存操作是同步的
+      for (const uuid of toDelete) {
+        await annotationStore.deleteAnnotation(uuid);
+        deletedCount++;
+      }
 
-        for (const u of toUpdate) {
-          const updates: Partial<Annotation> & { updatedAt: number } = {
-            startOffset: u.startOffset,
-            endOffset: u.endOffset,
-            updatedAt: Date.now(),
-          };
-          if (u.spanRanges) {
-            updates.spanRanges = u.spanRanges;
-          }
-          await db.annotations.where('uuid').equals(u.uuid).modify(updates as any);
-          updatedCount++;
+      for (const u of toUpdate) {
+        const updates: Partial<Annotation> = {
+          startOffset: u.startOffset,
+          endOffset: u.endOffset,
+        };
+        if (u.spanRanges) {
+          updates.spanRanges = u.spanRanges;
         }
-      });
+        // 注意：offset fix 是系统操作，不更新 updatedAt
+        await annotationStore.updateAnnotation(u.uuid, updates);
+        updatedCount++;
+      }
     }
   } catch (err) {
     console.error('MarkVault: applyIncrementalOffsetFix DB error', err);

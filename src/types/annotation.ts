@@ -12,10 +12,9 @@ export const PRESET_COLORS = [
 
 export type PresetColorId = (typeof PRESET_COLORS)[number]['id'];
 
-/** 标注数据模型 — IndexedDB 主存储 */
+/** 标注数据模型 — 分片 JSON 主存储 */
 export interface Annotation {
-  id?: number;              // 自增主键 (Dexie)
-  uuid: string;             // 业务 ID，Markdown ↔ DB 桥梁字段
+  uuid: string;             // 业务 ID，Markdown ↔ Store 桥梁字段
   filePath: string;         // 笔记路径
   type: AnnotationType;     // 标注类型
   color: string;            // 颜色 preset id 或 hex
@@ -30,15 +29,18 @@ export interface Annotation {
   createdAt: number;        // 创建时间戳
   updatedAt: number;        // 更新时间戳
 
-  // 🆕 v2.0: 拆分标注 & 块级标注支持
+  // v2.0: 拆分标注 & 块级标注支持
   kind?: 'inline' | 'block' | 'span';  // 标注类型（默认 inline，块级为 block，跨特殊内容为 span）
   groupUuid?: string;          // Track A: 拆分标注的组 ID，同组标注共享（旧格式兼容）
   blockType?: string;          // Track B: 块级标注的目标类型（math-block/code-block/image/embed/callout/table/paragraph）
   targetLine?: number;         // Track B: 目标块起始行号
   anchorLine?: number;         // Track B: 块级/span 标注的锚点所在行号
 
-  // 🆕 v2.1: Span 标注（方案C）
+  // v2.1: Span 标注（方案C）
   spanRanges?: SpanRange[];    // Span 标注的文本片段位置范围
+
+  // v3.0: 自定义字段
+  fields?: Record<string, string>;  // 自定义键值对
 }
 
 /** Span 标注的文本片段范围 */
@@ -54,7 +56,7 @@ export interface MarkAttributes {
   color: string;
   note?: string;
   tags?: string;
-  groupUuid?: string;  // 🆕 拆分标注组 ID
+  groupUuid?: string;  // 拆分标注组 ID
 }
 
 /** 块级标注锚点属性 */
@@ -71,6 +73,7 @@ export interface AnnotationFilter {
   color?: string | 'all';
   hasNote?: boolean;
   searchQuery?: string;
+  fieldFilters?: Record<string, string>;  // v3.0: 字段过滤
   sortBy?: 'position' | 'createdAt' | 'updatedAt';
 }
 
@@ -79,6 +82,43 @@ export interface RecoveryResult {
   startOffset: number;
   endOffset: number;
   drifted: boolean;
+}
+
+/** Store 元数据 */
+export interface StoreMeta {
+  schemaVersion: number;
+  createdAt: number;
+  lastSyncAt: number;
+}
+
+/** 索引条目 */
+export interface IndexEntry {
+  filePath: string;
+  count: number;
+  lastModified?: number;
+}
+
+/** 索引数据 */
+export interface IndexData {
+  version: number;
+  entries: Record<string, IndexEntry>;  // key = Base64URL(filePath)
+}
+
+/** 标注统计 */
+export interface AnnotationStats {
+  total: number;
+  byType: Record<string, number>;
+  byColor: Record<string, number>;
+  withNotes: number;
+  withTags: number;
+}
+
+/** 批量更新偏移项 */
+export interface BatchUpdateItem {
+  uuid: string;
+  startOffset: number;
+  endOffset: number;
+  spanRanges?: SpanRange[];
 }
 
 /** 插件设置 */
