@@ -140,6 +140,7 @@ export default class MarkVaultPlugin extends Plugin {
         MARKVAULT_SIDEBAR_VIEW_TYPE,
         (leaf) => {
           this.sidebar = new AnnotationSidebar(leaf);
+          this.sidebar.setPluginInstance(this);
           return this.sidebar;
         },
       );
@@ -149,7 +150,7 @@ export default class MarkVaultPlugin extends Plugin {
 
     // 添加侧边栏图标
     try {
-      this.addRibbonIcon('highlighter', 'MarkVault', () => {
+      this.addRibbonIcon('pen-tool', 'MarkVault-JS', () => {
         this.activateSidebar();
       });
     } catch (err) {

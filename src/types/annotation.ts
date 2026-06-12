@@ -3,11 +3,11 @@ export type AnnotationType = 'highlight' | 'bold' | 'underline';
 
 /** 预设颜色 */
 export const PRESET_COLORS = [
-  { id: 'yellow', hex: '#FACC15', label: '黄色' },
-  { id: 'green', hex: '#4ADE80', label: '绿色' },
-  { id: 'blue', hex: '#60A5FA', label: '蓝色' },
-  { id: 'pink', hex: '#F472B6', label: '粉色' },
-  { id: 'purple', hex: '#C084FC', label: '紫色' },
+  { id: 'yellow', hex: '#FACC15', label: '黄色', emoji: '🟡' },
+  { id: 'green', hex: '#4ADE80', label: '绿色', emoji: '🟢' },
+  { id: 'blue', hex: '#60A5FA', label: '蓝色', emoji: '🔵' },
+  { id: 'pink', hex: '#F472B6', label: '粉色', emoji: '🔴' },
+  { id: 'purple', hex: '#C084FC', label: '紫色', emoji: '🟣' },
 ] as const;
 
 export type PresetColorId = (typeof PRESET_COLORS)[number]['id'];

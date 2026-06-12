@@ -44,10 +44,35 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
       // 添加分隔线
       menu.addSeparator();
 
-      // 📝 高亮 + 批注（一步完成）
+      // 📝 Annotate — 默认高亮
       menu.addItem((item) => {
-        item.setTitle('📝 Annotate (highlight + note)')
-          .setIcon('pencil')
+        item.setTitle('📝 Annotate')
+          .setIcon('pen-tool')
+          .onClick(async () => {
+            await createAnnotation(plugin, editor, view, 'highlight', plugin.settings.defaultHighlightColor);
+          });
+      });
+
+      // 颜色选择（扁平展示，视觉分组）
+      menu.addItem((item) => {
+        item.setTitle('   ── Colors ──')
+          .setDisabled(true);
+      });
+      for (const color of PRESET_COLORS) {
+        menu.addItem((item) => {
+          item.setTitle(`   ${color.emoji} ${color.label}`)
+            .onClick(async () => {
+              await createAnnotation(plugin, editor, view, 'highlight', color.id);
+            });
+        });
+      }
+
+      menu.addSeparator();
+
+      // 📝 Annotate + Note
+      menu.addItem((item) => {
+        item.setTitle('📝 Annotate + Note')
+          .setIcon('pen-tool')
           .onClick(async () => {
             await createAnnotationWithNote(plugin, editor, view);
           });
@@ -55,35 +80,19 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
 
       menu.addSeparator();
 
-      // 高亮 — 默认颜色
+      // 𝗕 Bold
       menu.addItem((item) => {
-        item.setTitle('🎨 Highlight (default)')
-          .onClick(async () => {
-            await createAnnotation(plugin, editor, view, 'highlight', plugin.settings.defaultHighlightColor);
-          });
-      });
-
-      // 高亮 — 各颜色
-      for (const color of PRESET_COLORS) {
-        menu.addItem((item) => {
-          item.setTitle(`  Highlight — ${color.label}`)
-            .onClick(async () => {
-              await createAnnotation(plugin, editor, view, 'highlight', color.id);
-            });
-        });
-      }
-
-      // 加粗
-      menu.addItem((item) => {
-        item.setTitle('𝗕 Bold (default)')
+        item.setTitle('𝗕 Bold')
+          .setIcon('bold')
           .onClick(async () => {
             await createAnnotation(plugin, editor, view, 'bold', plugin.settings.defaultHighlightColor);
           });
       });
 
-      // 下划线
+      // U̲ Underline
       menu.addItem((item) => {
-        item.setTitle('U̲ Underline (default)')
+        item.setTitle('U̲ Underline')
+          .setIcon('underline')
           .onClick(async () => {
             await createAnnotation(plugin, editor, view, 'underline', plugin.settings.defaultHighlightColor);
           });
@@ -465,7 +474,7 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
   plugin.addCommand({
     id: 'annotate-highlight',
     name: 'Highlight selection',
-    icon: 'highlighter',
+    icon: 'pen-tool',
     editorCallback: async (editor: Editor, view: MarkdownView) => {
       await createAnnotation(plugin, editor, view, 'highlight', defaultColor);
     },
@@ -496,7 +505,7 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
     plugin.addCommand({
       id: `annotate-highlight-${color.id}`,
       name: `Highlight (${color.label})`,
-      icon: 'highlighter',
+      icon: 'pen-tool',
       editorCallback: async (editor: Editor, view: MarkdownView) => {
         await createAnnotation(plugin, editor, view, 'highlight', color.id);
       },
@@ -506,8 +515,8 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
   // 高亮 + 批注命令
   plugin.addCommand({
     id: 'annotate-with-note',
-    name: 'Highlight and add note',
-    icon: 'pencil',
+    name: 'Annotate and add note',
+    icon: 'pen-tool',
     editorCallback: async (editor: Editor, view: MarkdownView) => {
       await createAnnotationWithNote(plugin, editor, view);
     },

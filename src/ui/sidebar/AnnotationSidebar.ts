@@ -43,6 +43,9 @@ export class AnnotationSidebar extends ItemView {
   // 缓存
   private allAnnotationsCache: Annotation[] = [];
 
+  // Plugin 实例引用（用于访问 _isInternalModify 等保护机制）
+  private pluginInstance: any = null;
+
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
     this.registerEvent(
@@ -50,6 +53,14 @@ export class AnnotationSidebar extends ItemView {
         this.onFileChange();
       }),
     );
+  }
+
+  /**
+   * 设置 plugin 实例引用。
+   * 在 main.ts 注册视图时调用，避免硬编码插件 ID。
+   */
+  setPluginInstance(plugin: any): void {
+    this.pluginInstance = plugin;
   }
 
   getViewType(): string {
@@ -61,7 +72,7 @@ export class AnnotationSidebar extends ItemView {
   }
 
   getIcon(): string {
-    return 'highlighter';
+    return 'pen-tool';
   }
 
   async onOpen() {
@@ -540,8 +551,7 @@ export class AnnotationSidebar extends ItemView {
       if (!confirmed) return;
 
       // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const plugin = (this.app as any).plugins?.plugins?.['obsidian-markvault'];
+      const plugin = this.pluginInstance;
 
       for (const uuid of this.selectedUuids) {
         const annotation = await getAnnotationByUuid(uuid);
@@ -613,8 +623,7 @@ export class AnnotationSidebar extends ItemView {
     if (this.selectedUuids.size === 0) return;
 
     // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugin = (this.app as any).plugins?.plugins?.['obsidian-markvault'];
+    const plugin = this.pluginInstance;
 
     for (const uuid of this.selectedUuids) {
       const annotation = await getAnnotationByUuid(uuid);
@@ -949,8 +958,7 @@ export class AnnotationSidebar extends ItemView {
     await updateAnnotation(annotation.uuid, { color: colorId });
     // 更新 Markdown
     // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugin = (this.app as any).plugins?.plugins?.['obsidian-markvault'];
+    const plugin = this.pluginInstance;
     try {
       const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
       if (file instanceof TFile) {
@@ -1167,8 +1175,7 @@ export class AnnotationSidebar extends ItemView {
     if (!fresh) return;
 
     // 获取 plugin 实例
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const plugin = (this.app as any).plugins?.plugins?.['obsidian-markvault'];
+    const plugin = this.pluginInstance;
     if (!plugin) return;
 
     // 🔧 P0 修复：走 plugin 的保护机制，防止 syncFromMarkdown 覆盖
@@ -1253,8 +1260,7 @@ export class AnnotationSidebar extends ItemView {
     if (confirmed) {
       await deleteAnnotation(annotation.uuid);
       // 🔧 P0 修复：设置 _isInternalModify 防止 syncFromMarkdown 覆盖
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const plugin = (this.app as any).plugins?.plugins?.['obsidian-markvault'];
+      const plugin = this.pluginInstance;
       try {
         const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
         if (file instanceof TFile) {
