@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-markvault",
+  "name": "MarkVault",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Powerful annotation plugin: highlights, bold, underline with notes, tags, and a sidebar panel for managing annotations across your vault.",
+  "author": "Jiang",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

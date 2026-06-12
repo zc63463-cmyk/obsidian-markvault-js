@@ -1,0 +1,955 @@
+/* ─── MarkVault Plugin Styles ─────────────────────── */
+
+/* ─── 高亮样式 (5种颜色 × 3种类型) ─── */
+
+/* Highlight */
+.markvault-highlight.markvault-yellow { background-color: #FACC1566; border-radius: 2px; padding: 1px 0; }
+.markvault-highlight.markvault-green  { background-color: #4ADE8066; border-radius: 2px; padding: 1px 0; }
+.markvault-highlight.markvault-blue   { background-color: #60A5FA66; border-radius: 2px; padding: 1px 0; }
+.markvault-highlight.markvault-pink   { background-color: #F472B666; border-radius: 2px; padding: 1px 0; }
+.markvault-highlight.markvault-purple { background-color: #C084FC66; border-radius: 2px; padding: 1px 0; }
+
+/* Bold */
+.markvault-bold.markvault-yellow { font-weight: bold; border-bottom: 2px solid #FACC15; padding: 1px 0; }
+.markvault-bold.markvault-green  { font-weight: bold; border-bottom: 2px solid #4ADE80; padding: 1px 0; }
+.markvault-bold.markvault-blue   { font-weight: bold; border-bottom: 2px solid #60A5FA; padding: 1px 0; }
+.markvault-bold.markvault-pink   { font-weight: bold; border-bottom: 2px solid #F472B6; padding: 1px 0; }
+.markvault-bold.markvault-purple { font-weight: bold; border-bottom: 2px solid #C084FC; padding: 1px 0; }
+
+/* Underline */
+.markvault-underline.markvault-yellow { text-decoration: underline; text-decoration-color: #FACC15; text-underline-offset: 2px; }
+.markvault-underline.markvault-green  { text-decoration: underline; text-decoration-color: #4ADE80; text-underline-offset: 2px; }
+.markvault-underline.markvault-blue   { text-decoration: underline; text-decoration-color: #60A5FA; text-underline-offset: 2px; }
+.markvault-underline.markvault-pink   { text-decoration: underline; text-decoration-color: #F472B6; text-underline-offset: 2px; }
+.markvault-underline.markvault-purple { text-decoration: underline; text-decoration-color: #C084FC; text-underline-offset: 2px; }
+
+/* Has note indicator */
+.markvault-has-note {
+  cursor: help;
+  position: relative;
+}
+.markvault-has-note::after {
+  content: '\1F4DD';
+  font-size: 0.7em;
+  vertical-align: super;
+  margin-left: 2px;
+}
+
+/* Clickable annotation in reading mode */
+.markvault-clickable {
+  cursor: pointer !important;
+  transition: all 0.15s ease;
+}
+.markvault-clickable:hover {
+  filter: brightness(1.15);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.2);
+}
+
+/* ─── 侧边栏布局 ─── */
+
+.markvault-sidebar {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ─── Tab 栏 ─── */
+
+.markvault-tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  flex-shrink: 0;
+}
+
+.markvault-tab-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 0.85em;
+}
+
+.markvault-tab-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.markvault-tab-btn.active {
+  color: var(--interactive-accent);
+  border-bottom-color: var(--interactive-accent);
+  background: var(--background-primary);
+}
+
+.markvault-tab-icon {
+  font-size: 1em;
+}
+
+.markvault-tab-label {
+  font-weight: 500;
+}
+
+/* ─── 搜索栏 ─── */
+
+.markvault-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.markvault-search-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 0.9em;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.markvault-search-input:focus {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--interactive-accent-hover);
+}
+
+.markvault-batch-toggle {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 0.85em;
+  transition: all 0.15s ease;
+  color: var(--text-muted);
+}
+.markvault-batch-toggle:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-batch-toggle.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+/* ─── 内容区 ─── */
+
+.markvault-content-area {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── 过滤栏 ─── */
+
+.markvault-filter-section {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.markvault-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.markvault-filter-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.markvault-filter-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-filter-btn.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+/* 颜色过滤 */
+.markvault-filter-colors {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.markvault-color-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.75em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.markvault-color-btn.active {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.markvault-color-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  padding: 0;
+  min-width: 20px;
+}
+.markvault-color-dot.active {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+/* 排序 */
+.markvault-filter-sort {
+  display: flex;
+  gap: 4px;
+}
+
+.markvault-sort-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.75em;
+  cursor: pointer;
+}
+.markvault-sort-btn.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+/* ─── 批量操作栏 ─── */
+
+.markvault-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.markvault-batch-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.markvault-batch-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-batch-delete {
+  color: #f87171;
+  border-color: #f8717144;
+}
+.markvault-batch-delete:hover {
+  background: #f8717122;
+  border-color: #f87171;
+}
+
+.markvault-batch-count {
+  font-size: 0.8em;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+/* ─── 子 Tab 栏 (All Notes 视图) ─── */
+
+.markvault-sub-tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 6px 10px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.markvault-sub-tab-btn {
+  flex: 1;
+  padding: 5px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+.markvault-sub-tab-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-sub-tab-btn.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+/* ─── 标注列表 ─── */
+
+.markvault-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+}
+
+.markvault-empty-state {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* ─── 标注卡片 ─── */
+
+.markvault-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+.markvault-card:hover {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+
+/* 批量模式 checkbox */
+.markvault-card-checkbox {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--interactive-accent);
+}
+
+.markvault-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.markvault-card-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.markvault-card-type {
+  font-size: 0.75em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.markvault-card-line {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  flex: 1;
+}
+
+/* 跨笔记搜索：文件名标签 */
+.markvault-card-file {
+  font-size: 0.75em;
+  color: var(--text-accent);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡片头部操作区 */
+.markvault-card-header-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.markvault-card-jump {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  transition: all 0.15s ease;
+}
+.markvault-card-jump:hover {
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+.markvault-card-quick-color {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  transition: all 0.15s ease;
+}
+.markvault-card-quick-color:hover {
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+.markvault-card-text {
+  font-size: 0.9em;
+  color: var(--text-normal);
+  line-height: 1.5;
+  margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.markvault-card-note {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  background: var(--background-primary);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  border-left: 3px solid var(--interactive-accent);
+}
+
+.markvault-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.markvault-tag {
+  font-size: 0.75em;
+  color: var(--text-accent);
+  background: var(--tag-background);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.markvault-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.markvault-card-time {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  flex: 1;
+}
+
+.markvault-action-btn {
+  background: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  font-size: 0.85em;
+  transition: all 0.15s ease;
+}
+.markvault-action-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-delete-btn:hover {
+  background: #f8717166;
+  border-color: #f87171;
+}
+
+/* ─── 时间线视图 ─── */
+
+.markvault-timeline-group {
+  margin-bottom: 12px;
+}
+
+.markvault-timeline-date {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 4px 0 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 8px;
+}
+
+/* ─── 按文件分组视图 ─── */
+
+.markvault-file-group {
+  margin-bottom: 8px;
+}
+
+.markvault-file-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.markvault-file-group-header:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-file-group-header.expanded {
+  border-radius: 6px 6px 0 0;
+  border-bottom-color: transparent;
+}
+
+.markvault-file-group-icon {
+  font-size: 1em;
+}
+
+.markvault-file-group-name {
+  flex: 1;
+  font-size: 0.9em;
+  color: var(--text-normal);
+  font-weight: 500;
+}
+
+.markvault-file-group-count {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  background: var(--background-primary);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.markvault-file-group-list {
+  display: none;
+  border: 1px solid var(--background-modifier-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  padding: 6px;
+}
+.markvault-file-group-list.expanded {
+  display: block;
+}
+
+/* ─── 按颜色分组视图 ─── */
+
+.markvault-color-group {
+  margin-bottom: 8px;
+}
+
+.markvault-color-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.markvault-color-group-header:hover {
+  background: var(--background-modifier-hover);
+}
+.markvault-color-group-header.expanded {
+  border-radius: 6px 6px 0 0;
+  border-bottom-color: transparent;
+}
+
+.markvault-color-group-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.markvault-color-group-name {
+  flex: 1;
+  font-size: 0.9em;
+  color: var(--text-normal);
+  font-weight: 500;
+}
+
+.markvault-color-group-count {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  background: var(--background-primary);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.markvault-color-group-list {
+  display: none;
+  border: 1px solid var(--background-modifier-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  padding: 6px;
+}
+.markvault-color-group-list.expanded {
+  display: block;
+}
+
+/* ─── 统计视图 ─── */
+
+.markvault-stats-overview {
+  text-align: center;
+  padding: 20px 16px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.markvault-stats-number {
+  font-size: 2.5em;
+  font-weight: 700;
+  color: var(--interactive-accent);
+  line-height: 1;
+}
+
+.markvault-stats-label {
+  font-size: 0.9em;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.markvault-stats-grid {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.markvault-stat-card {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.markvault-stat-card-wide {
+  grid-column: 1 / -1;
+}
+
+.markvault-stat-card-title {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.markvault-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.markvault-stat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.markvault-stat-row-label {
+  flex: 1;
+  font-size: 0.85em;
+  color: var(--text-normal);
+}
+
+.markvault-stat-row-value {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+/* 占比条 */
+.markvault-stat-bar {
+  display: flex;
+  height: 20px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.markvault-stat-bar-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: width 0.3s ease;
+  min-width: 2px;
+}
+
+.markvault-stat-bar-label {
+  font-size: 0.7em;
+  color: rgba(0, 0, 0, 0.6);
+  font-weight: 600;
+}
+
+/* 最近标注 */
+.markvault-stat-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+  transition: background 0.15s ease;
+}
+.markvault-stat-recent-row:last-child {
+  border-bottom: none;
+}
+.markvault-stat-recent-row:hover {
+  background: var(--background-modifier-hover);
+  border-radius: 4px;
+}
+
+.markvault-stat-recent-text {
+  flex: 1;
+  font-size: 0.85em;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markvault-stat-recent-file {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+/* ─── Modal 样式 ─── */
+
+.markvault-modal {
+  padding: 16px;
+}
+
+.markvault-modal-title {
+  margin-bottom: 16px;
+}
+
+.markvault-modal-quote {
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  background: var(--background-secondary);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 4px;
+  color: var(--text-muted);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* MarkdownRenderer 渲染的代码块在 quote 中的样式调整 */
+.markvault-modal-quote pre {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.markvault-modal-quote .math {
+  overflow-x: auto;
+}
+
+.markvault-modal-meta {
+  font-size: 0.85em;
+  color: var(--text-faint);
+  margin-bottom: 12px;
+}
+
+/* 颜色选择器 */
+.markvault-modal-color-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.markvault-modal-color-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 0;
+  min-width: 28px;
+  background: none;
+}
+
+.markvault-modal-color-dot:hover {
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.markvault-modal-color-dot.active {
+  border-color: var(--text-normal);
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+  transform: scale(1.1);
+}
+
+/* 预览区 */
+.markvault-modal-preview {
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  background: var(--background-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 28px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.markvault-modal-preview-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.markvault-modal-preview-content pre {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.markvault-modal-preview-content .math {
+  overflow-x: auto;
+}
+
+.markvault-modal-preview-label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.markvault-modal-preview-sample {
+  font-size: 0.9em;
+  color: var(--text-normal);
+}
+
+.markvault-modal-note-input {
+  width: 100%;
+  min-height: 80px;
+}
+
+.markvault-modal-tags-input {
+  width: 100%;
+}
+
+.markvault-modal-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* ─── 块级标注样式 (Track B) ─── */
+
+/* 块级标注 — 整块背景 + 左侧色条 */
+.markvault-block-mark {
+  position: relative;
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin: 4px 0;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.markvault-block-mark:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.15);
+}
+
+/* Highlight block */
+.markvault-block-highlight.markvault-block-yellow { background-color: #FACC1522; border-left: 3px solid #FACC15; }
+.markvault-block-highlight.markvault-block-green  { background-color: #4ADE8022; border-left: 3px solid #4ADE80; }
+.markvault-block-highlight.markvault-block-blue   { background-color: #60A5FA22; border-left: 3px solid #60A5FA; }
+.markvault-block-highlight.markvault-block-pink   { background-color: #F472B622; border-left: 3px solid #F472B6; }
+.markvault-block-highlight.markvault-block-purple { background-color: #C084FC22; border-left: 3px solid #C084FC; }
+
+/* Bold block */
+.markvault-block-bold.markvault-block-yellow { border-left: 4px solid #FACC15; }
+.markvault-block-bold.markvault-block-green  { border-left: 4px solid #4ADE80; }
+.markvault-block-bold.markvault-block-blue   { border-left: 4px solid #60A5FA; }
+.markvault-block-bold.markvault-block-pink   { border-left: 4px solid #F472B6; }
+.markvault-block-bold.markvault-block-purple { border-left: 4px solid #C084FC; }
+
+/* Underline block */
+.markvault-block-underline.markvault-block-yellow { border-bottom: 2px dashed #FACC15; }
+.markvault-block-underline.markvault-block-green  { border-bottom: 2px dashed #4ADE80; }
+.markvault-block-underline.markvault-block-blue   { border-bottom: 2px dashed #60A5FA; }
+.markvault-block-underline.markvault-block-pink   { border-bottom: 2px dashed #F472B6; }
+.markvault-block-underline.markvault-block-purple { border-bottom: 2px dashed #C084FC; }
+
+/* 块级标注的批注指示器 */
+.markvault-block-note-indicator {
+  position: absolute;
+  top: -6px;
+  right: 8px;
+  font-size: 0.7em;
+  background: var(--background-primary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+  cursor: help;
+  color: var(--text-muted);
+}
+
+/* 拆分标注的连接提示 */
+.markvault-group-gap::after {
+  content: '\2026';  /* … ellipsis character */
+  font-size: 0.75em;
+  color: var(--text-faint);
+  vertical-align: middle;
+  margin: 0 1px;
+}
+
+/* ─── CM6 编辑模式块级装饰 ─── */
+
+/* 编辑模式下的块级标注效果 */
+.markvault-block-line-deco {
+  background-color: var(--markvault-block-bg, #FACC1522);
+  border-left: var(--markvault-block-border, 3px solid #FACC15);
+}
