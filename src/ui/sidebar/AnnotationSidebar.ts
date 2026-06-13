@@ -263,14 +263,8 @@ export class AnnotationSidebar extends ItemView {
           let newContent = content;
 
           for (const ann of annotations) {
-            if (ann.kind === 'block') {
-              newContent = removeBlockAnchor(newContent, ann.uuid);
-            } else if (ann.kind === 'span') {
-              newContent = removeSpanAnchor(newContent, ann.uuid);
-            } else {
-              const result = removeMarkTag(newContent, ann.uuid);
-              if (result) newContent = result.content;
-            }
+            const result = this.removeAnnotationFromContent(newContent, ann);
+            if (result) newContent = result;
           }
 
           if (newContent !== content) {
@@ -292,7 +286,6 @@ export class AnnotationSidebar extends ItemView {
 
       } catch (err) {
         // 🔧 统一回滚：恢复所有备份标注
-        plugin.modifyGuard.releaseNow(this.currentFilePath!);
         console.error('MarkVault: clear all failed, rolling back DB', err);
         let restored = 0;
         for (const [uuid, backup] of backups) {
@@ -1754,6 +1747,23 @@ export class AnnotationSidebar extends ItemView {
     modal.open();
   }
 
+  /**
+   * 根据标注 kind 从 Markdown 内容中移除对应锚点。
+   * 返回清理后的内容；如果未找到锚点则返回 null。
+   */
+  private removeAnnotationFromContent(content: string, annotation: Annotation): string | null {
+    if (annotation.kind === 'block') {
+      const result = removeBlockAnchor(content, annotation.uuid);
+      return result !== content ? result : null;
+    }
+    if (annotation.kind === 'span') {
+      const result = removeSpanAnchor(content, annotation.uuid);
+      return result !== content ? result : null;
+    }
+    const result = removeMarkTag(content, annotation.uuid);
+    return result ? result.content : null;
+  }
+
   private async deleteAnnotationWithConfirm(annotation: Annotation) {
     const confirmed = confirm(`Delete annotation "${annotation.text.substring(0, 50)}..."?`);
     if (!confirmed) return;
@@ -1778,18 +1788,7 @@ export class AnnotationSidebar extends ItemView {
       }
 
       const content = await this.app.vault.read(file);
-      let newContent: string | null = null;
-
-      if (annotation.kind === 'block') {
-        const result = removeBlockAnchor(content, annotation.uuid);
-        if (result !== content) newContent = result;
-      } else if (annotation.kind === 'span') {
-        const result = removeSpanAnchor(content, annotation.uuid);
-        if (result !== content) newContent = result;
-      } else {
-        const result = removeMarkTag(content, annotation.uuid);
-        if (result) newContent = result.content;
-      }
+      const newContent = this.removeAnnotationFromContent(content, annotation);
 
       if (newContent) {
         // 提前关闭同步窗口，避免 vault.modify 触发 onFileOpen 重复 sync
@@ -1811,7 +1810,6 @@ export class AnnotationSidebar extends ItemView {
       new Notice('Annotation deleted', 3000);
       await this.refreshListOnly();
     } catch (err) {
-      plugin.modifyGuard.releaseNow(annotation.filePath);
       console.error('MarkVault: sidebar delete annotation error', err);
       new Notice(
         `Failed to delete annotation: ${err instanceof Error ? err.message : 'unknown error'}`,
