@@ -298,23 +298,36 @@ export function updateMarkTag(
 
     // 更新 color
     if (updates.color !== undefined) {
+      const oldColorMatch = newOpenTag.match(/data-color="([^"]*)"/);
+      const oldColor = oldColorMatch ? oldColorMatch[1] : '';
       newOpenTag = newOpenTag.replace(
         /data-color="[^"]*"/,
         `data-color="${updates.color}"`,
       );
-      // 更新 class 中的颜色部分
-      newOpenTag = newOpenTag.replace(
-        /markvault-\w+(?=\s|")/,
-        `markvault-${updates.color}`,
-      );
+      // 更新 class 中的颜色部分：精确替换旧颜色 class
+      if (oldColor) {
+        newOpenTag = newOpenTag.replace(
+          new RegExp(`markvault-${escapeRegex(oldColor)}(?=\\s|")`, 'g'),
+          `markvault-${updates.color}`,
+        );
+      }
     }
 
     // 更新 type
     if (updates.type !== undefined) {
+      const oldTypeMatch = newOpenTag.match(/data-type="([^"]*)"/);
+      const oldType = oldTypeMatch ? oldTypeMatch[1] : '';
       newOpenTag = newOpenTag.replace(
         /data-type="[^"]*"/,
         `data-type="${updates.type}"`,
       );
+      // 更新 class 中的类型部分
+      if (oldType) {
+        newOpenTag = newOpenTag.replace(
+          new RegExp(`markvault-${escapeRegex(oldType)}(?=\\s|")`, 'g'),
+          `markvault-${updates.type}`,
+        );
+      }
     }
 
     // 更新 note

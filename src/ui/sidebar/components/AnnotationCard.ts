@@ -1,4 +1,4 @@
-import { App, Component, Menu, TFile, MarkdownRenderer } from 'obsidian';
+import { App, Component, Menu, TFile, MarkdownRenderer, MarkdownView } from 'obsidian';
 import type { Annotation } from '../../../types/annotation';
 import { PRESET_COLORS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
@@ -263,6 +263,14 @@ export class AnnotationCard {
 
         plugin.markFileSynced(annotation.filePath);
         await plugin.updateSpanCache(annotation.filePath);
+
+        // 强制所有打开该文件的阅读视图重新渲染
+        this.host.app.workspace.iterateAllLeaves((leaf) => {
+          const view = leaf.view;
+          if (view instanceof MarkdownView && view.file?.path === annotation.filePath && view.previewMode) {
+            view.previewMode.rerender(true);
+          }
+        });
     } catch (err) {
       plugin.modifyGuard.releaseNow(annotation.filePath);
       console.error('MarkVault: quick color change error', err);
