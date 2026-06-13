@@ -366,7 +366,17 @@ export class AnnotationStore {
     // 因此不能再依赖「fileSet.size === 0」判断，而应直接检查 _byFile 是否还存在。
     // 若不存在，说明这是该文件的最后一条标注，需要执行完整清理。
     if (!this._byFile.has(filePath)) {
-      // 文件没有标注了，清理所有关联资源
+      // 文件没有标注了，清理所有关联资源。
+      // 关键顺序：先删除 shard，再清理内存/index。
+      // 这样即使崩溃，重启后 preload 发现 shard 缺失会清理 index 孤儿条目，
+      // 避免已删除的标注重启复活。
+      const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
+      try {
+        await this.adapter.remove(shardPath);
+      } catch {
+        // 文件可能不存在，忽略
+      }
+
       this._loadedFiles.delete(filePath);
       const key = FileEncoder.encodeFilePath(filePath);
       delete this._indexData.entries[key];
@@ -377,14 +387,6 @@ export class AnnotationStore {
       if (timer !== undefined) {
         clearTimeout(timer);
         this._debounceTimers.delete(filePath);
-      }
-
-      // 删除分片文件
-      const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
-      try {
-        await this.adapter.remove(shardPath);
-      } catch {
-        // 文件可能不存在，忽略
       }
 
       // 立即写回 _index.json，防止重启后残留孤儿条目

@@ -3,6 +3,7 @@
  */
 
 import { AnnotationStore } from '../src/db/annotation-store';
+import { FileEncoder } from '../src/db/file-encoder';
 
 // ─── Mock DataAdapter ──────────────────────────────────
 
@@ -143,16 +144,84 @@ async function runTests() {
     if (!v.adapter.files.has('.obsidian/plugins/markvault-js/_meta.json')) throw new Error('no meta');
   });
 
-  await test('lazy load from shard', async () => {
+  await test('preloaded from shard on initialize', async () => {
     const v = createMockVault();
     const s1 = new AnnotationStore(); s1.init(v as any); await s1.initialize();
     await s1.addAnnotation(makeAnn({ uuid: 'll1', filePath: 'notes/lazy.md' }));
     await s1.flushAll();
 
+    // Phase 2: initialize() now preloads all shards, so annotation is available immediately
     const s2 = new AnnotationStore(); s2.init(v as any); await s2.initialize();
-    if (s2.getAnnotationByUuid('ll1')) throw new Error('should not be loaded yet');
-    await s2.ensureFileLoaded('notes/lazy.md');
-    if (!s2.getAnnotationByUuid('ll1')) throw new Error('should be loaded from shard');
+    if (!s2.getAnnotationByUuid('ll1')) throw new Error('should be preloaded from shard');
+  });
+
+  await test('delete last annotation removes shard and index entry', async () => {
+    const v = createMockVault();
+    const s = new AnnotationStore(); s.init(v as any); await s.initialize();
+    const filePath = 'notes/last.md';
+    await s.addAnnotation(makeAnn({ uuid: 'last1', filePath }));
+    await s.flushAll();
+
+    const shardPath = FileEncoder.getShardPath('.obsidian/plugins/markvault-js', filePath);
+    if (!v.adapter.files.has(shardPath)) throw new Error('shard should exist before delete');
+
+    await s.deleteAnnotation('last1');
+    if (s.getAnnotationByUuid('last1')) throw new Error('should be deleted from memory');
+    if (s.getAnnotationsForFile(filePath).length !== 0) throw new Error('should be removed from file index');
+
+    // flushAll should not recreate shard (no annotations left)
+    await s.flushAll();
+    if (v.adapter.files.has(shardPath)) throw new Error('shard should be removed after last annotation deleted');
+    const indexData = JSON.parse(v.adapter.files.get('.obsidian/plugins/markvault-js/_index.json')!);
+    const entryKey = Object.keys(indexData.entries).find(k => indexData.entries[k].filePath === filePath);
+    if (entryKey && indexData.entries[entryKey]) throw new Error('index entry should be removed');
+  });
+
+  await test('deleted annotation stays deleted after reinitialize', async () => {
+    const v = createMockVault();
+    const s1 = new AnnotationStore(); s1.init(v as any); await s1.initialize();
+    const filePath = 'notes/reinit.md';
+    await s1.addAnnotation(makeAnn({ uuid: 're1', filePath }));
+    await s1.addAnnotation(makeAnn({ uuid: 're2', filePath }));
+    await s1.deleteAnnotation('re1');
+    await s1.deleteAnnotation('re2');
+    await s1.flushAll();
+
+    const s2 = new AnnotationStore(); s2.init(v as any); await s2.initialize();
+    if (s2.getAnnotationByUuid('re1') || s2.getAnnotationByUuid('re2')) throw new Error('annotations should not resurrect');
+    if (s2.getAnnotationsForFile(filePath).length !== 0) throw new Error('file index should be empty');
+  });
+
+  await test('deleteAnnotationsForFile removes all annotations and shard', async () => {
+    const v = createMockVault();
+    const s = new AnnotationStore(); s.init(v as any); await s.initialize();
+    const filePath = 'notes/bulk.md';
+    await s.addAnnotation(makeAnn({ uuid: 'b1', filePath }));
+    await s.addAnnotation(makeAnn({ uuid: 'b2', filePath }));
+    await s.flushAll();
+
+    const deleted = await s.deleteAnnotationsForFile(filePath);
+    if (deleted !== 2) throw new Error(`expected 2 deleted, got ${deleted}`);
+    if (s.getAnnotationByUuid('b1') || s.getAnnotationByUuid('b2')) throw new Error('annotations should be deleted');
+
+    const s2 = new AnnotationStore(); s2.init(v as any); await s2.initialize();
+    if (s2.getAnnotationByUuid('b1') || s2.getAnnotationByUuid('b2')) throw new Error('annotations should not resurrect after reinitialize');
+  });
+
+  await test('concurrent delete of last two annotations', async () => {
+    const v = createMockVault();
+    const s = new AnnotationStore(); s.init(v as any); await s.initialize();
+    const filePath = 'notes/concurrent.md';
+    await s.addAnnotation(makeAnn({ uuid: 'c1', filePath }));
+    await s.addAnnotation(makeAnn({ uuid: 'c2', filePath }));
+    await s.flushAll();
+
+    await Promise.all([s.deleteAnnotation('c1'), s.deleteAnnotation('c2')]);
+    if (s.getAnnotationByUuid('c1') || s.getAnnotationByUuid('c2')) throw new Error('both annotations should be deleted');
+    if (s.getAnnotationsForFile(filePath).length !== 0) throw new Error('file index should be empty');
+
+    const s2 = new AnnotationStore(); s2.init(v as any); await s2.initialize();
+    if (s2.getAnnotationByUuid('c1') || s2.getAnnotationByUuid('c2')) throw new Error('annotations should not resurrect');
   });
 
   console.log(`\n📊 Results: ${passed} passed, ${failed} failed, ${passed + failed} total\n`);
