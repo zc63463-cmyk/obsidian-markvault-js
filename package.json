@@ -1,6 +1,6 @@
 {
   "name": "obsidian-markvault",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "description": "Powerful annotation plugin for Obsidian: highlights, bold, underline with notes, tags, and sidebar management.",
   "main": "main.js",
   "scripts": {
