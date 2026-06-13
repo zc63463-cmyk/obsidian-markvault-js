@@ -459,36 +459,29 @@ export class AnnotationModal extends Modal {
     // ① 从 AnnotationStore 删除
     await deleteAnnotation(this.annotation.uuid);
 
-    // ② 从 Markdown 移除标注
+    // ② 从 Markdown 移除标注（使用 vault.process 原子读写）
     const file = this.app.vault.getAbstractFileByPath(this.annotation.filePath);
     if (file instanceof TFile) {
-      const content = await this.app.vault.read(file);
-      let newContent: string | null = null;
-
-      if (this.annotation.kind === 'span') {
-        const result = removeSpanAnchor(content, this.annotation.uuid);
-        if (result !== content) newContent = result;
-      } else if (this.annotation.kind === 'block') {
-        const result = removeBlockAnchor(content, this.annotation.uuid);
-        if (result !== content) newContent = result;
-      } else {
-        const result = removeMarkTag(content, this.annotation.uuid);
-        if (result) newContent = result.content;
-      }
-
-      if (newContent) {
-        this.plugin.modifyGuard.acquire(this.annotation.filePath);
-        try {
-          await this.app.vault.modify(file, newContent);
-          console.log(`MarkVault modal: removed annotation ${this.annotation.uuid} from markdown`);
-        } catch (mdErr) {
-          // 🔧 P0 修复：MD 写入失败，回滚 DB（重新添加标注）
-          console.error(`MarkVault modal: MD removal failed, rolling back DB for ${this.annotation.uuid}`, mdErr);
-          await addAnnotation(backup);
-          throw mdErr; // 传播错误，阻止 onDelete 回调
-        } finally {
-          this.plugin.modifyGuard.release(this.annotation.filePath);
-        }
+      this.plugin.modifyGuard.acquire(this.annotation.filePath);
+      try {
+        await this.app.vault.process(file, (content) => {
+          if (this.annotation.kind === 'span') {
+            return removeSpanAnchor(content, this.annotation.uuid);
+          }
+          if (this.annotation.kind === 'block') {
+            return removeBlockAnchor(content, this.annotation.uuid);
+          }
+          const result = removeMarkTag(content, this.annotation.uuid);
+          return result ? result.content : content;
+        });
+        console.log(`MarkVault modal: removed annotation ${this.annotation.uuid} from markdown`);
+      } catch (processErr) {
+        // 🔧 P0 修复：MD 写入失败，回滚 DB（重新添加标注）
+        console.error(`MarkVault modal: MD removal failed, rolling back DB for ${this.annotation.uuid}`, processErr);
+        await addAnnotation(backup);
+        throw processErr; // 传播错误，阻止 onDelete 回调
+      } finally {
+        this.plugin.modifyGuard.release(this.annotation.filePath);
       }
     }
 

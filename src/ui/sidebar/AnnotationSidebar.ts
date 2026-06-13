@@ -257,36 +257,38 @@ export class AnnotationSidebar extends ItemView {
         console.log(`MarkVault: clear all — ${dbDeleted} DB annotations deleted`);
 
         // ── ② 清理 MD ──
+        // 使用 vault.process 原子读写，避免 read+modify 之间文件状态变化导致失败
         const file = this.app.vault.getAbstractFileByPath(this.currentFilePath);
         if (file instanceof TFile) {
-          const content = await this.app.vault.read(file);
-          let newContent = content;
-
-          for (const ann of annotations) {
-            const result = this.removeAnnotationFromContent(newContent, ann);
-            if (result) newContent = result;
-          }
-
-          if (newContent !== content) {
-            plugin.modifyGuard.acquire(this.currentFilePath);
-            try {
-              console.log(`MarkVault: clear all — writing ${content.length - newContent.length} bytes removed`);
-              await this.app.vault.modify(file, newContent);
-            } catch (modifyErr) {
-              // 首次 modify 失败，短暂等待后重试一次（处理文件瞬态锁定）
-              console.warn('MarkVault: clear all — vault.modify failed, retrying in 200ms', modifyErr);
-              await new Promise(r => setTimeout(r, 200));
-              await this.app.vault.modify(file, newContent);
-            } finally {
-              plugin.modifyGuard.release(this.currentFilePath);
+          const stripAnchors = (content: string): string => {
+            let newContent = content;
+            for (const ann of annotations) {
+              const result = this.removeAnnotationFromContent(newContent, ann);
+              if (result) newContent = result;
             }
-            // vault.modify 完成后再次延长冷却期，覆盖元数据重解析耗时
-            plugin.markFileSynced(this.currentFilePath);
-            console.log(`MarkVault: clear all — MD cleaned`);
-          } else {
-            console.warn('MarkVault: clear all — markdown content unchanged, skipping vault.modify');
+            return newContent;
+          };
+
+          plugin.modifyGuard.acquire(this.currentFilePath);
+          try {
+            console.log('MarkVault: clear all — calling vault.process');
+            const written = await this.app.vault.process(file, stripAnchors);
+            if (written.length === file.stat.size) {
+              console.warn('MarkVault: clear all — markdown content unchanged after strip');
+            } else {
+              console.log(`MarkVault: clear all — removed ${file.stat.size - written.length} bytes`);
+            }
+          } catch (processErr) {
+            // 首次 process 失败，短暂等待后重试一次（处理文件瞬态锁定）
+            console.warn('MarkVault: clear all — vault.process failed, retrying in 200ms', processErr);
+            await new Promise(r => setTimeout(r, 200));
+            await this.app.vault.process(file, stripAnchors);
+          } finally {
+            plugin.modifyGuard.release(this.currentFilePath);
           }
-          // 🔧 P0 修复：MD 未变化时不视为错误（可能锚点已不存在），继续完成清理
+          // vault.process 完成后再次延长冷却期，覆盖元数据重解析耗时
+          plugin.markFileSynced(this.currentFilePath);
+          console.log(`MarkVault: clear all — MD cleaned`);
         } else {
           console.warn('MarkVault: clear all — source file not found, DB annotations deleted only');
         }
@@ -775,7 +777,6 @@ export class AnnotationSidebar extends ItemView {
       type BatchDeleteFileEntry = {
         file: TFile;
         originalContent: string;
-        newContent: string;
         items: Array<{ uuid: string; kind: string }>;
         backups: Map<string, Annotation>;
       };
@@ -783,7 +784,7 @@ export class AnnotationSidebar extends ItemView {
       const byFile = new Map<string, BatchDeleteFileEntry>();
       const missingUuids: string[] = [];
 
-      // ── Phase 1: 收集数据并预计算每文件的 MD 变更 ──
+      // ── Phase 1: 收集数据 ──
       for (const uuid of this.selectedUuids) {
         const annotation = await getAnnotationByUuid(uuid);
         if (!annotation) {
@@ -805,7 +806,6 @@ export class AnnotationSidebar extends ItemView {
           entry = {
             file,
             originalContent: content,
-            newContent: content,
             items: [],
             backups: new Map(),
           };
@@ -816,20 +816,6 @@ export class AnnotationSidebar extends ItemView {
         entry.items.push({ uuid, kind: annotation.kind || 'inline' });
       }
 
-      // 预计算每个文件清理锚点后的内容
-      for (const entry of byFile.values()) {
-        for (const item of entry.items) {
-          if (item.kind === 'block') {
-            entry.newContent = removeBlockAnchor(entry.newContent, item.uuid);
-          } else if (item.kind === 'span') {
-            entry.newContent = removeSpanAnchor(entry.newContent, item.uuid);
-          } else {
-            const result = removeMarkTag(entry.newContent, item.uuid);
-            if (result) entry.newContent = result.content;
-          }
-        }
-      }
-
       // ── Phase 2: 统一删除 DB ──
       for (const entry of byFile.values()) {
         for (const uuid of entry.backups.keys()) {
@@ -837,21 +823,32 @@ export class AnnotationSidebar extends ItemView {
         }
       }
 
-      // ── Phase 3: 应用 MD 修改；任意文件失败则全量回滚 ──
+      // ── Phase 3: 应用 MD 修改（vault.process 原子读写）；任意文件失败则全量回滚 ──
       const modifiedFiles: string[] = [];
       let hasFailure = false;
       let lastError: unknown = null;
 
       for (const [filePath, entry] of byFile) {
-        if (entry.newContent === entry.originalContent) continue;
-
         plugin.markFileSynced(filePath);
         plugin.modifyGuard.acquire(filePath);
         try {
-          await this.app.vault.modify(entry.file, entry.newContent);
+          await this.app.vault.process(entry.file, (content) => {
+            let newContent = content;
+            for (const item of entry.items) {
+              if (item.kind === 'block') {
+                newContent = removeBlockAnchor(newContent, item.uuid);
+              } else if (item.kind === 'span') {
+                newContent = removeSpanAnchor(newContent, item.uuid);
+              } else {
+                const result = removeMarkTag(newContent, item.uuid);
+                if (result) newContent = result.content;
+              }
+            }
+            return newContent;
+          });
           modifiedFiles.push(filePath);
-        } catch (mdErr) {
-          lastError = mdErr;
+        } catch (processErr) {
+          lastError = processErr;
           hasFailure = true;
           break;
         } finally {
@@ -871,12 +868,13 @@ export class AnnotationSidebar extends ItemView {
           }
         }
 
-        // 回滚 MD：将已成功修改的文件恢复为原始内容
+        // 回滚 MD：将已成功修改的文件恢复为原始内容（同样使用 process 避免 mtime 冲突）
         for (const filePath of modifiedFiles) {
           const entry = byFile.get(filePath)!;
+          const originalContent = entry.originalContent;
           plugin.modifyGuard.acquire(filePath);
           try {
-            await this.app.vault.modify(entry.file, entry.originalContent);
+            await this.app.vault.process(entry.file, () => originalContent);
           } catch (restoreErr) {
             console.error(`MarkVault: batch delete MD restore failed for ${filePath}`, restoreErr);
           } finally {
@@ -1807,25 +1805,30 @@ export class AnnotationSidebar extends ItemView {
         return;
       }
 
-      const content = await this.app.vault.read(file);
-      const newContent = this.removeAnnotationFromContent(content, annotation);
+      // 使用 vault.process 原子读写，避免 read+modify 之间文件状态变化导致失败
+      // 提前关闭同步窗口，避免 vault.process 触发 onFileOpen 重复 sync
+      plugin.markFileSynced(annotation.filePath);
+      plugin.modifyGuard.acquire(annotation.filePath);
+      let mdChanged = false;
+      try {
+        const written = await this.app.vault.process(file, (content) => {
+          const result = this.removeAnnotationFromContent(content, annotation);
+          return result ?? content;
+        });
+        mdChanged = written.length !== file.stat.size;
+      } catch (processErr) {
+        // 🔧 P0 修复：MD 失败，回滚 DB
+        console.error('MarkVault: sidebar delete MD error, rolling back', processErr);
+        await addAnnotation(backup);
+        throw processErr;
+      } finally {
+        plugin.modifyGuard.release(annotation.filePath);
+      }
+      // vault.process 完成后再次延长冷却期，覆盖元数据重解析耗时
+      plugin.markFileSynced(annotation.filePath);
 
-      if (newContent) {
-        // 提前关闭同步窗口，避免 vault.modify 触发 onFileOpen 重复 sync
-        plugin.markFileSynced(annotation.filePath);
-        plugin.modifyGuard.acquire(annotation.filePath);
-        try {
-          await this.app.vault.modify(file, newContent);
-        } catch (mdErr) {
-          // 🔧 P0 修复：MD 失败，回滚 DB
-          console.error('MarkVault: sidebar delete MD error, rolling back', mdErr);
-          await addAnnotation(backup);
-          throw mdErr;
-        } finally {
-          plugin.modifyGuard.release(annotation.filePath);
-        }
-        // vault.modify 完成后再次延长冷却期，覆盖元数据重解析耗时
-        plugin.markFileSynced(annotation.filePath);
+      if (!mdChanged) {
+        console.warn('MarkVault: sidebar delete — markdown content unchanged');
       }
 
       await plugin.updateSpanCache(annotation.filePath);
