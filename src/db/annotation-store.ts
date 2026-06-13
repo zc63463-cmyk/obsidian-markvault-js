@@ -358,23 +358,20 @@ export class AnnotationStore {
 
     const filePath = ann.filePath;
 
-    // 移除索引
+    // 移除索引（_removeFromIndex 会同步更新 _byFile 等倒排索引）
     this._removeFromIndex(uuid);
     this._byUuid.delete(uuid);
 
-    // 从 _byFile 中移除
-    const fileSet = this._byFile.get(filePath);
-    const hadFileEntry = fileSet !== undefined;
-    const wasInFileSet = fileSet?.delete(uuid) ?? false;
-
-    if (fileSet && fileSet.size === 0) {
+    // 🔧 关键修复：_removeFromIndex 会在 fileSet 变空时删除 _byFile 条目。
+    // 因此不能再依赖「fileSet.size === 0」判断，而应直接检查 _byFile 是否还存在。
+    // 若不存在，说明这是该文件的最后一条标注，需要执行完整清理。
+    if (!this._byFile.has(filePath)) {
       // 文件没有标注了，清理所有关联资源
-      this._byFile.delete(filePath);
       this._loadedFiles.delete(filePath);
       const key = FileEncoder.encodeFilePath(filePath);
       delete this._indexData.entries[key];
 
-      // 🔧 审计修复：清除脏数据和防抖计时器，防止残留 flush 重建分片
+      // 清除脏数据和防抖计时器，防止残留 flush 重建分片
       this._dirtyFiles.delete(filePath);
       const timer = this._debounceTimers.get(filePath);
       if (timer !== undefined) {
@@ -390,21 +387,14 @@ export class AnnotationStore {
         // 文件可能不存在，忽略
       }
 
-      // 🔧 P0 修复：立即写回 _index.json，防止重启后残留孤儿条目
+      // 立即写回 _index.json，防止重启后残留孤儿条目
       await this._writeIndexFile();
 
       console.log(`MarkVault: deleted last annotation for file "${filePath}" — shard removed, index updated`);
     } else {
-      // 🔧 P1 修复：即使 fileSet 不存在或不包含 uuid（内存索引不一致），
-      // 也要更新索引并标记 dirty，确保分片文件能正确反映删除
+      // 文件还有其他标注，更新索引并标记 dirty
       this._updateIndexEntry(filePath);
       this._markDirty(filePath);
-
-      if (!hadFileEntry) {
-        console.warn(`MarkVault: deleteAnnotation — fileSet missing for ${filePath}, recovered index entry`);
-      } else if (!wasInFileSet) {
-        console.warn(`MarkVault: deleteAnnotation — uuid ${uuid} not in fileSet for ${filePath}, recovered index entry`);
-      }
     }
   }
 
