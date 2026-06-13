@@ -1,6 +1,6 @@
 import { Plugin, MarkdownView, TFile, Notice } from 'obsidian';
-import type { MarkVaultSettings, AnnotationType, PresetColorId, Annotation } from './types/annotation';
-import { DEFAULT_SETTINGS, PRESET_COLORS } from './types/annotation';
+import type { MarkVaultSettings, AnnotationType, Annotation } from './types/annotation';
+import { DEFAULT_SETTINGS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
@@ -12,9 +12,11 @@ import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { addAnnotation } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
-import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, buildSpanAnchor, buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
+import { buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
 import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
 import { ModifyGuard } from './utils/modify-guard';
+import { ReadingModeToolbar } from './ui/reading/ReadingModeToolbar';
+import { ReadingModeClickDelegate } from './ui/reading/ReadingModeClickDelegate';
 
 export default class MarkVaultPlugin extends Plugin {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
@@ -42,6 +44,10 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 当前打开的 AnnotationModal 实例（按 uuid 索引）
   // 用于在文件被删除/重命名时自动关闭对应 Modal
   private _activeAnnotationModals = new Map<string, AnnotationModal>();
+
+  // 🆕 阅读模式相关模块
+  private readingToolbar: ReadingModeToolbar | null = null;
+  private readingClickDelegate: ReadingModeClickDelegate | null = null;
 
   // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
@@ -428,76 +434,21 @@ export default class MarkVaultPlugin extends Plugin {
     }
 
     // 🆕 全局事件委托：捕获阅读模式下对 markvault 标注的点击
-    // 这是阅读模式点击的【唯一机制】—— post-processor 只负责视觉样式
-    // 使用捕获阶段（capture: true），优先于 Highlightr-Plus 等插件的 bubble-phase handler
     try {
-      this.registerDomEvent(document, 'click', (e: MouseEvent) => {
-        const target = e.target as HTMLElement;
-
-        // 1. 检查 <mark> 标注（行内标注）
-        let el: HTMLElement | null = target;
-        let foundMark: HTMLElement | null = null;
-        while (el && el !== document.body) {
-          if (el.tagName === 'MARK' && el.hasAttribute('data-uuid')) {
-            foundMark = el;
-            break;
-          }
-          el = el.parentElement;
-        }
-
-        // 2. 如果不是 <mark>，检查块级/span 标注（.markvault-block-mark[data-uuid]）
-        if (!foundMark) {
-          el = target;
-          while (el && el !== document.body) {
-            if (el.hasClass?.('markvault-block-mark') && el.hasAttribute('data-uuid')) {
-              foundMark = el;
-              break;
-            }
-            el = el.parentElement;
-          }
-        }
-
-        // 3. 检查 span 标注的 CM6 装饰（data-kind="span"）
-        if (!foundMark) {
-          el = target;
-          while (el && el !== document.body) {
-            if (el.getAttribute?.('data-kind') === 'span' && el.hasAttribute('data-uuid')) {
-              foundMark = el;
-              break;
-            }
-            el = el.parentElement;
-          }
-        }
-
-        if (!foundMark) return; // 不是点击标注，忽略
-
-        // 🔧 关键修复：判断是否在 CM6 编辑区域中
-        // CM6 编辑器的标志：最近的 .cm-editor 祖先
-        const isInCmEditor = foundMark.closest('.cm-editor') !== null;
-
-        if (isInCmEditor) {
-          // 在 CM6 编辑区域中，不拦截点击（由 CM6 WidgetType 处理）
-          return;
-        }
-
-        // 在阅读模式或非编辑区域中，拦截点击并打开编辑 Modal
-        const uuid = foundMark.getAttribute('data-uuid');
-        if (uuid) {
-          // 在 capture 阶段拦截，阻止 Highlightr-Plus 等插件处理此点击
-          e.stopImmediatePropagation();
-          e.preventDefault();
-          console.log(`MarkVault: global capture handler caught click for uuid=${uuid}`);
-          this.openAnnotationModal(uuid);
-          return;
-        }
-      }, { capture: true });
+      this.readingClickDelegate = new ReadingModeClickDelegate(this, {
+        onOpenAnnotation: (uuid) => this.openAnnotationModal(uuid),
+      });
+      this.readingClickDelegate.setup();
     } catch (err) {
-      console.error('MarkVault: failed to register global click delegate', err);
+      console.error('MarkVault: failed to register reading mode click delegate', err);
     }
 
     // ── 阅读模式：选中文本浮动工具条 ──
     try {
-      this.setupReadingModeToolbar();
+      this.readingToolbar = new ReadingModeToolbar(this, {
+        createReadingAnnotation: (req) => this.createReadingAnnotation(req.selectedText, req.color, req.type, req.kind),
+      });
+      this.readingToolbar.setup();
     } catch (err) {
       console.error('MarkVault: failed to register reading mode toolbar', err);
     }
@@ -508,7 +459,8 @@ export default class MarkVaultPlugin extends Plugin {
   async onunload() {
     console.log('MarkVault: unloading plugin');
     try {
-      this.hideReadingToolbar();
+      this.readingToolbar?.destroy();
+      this.readingClickDelegate?.destroy();
       this.modifyGuard.releaseAll();
       await annotationStore.shutdown();
     } catch (err) {
@@ -915,12 +867,12 @@ export default class MarkVaultPlugin extends Plugin {
         this.app,
         this,
         annotation,
-        async (updated) => {
+        async (_updated) => {
           // 保存回调
           this.unmarkAnnotationActive(uuid, annotation.filePath);
           await this.refreshSidebar();
         },
-        async (deletedUuid) => {
+        async (_deletedUuid) => {
           // 🔧 审计修复：Modal 已处理 MD 移除，回调只做清理
           this.unmarkAnnotationActive(uuid, annotation.filePath);
           // 标记文件已同步（Modal 中 modifyGuard 已释放）
@@ -948,172 +900,7 @@ export default class MarkVaultPlugin extends Plugin {
     }
   }
 
-  // ─── 阅读模式浮动工具条 ──────────────────────
-
-  private _readingToolbar: HTMLElement | null = null;
-  private _readingToolbarTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  /** 注册阅读模式选中文本事件 */
-  private setupReadingModeToolbar() {
-    this.registerDomEvent(document, 'mouseup', (e: MouseEvent) => {
-      // 忽略在工具栏自身上的点击
-      if (this._readingToolbar && this._readingToolbar.contains(e.target as Node)) return;
-
-      // 延迟一帧，等 selection 更新
-      if (this._readingToolbarTimeout) clearTimeout(this._readingToolbarTimeout);
-      this._readingToolbarTimeout = setTimeout(() => this.handleReadingSelection(e), 50);
-    });
-
-    // 滚动或窗口大小变化时隐藏工具栏
-    this.registerDomEvent(document, 'selectionchange', () => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) {
-        this.hideReadingToolbar();
-      }
-    });
-  }
-
-  /** 处理阅读模式文本选择 */
-  private handleReadingSelection(e: MouseEvent) {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-      this.hideReadingToolbar();
-      return;
-    }
-
-    // 检查是否在 CM6 编辑器中（编辑模式有自己的右键菜单）
-    const target = e.target as HTMLElement;
-    if (target.closest('.cm-editor') || target.closest('.cm-content')) return;
-    if (target.closest('.markdown-source-view')) return;
-
-    // 必须选中了文本
-    const range = sel.getRangeAt(0);
-    const text = sel.toString().trim();
-    if (text.length === 0) return;
-
-    // 检查是否在预览区域（阅读模式）
-    if (!target.closest('.markdown-preview-view') && !target.closest('.markdown-reading-view')) {
-      this.hideReadingToolbar();
-      return;
-    }
-
-    this.showReadingToolbar(range, text);
-  }
-
-  /** 显示浮动工具条 */
-  private showReadingToolbar(range: Range, selectedText: string) {
-    this.hideReadingToolbar();
-
-    const toolbar = document.createElement('div');
-    toolbar.className = 'markvault-reading-toolbar';
-    toolbar.setAttribute('data-markvault', 'reading-toolbar');
-
-    toolbar.style.position = 'absolute';
-    toolbar.style.zIndex = '9999';
-
-    // 当前选中的标注类型
-    let currentType: AnnotationType = 'highlight';
-    let currentKind: Annotation['kind'] = 'inline';
-
-    // ── 左侧：类型选择按钮 ──
-    const typeGroup = document.createElement('div');
-    typeGroup.className = 'markvault-reading-type-group';
-
-    const types: Array<{ type: AnnotationType; label: string; icon: string; kind?: Annotation['kind'] }> = [
-      { type: 'highlight', label: 'Highlight', icon: '🎨' },
-      { type: 'bold', label: 'Bold', icon: 'B' },
-      { type: 'underline', label: 'Underline', icon: 'U̲' },
-      { type: 'highlight', label: 'Block', icon: '⬜', kind: 'block' },
-    ];
-
-    const typeBtns: HTMLElement[] = [];
-    for (const t of types) {
-      const btn = document.createElement('button');
-      btn.className = 'markvault-reading-type-btn';
-      btn.textContent = t.icon;
-      btn.title = t.label;
-      if (t.type === 'highlight' && !t.kind) btn.classList.add('active');
-
-      btn.addEventListener('mousedown', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        currentType = t.type;
-        currentKind = t.kind || 'inline';
-        // 切换 active 状态
-        typeBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-      });
-      typeGroup.appendChild(btn);
-      typeBtns.push(btn);
-    }
-
-    toolbar.appendChild(typeGroup);
-
-    // 分隔线
-    const sep = document.createElement('span');
-    sep.className = 'markvault-reading-toolbar-sep';
-    toolbar.appendChild(sep);
-
-    // ── 右侧：颜色圆点 ──
-    const colorGroup = document.createElement('div');
-    colorGroup.className = 'markvault-reading-color-group';
-
-    for (const c of PRESET_COLORS) {
-      const btn = document.createElement('button');
-      btn.className = 'markvault-reading-color-btn';
-      btn.style.backgroundColor = c.hex;
-      btn.title = `${c.label} (${currentType})`;
-      btn.addEventListener('mousedown', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        this.createReadingAnnotation(selectedText, c.id, currentType, currentKind);
-        this.hideReadingToolbar();
-      });
-      colorGroup.appendChild(btn);
-    }
-
-    toolbar.appendChild(colorGroup);
-
-    document.body.appendChild(toolbar);
-
-    // 定位：选中文本上方
-    const rect = range.getBoundingClientRect();
-    const toolbarHeight = 36; // 预估高度
-    let left = rect.left + rect.width / 2;
-    let top = rect.top - toolbarHeight - 6 + window.scrollY;
-
-    // 如果上方空间不足，放下方
-    if (rect.top < toolbarHeight + 10) {
-      top = rect.bottom + 6 + window.scrollY;
-    }
-
-    toolbar.style.left = `${left}px`;
-    toolbar.style.top = `${top}px`;
-    toolbar.style.transform = this._readingToolbar ? 'translate(-50%, 0)' : 'translate(-50%, 0)';
-
-    this._readingToolbar = toolbar;
-
-    // 动画进入
-    requestAnimationFrame(() => {
-      toolbar.style.opacity = '1';
-      toolbar.style.transform = 'translate(-50%, 0) scale(1)';
-    });
-  }
-
-  /** 隐藏工具条 */
-  private hideReadingToolbar() {
-    if (this._readingToolbar) {
-      const t = this._readingToolbar;
-      t.style.opacity = '0';
-      t.style.transform = 'translate(-50%, 0) scale(0.8)';
-      setTimeout(() => {
-        if (t.parentElement) {
-          t.remove();
-        }
-      }, 150);
-      this._readingToolbar = null;
-    }
-  }
+  // ─── 阅读模式创建标注 ──────────────────────
 
   /** 在阅读模式下创建标注 */
   private async createReadingAnnotation(selectedText: string, color: string, type: AnnotationType = 'highlight', kind: Annotation['kind'] = 'inline') {

@@ -14,13 +14,14 @@
   opacity: 0;
   transform: translate(-50%, 0) scale(0.8);
   transition: opacity 0.15s ease, transform 0.15s ease;
-  pointer-events: auto;
+  pointer-events: none; /* 容器不拦截底层点击，按钮单独开启 */
   white-space: nowrap;
 }
 .markvault-reading-type-group {
   display: flex;
   align-items: center;
   gap: 2px;
+  pointer-events: auto;
 }
 .markvault-reading-type-btn {
   width: 24px;
@@ -60,6 +61,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  pointer-events: auto;
 }
 .markvault-reading-color-btn {
   width: 18px;
