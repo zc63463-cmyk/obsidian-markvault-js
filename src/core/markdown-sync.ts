@@ -272,9 +272,18 @@ function computeOffsetInPlainContent(markdownContent: string, markTagOffset: num
 }
 
 /**
+ * 获取用于偏移恢复的纯文本（移除 <mark> 标签和块级/span 锚点）
+ */
+export function getPlainTextForOffsetRecovery(markdownContent: string): string {
+  return markdownContent
+    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+}
+
+/**
  * 从纯文本内容中提取上下文
  */
-function extractContextFromContent(
+export function extractContextFromContent(
   fullText: string,
   startOffset: number,
   text: string,

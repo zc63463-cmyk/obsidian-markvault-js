@@ -4,9 +4,10 @@ import { DEFAULT_SETTINGS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
-import { syncFromMarkdown } from './core/markdown-sync';
+import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from './core/markdown-sync';
 import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
+import { batchRecoverOffsets } from './core/offset-recovery';
 import { AnnotationModal } from './ui/editor/annotation-modal';
 import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { addAnnotation } from './db/annotation-repo';
@@ -553,6 +554,89 @@ export default class MarkVaultPlugin extends Plugin {
     } catch (err) {
       console.error('MarkVault: error in lightweight file open sync', file.path, err);
     }
+  }
+
+  /**
+   * 强制同步当前文件：
+   * 1. 从 Markdown 同步元数据（note / tags / color / type / fields）
+   * 2. 对行内标注执行偏移恢复，修正因外部编辑导致的偏移漂移
+   * 3. 更新 span 缓存并刷新侧边栏
+   */
+  async forceSyncFile(
+    filePath: string,
+  ): Promise<{ added: number; updated: number; recovered: number; failed: number }> {
+    if (!this._storeReady) {
+      throw new Error('MarkVault: annotation database not initialized');
+    }
+
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile)) {
+      throw new Error(`MarkVault: file not found: ${filePath}`);
+    }
+
+    // 防重入：文件正在被插件修改或 Modal 编辑中时跳过
+    if (this.modifyGuard.isLocked(filePath)) {
+      throw new Error('MarkVault: file is currently being modified by the plugin');
+    }
+    if (this._activeAnnotationFilePaths.has(filePath)) {
+      throw new Error('MarkVault: an annotation modal is open for this file');
+    }
+
+    let added = 0;
+    let updated = 0;
+    let recovered = 0;
+    let failed = 0;
+
+    this.modifyGuard.acquire(filePath);
+    try {
+      const content = await this.app.vault.read(file);
+
+      // 1. 元数据同步
+      const syncResult = await syncFromMarkdown(content, filePath);
+      added = syncResult.added;
+      updated = syncResult.updated;
+
+      // 2. 行内标注偏移恢复
+      const plainText = getPlainTextForOffsetRecovery(content);
+      const annotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
+        (a) => !a.kind || a.kind === 'inline',
+      );
+
+      if (annotations.length > 0 && plainText.length > 0) {
+        const recoverResults = batchRecoverOffsets(plainText, annotations);
+        for (const r of recoverResults) {
+          const ann = annotations.find((a) => a.uuid === r.uuid);
+          if (!ann) continue;
+
+          const offsetChanged = r.startOffset !== ann.startOffset || r.endOffset !== ann.endOffset;
+          if (offsetChanged) {
+            const { contextBefore, contextAfter } = extractContextFromContent(
+              plainText,
+              r.startOffset,
+              ann.text,
+              this.settings.contextWindowSize,
+            );
+            await annotationStore.updateAnnotation(r.uuid, {
+              startOffset: r.startOffset,
+              endOffset: r.endOffset,
+              contextBefore,
+              contextAfter,
+            });
+            recovered++;
+          }
+        }
+        failed = annotations.length - recoverResults.length;
+      }
+
+      // 3. 刷新缓存与 UI
+      this.markFileSynced(filePath);
+      await this.updateSpanCache(filePath);
+      this.scheduleSidebarRefresh();
+    } finally {
+      this.modifyGuard.release(filePath);
+    }
+
+    return { added, updated, recovered, failed };
   }
 
   /** 调度侧边栏刷新，使用 requestAnimationFrame 并去重 */

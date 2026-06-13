@@ -14,6 +14,7 @@ export interface CurrentFileToolbarHost {
   getPluginInstance(): MarkVaultPluginInterface | null;
   removeAnnotationFromContent(content: string, annotation: Annotation): string | null;
   onCleared(filePath: string): Promise<void>;
+  syncCurrentFile(filePath: string): Promise<{ added: number; updated: number; recovered: number; failed: number }>;
 }
 
 export class CurrentFileToolbar {
@@ -30,6 +31,20 @@ export class CurrentFileToolbar {
     const fileName = currentFilePath.split('/').pop() || currentFilePath;
     toolbar.createSpan({ cls: 'markvault-file-name', text: `📄 ${fileName}` });
 
+    // 同步当前文件按钮
+    const syncBtn = toolbar.createEl('button', {
+      cls: 'markvault-sync-file-btn',
+      title: 'Sync annotation offsets for this file',
+    });
+    syncBtn.createSpan({ text: '🔄', cls: 'markvault-sync-icon' });
+    syncBtn.createSpan({ text: 'Sync', cls: 'markvault-sync-label' });
+
+    syncBtn.addEventListener('click', async () => {
+      const fp = this.host.getCurrentFilePath();
+      if (!fp) return;
+      await this.handleSync(fp);
+    });
+
     // 清空标注按钮
     const clearBtn = toolbar.createEl('button', {
       cls: 'markvault-clear-file-btn',
@@ -44,6 +59,30 @@ export class CurrentFileToolbar {
       const name = fp.split('/').pop() || fp;
       await this.handleClearAll(fp, name);
     });
+  }
+
+  private async handleSync(filePath: string) {
+    const plugin = this.host.getPluginInstance();
+    if (!plugin) return;
+
+    const notice = new Notice('MarkVault: syncing annotations...', 0);
+    try {
+      const result = await this.host.syncCurrentFile(filePath);
+      notice.hide();
+
+      const parts = [
+        result.added > 0 ? `${result.added} added` : '',
+        result.updated > 0 ? `${result.updated} updated` : '',
+        result.recovered > 0 ? `${result.recovered} offsets recovered` : '',
+        result.failed > 0 ? `${result.failed} failed` : '',
+      ].filter(Boolean);
+      const msg = parts.length > 0 ? parts.join(', ') : 'no changes detected';
+      new Notice(`MarkVault: synced (${msg})`, 4000);
+    } catch (err) {
+      notice.hide();
+      const msg = err instanceof Error ? err.message : String(err);
+      new Notice(`MarkVault: sync failed — ${msg}`, 5000);
+    }
   }
 
   private async handleClearAll(filePath: string, fileName: string) {

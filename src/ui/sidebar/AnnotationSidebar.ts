@@ -68,6 +68,11 @@ export class AnnotationSidebar extends ItemView {
       getPluginInstance: () => this.pluginInstance,
       removeAnnotationFromContent: (content, ann) => this.removeAnnotationFromContent(content, ann),
       onCleared: (filePath) => this.onFileCleared(filePath),
+      syncCurrentFile: async (filePath) => {
+        const plugin = this.pluginInstance;
+        if (!plugin) throw new Error('MarkVault: plugin not initialized');
+        return plugin.forceSyncFile(filePath);
+      },
     });
     this.filterBar = new FilterBar({
       filter: this.filter,

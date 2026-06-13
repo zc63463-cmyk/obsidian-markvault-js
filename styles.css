@@ -1249,3 +1249,32 @@
 .markvault-clear-label {
   font-weight: 500;
 }
+
+/* 同步当前文件按钮 */
+.markvault-sync-file-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--interactive-accent, #4ade80);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--interactive-accent, #4ade80);
+  transition: background 0.15s;
+  margin-left: auto;
+}
+
+.markvault-sync-file-btn:hover {
+  background: var(--interactive-accent, #4ade80);
+  color: #fff;
+}
+
+.markvault-sync-icon {
+  font-size: 13px;
+}
+
+.markvault-sync-label {
+  font-weight: 500;
+}

@@ -650,8 +650,20 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
     icon: 'sync',
     editorCallback: async (_editor: Editor, view: MarkdownView) => {
       if (view.file) {
-        await plugin.onFileOpen(view.file);
-        new Notice('MarkVault: annotations synced', 3000);
+        try {
+          const result = await plugin.forceSyncFile(view.file.path);
+          const parts = [
+            result.added > 0 ? `${result.added} added` : '',
+            result.updated > 0 ? `${result.updated} updated` : '',
+            result.recovered > 0 ? `${result.recovered} offsets recovered` : '',
+            result.failed > 0 ? `${result.failed} failed` : '',
+          ].filter(Boolean);
+          const msg = parts.length > 0 ? parts.join(', ') : 'no changes detected';
+          new Notice(`MarkVault: synced (${msg})`, 4000);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          new Notice(`MarkVault: sync failed — ${msg}`, 5000);
+        }
       }
     },
   });
