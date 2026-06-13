@@ -1,5 +1,5 @@
 import { ItemView, WorkspaceLeaf, MarkdownView, TFile, Component, Menu, MarkdownRenderer, Notice } from 'obsidian';
-import type { Annotation, AnnotationFilter, AnnotationType } from '../../types/annotation';
+import type { Annotation, AnnotationFilter } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
 import {
   getAnnotationsForFile,

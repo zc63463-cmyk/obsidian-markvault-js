@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, MarkdownRenderer, Component, Notice } from 'obsidian';
+import { Plugin, MarkdownView, TFile, Notice } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, PresetColorId, Annotation } from './types/annotation';
 import { DEFAULT_SETTINGS, PRESET_COLORS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
@@ -12,8 +12,8 @@ import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { addAnnotation } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
-import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor, buildSpanAnchor, buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
-import { updateSpanCacheForFile, clearSpanCache, type SpanAnnotationData } from './core/highlight-applier';
+import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, buildSpanAnchor, buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
+import { updateSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
 import { ModifyGuard } from './utils/modify-guard';
 
 export default class MarkVaultPlugin extends Plugin {
@@ -1085,6 +1085,9 @@ export default class MarkVaultPlugin extends Plugin {
         return;
       }
 
+      // 统一加锁，分支内部只执行 modify，锁统一在外层 finally 释放
+      this.modifyGuard.acquire(filePath);
+
       if (kind === 'block') {
         // ── 块标注：在选中文本所在块的边界前插入锚点 ──
         // 向前搜索块边界（空行、标题、callout 起始）
@@ -1100,12 +1103,7 @@ export default class MarkVaultPlugin extends Plugin {
 
         // 在块边界插入锚点
         const newContent = content.substring(0, blockStart) + anchor + '\n' + content.substring(blockStart);
-        this.modifyGuard.acquire(filePath);
-        try {
-          await this.app.vault.modify(view.file, newContent);
-        } finally {
-          this.modifyGuard.release(filePath);
-        }
+        await this.app.vault.modify(view.file, newContent);
 
         const annotation: Annotation = {
           uuid,
@@ -1155,12 +1153,7 @@ export default class MarkVaultPlugin extends Plugin {
         const markTag = buildMarkTag(annotation);
 
         const newContent = content.substring(0, idx) + markTag + content.substring(endOffset);
-        this.modifyGuard.acquire(filePath);
-        try {
-          await this.app.vault.modify(view.file, newContent);
-        } finally {
-          this.modifyGuard.release(filePath);
-        }
+        await this.app.vault.modify(view.file, newContent);
 
         annotation.endOffset = startOffset + markTag.length;
         await addAnnotation(annotation);

@@ -1,8 +1,8 @@
 import { annotationStore } from '../db/annotation-store';
 import type { Annotation } from '../types/annotation';
-import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, parseBlockAnchors, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor } from './annotation-parser';
-import { recoverOffsets, batchRecoverOffsets } from './offset-recovery';
-import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation, deleteAnnotation as dbDeleteAnnotation } from '../db/annotation-repo';
+import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor } from './annotation-parser';
+import { batchRecoverOffsets } from './offset-recovery';
+import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation } from '../db/annotation-repo';
 
 /**
  * Markdown ↔ AnnotationStore 双写同步引擎
@@ -294,7 +294,7 @@ function extractContextFromContent(
   return { contextBefore, contextAfter };
 }
 
-export { buildMarkTag, removeMarkTag, updateMarkTag, removeAnyAnchor, updateAnyAnchor, removeSpanAnchor, updateSpanAnchor };
+export { buildMarkTag, removeMarkTag, updateMarkTag, removeSpanAnchor, updateSpanAnchor };
 
 /** 正则特殊字符转义 */
 function escapeRegex(s: string): string {

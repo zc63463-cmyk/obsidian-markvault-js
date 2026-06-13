@@ -1,4 +1,4 @@
-import type { Annotation, MarkAttributes, BlockAnchorAttributes, SpanRange } from '../types/annotation';
+import type { Annotation, MarkAttributes, SpanRange } from '../types/annotation';
 import type { AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
 import { encodeFields, decodeFields } from '../utils/fields';
