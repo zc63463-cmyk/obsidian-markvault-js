@@ -239,10 +239,10 @@ export class AnnotationSidebar extends ItemView {
       // 🔧 先设置冷却，关闭 onFileOpen 同步窗口
       plugin.markFileSynced(this.currentFilePath);
 
-      // 🔧 备份所有标注 + 清理保护状态
+      // 🔧 备份所有标注 + 清理保护状态（深拷贝避免回滚时字段丢失）
       const backups = new Map<string, Annotation>();
       for (const ann of annotations) {
-        backups.set(ann.uuid, { ...ann, tags: [...ann.tags] });
+        backups.set(ann.uuid, JSON.parse(JSON.stringify(ann)));
         plugin.unmarkAnnotationActive(ann.uuid, ann.filePath);
       }
 
@@ -270,6 +270,12 @@ export class AnnotationSidebar extends ItemView {
           if (newContent !== content) {
             plugin.modifyGuard.acquire(this.currentFilePath);
             try {
+              console.log(`MarkVault: clear all — writing ${content.length - newContent.length} bytes removed`);
+              await this.app.vault.modify(file, newContent);
+            } catch (modifyErr) {
+              // 首次 modify 失败，短暂等待后重试一次（处理文件瞬态锁定）
+              console.warn('MarkVault: clear all — vault.modify failed, retrying in 200ms', modifyErr);
+              await new Promise(r => setTimeout(r, 200));
               await this.app.vault.modify(file, newContent);
             } finally {
               plugin.modifyGuard.release(this.currentFilePath);
@@ -277,8 +283,12 @@ export class AnnotationSidebar extends ItemView {
             // vault.modify 完成后再次延长冷却期，覆盖元数据重解析耗时
             plugin.markFileSynced(this.currentFilePath);
             console.log(`MarkVault: clear all — MD cleaned`);
+          } else {
+            console.warn('MarkVault: clear all — markdown content unchanged, skipping vault.modify');
           }
           // 🔧 P0 修复：MD 未变化时不视为错误（可能锚点已不存在），继续完成清理
+        } else {
+          console.warn('MarkVault: clear all — source file not found, DB annotations deleted only');
         }
 
         await plugin.updateSpanCache(this.currentFilePath);
@@ -288,6 +298,7 @@ export class AnnotationSidebar extends ItemView {
 
       } catch (err) {
         // 🔧 统一回滚：恢复所有备份标注
+        const errMsg = err instanceof Error ? err.message : String(err);
         console.error('MarkVault: clear all failed, rolling back DB', err);
         let restored = 0;
         for (const [uuid, backup] of backups) {
@@ -299,7 +310,10 @@ export class AnnotationSidebar extends ItemView {
           }
         }
         notice.hide();
-        new Notice(`❌ Failed (${restored}/${backups.size} annotations rolled back)`, 5000);
+        new Notice(
+          `❌ Clear all failed: ${errMsg} (${restored}/${backups.size} rolled back)`,
+          8000,
+        );
         await this.refreshListOnly();
       }
     });
