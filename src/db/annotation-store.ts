@@ -112,6 +112,22 @@ export class AnnotationStore {
       throw new Error('AnnotationStore: init(vault) must be called before initialize()');
     }
 
+    // 🔧 修复：initialize 可能被重复调用（如测试或插件重载），先清空所有内存状态
+    this._byUuid.clear();
+    this._byFile.clear();
+    this._byKind.clear();
+    this._byType.clear();
+    this._byColor.clear();
+    this._byTag.clear();
+    this._byField.clear();
+    this._loadedFiles.clear();
+    this._dirtyFiles.clear();
+    for (const timer of this._debounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this._debounceTimers.clear();
+    this._indexDirty = false;
+
     // 确保插件目录和 annotations 子目录存在
     const annotationsDir = `${this._baseDir}/annotations`;
     if (!(await this.adapter.exists(annotationsDir))) {

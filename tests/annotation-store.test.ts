@@ -2,8 +2,9 @@
  * AnnotationStore 单元测试 — TypeScript
  */
 
-import { AnnotationStore } from '../src/db/annotation-store';
+import { AnnotationStore, annotationStore } from '../src/db/annotation-store';
 import { FileEncoder } from '../src/db/file-encoder';
+import { cleanOrphanAnnotations } from '../src/db/annotation-repo';
 
 // ─── Mock DataAdapter ──────────────────────────────────
 
@@ -41,6 +42,21 @@ class MockDataAdapter {
 
 function createMockVault() {
   return { adapter: new MockDataAdapter() as any, configDir: '.obsidian' };
+}
+
+function createMockApp(vault: any) {
+  return {
+    vault: {
+      adapter: vault.adapter,
+      getAbstractFileByPath: (path: string) => {
+        if (vault.adapter.files.has(path)) {
+          return { path, extension: 'md' };
+        }
+        return null;
+      },
+      read: async (file: { path: string }) => vault.adapter.read(file.path),
+    },
+  } as any;
 }
 
 let _c = 0;
@@ -222,6 +238,38 @@ async function runTests() {
 
     const s2 = new AnnotationStore(); s2.init(v as any); await s2.initialize();
     if (s2.getAnnotationByUuid('c1') || s2.getAnnotationByUuid('c2')) throw new Error('annotations should not resurrect');
+  });
+
+  await test('cleanOrphanAnnotations removes DB annotations missing from MD', async () => {
+    const v = createMockVault();
+    annotationStore.init(v as any);
+    await annotationStore.initialize();
+    const filePath = 'notes/orphan.md';
+    await annotationStore.addAnnotation(makeAnn({ uuid: 'keep1', filePath, text: 'Keep me' }));
+    await annotationStore.addAnnotation(makeAnn({ uuid: 'orphan1', filePath, text: 'Orphan me' }));
+    await annotationStore.flushAll();
+
+    // MD contains only keep1
+    await v.adapter.write(filePath, '<mark data-uuid="keep1" data-type="highlight" data-color="yellow" class="markvault-highlight markvault-yellow">Keep me</mark>');
+
+    const cleaned = await cleanOrphanAnnotations(createMockApp(v));
+    if (cleaned !== 1) throw new Error(`expected 1 cleaned, got ${cleaned}`);
+    if (!annotationStore.getAnnotationByUuid('keep1')) throw new Error('keep1 should remain');
+    if (annotationStore.getAnnotationByUuid('orphan1')) throw new Error('orphan1 should be cleaned');
+  });
+
+  await test('cleanOrphanAnnotations removes annotations for missing files', async () => {
+    const v = createMockVault();
+    annotationStore.init(v as any);
+    await annotationStore.initialize();
+    const filePath = 'notes/missing.md';
+    await annotationStore.addAnnotation(makeAnn({ uuid: 'm1', filePath }));
+    await annotationStore.addAnnotation(makeAnn({ uuid: 'm2', filePath }));
+    await annotationStore.flushAll();
+
+    const cleaned = await cleanOrphanAnnotations(createMockApp(v));
+    if (cleaned !== 2) throw new Error(`expected 2 cleaned, got ${cleaned}`);
+    if (annotationStore.getAnnotationByUuid('m1') || annotationStore.getAnnotationByUuid('m2')) throw new Error('missing file annotations should be cleaned');
   });
 
   console.log(`\n📊 Results: ${passed} passed, ${failed} failed, ${passed + failed} total\n`);

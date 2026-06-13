@@ -2,7 +2,7 @@ import { Editor, MarkdownView, Menu, Notice, TFile } from 'obsidian';
 import type MarkVaultPlugin from '../../main';
 import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
-import { addAnnotation, getAnnotationByUuid, updateAnnotation } from '../../db/annotation-repo';
+import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
@@ -664,6 +664,18 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
     callback: async () => {
       await plugin.rebuildDatabase();
       new Notice('MarkVault: database rebuilt', 3000);
+    },
+  });
+
+  // 🆕 清理孤儿标注（DB 有但 MD 无）
+  plugin.addCommand({
+    id: 'markvault-clean-orphans',
+    name: 'Clean orphan annotations',
+    icon: 'trash-2',
+    callback: async () => {
+      const cleaned = await cleanOrphanAnnotations(plugin.app);
+      await plugin.refreshSidebar();
+      new Notice(`MarkVault: cleaned ${cleaned} orphan annotations`, 4000);
     },
   });
 }

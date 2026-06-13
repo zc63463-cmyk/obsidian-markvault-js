@@ -5,8 +5,10 @@
  * 对外接口保持兼容，仅 addAnnotation/updateAnnotation 返回值变更。
  */
 
-import { annotationStore } from './annotation-store';
+import type { App, TFile } from 'obsidian';
+import { annotationStore, type AnnotationStore } from './annotation-store';
 import type { Annotation, AnnotationFilter, AnnotationStats, BatchUpdateItem } from '../types/annotation';
+import { parseAllAnnotationsFromMarkdown } from '../core/annotation-parser';
 
 // ─── CRUD ──────────────────────────────────────────────
 
@@ -116,4 +118,62 @@ export function getFieldKeys(): string[] {
 /** 获取指定字段键的所有已出现值列表 */
 export function getFieldValues(key: string): string[] {
   return annotationStore.getFieldValues(key);
+}
+
+// ─── 孤儿标注清理 ─────────────────────────────────────
+
+/**
+ * 清理 DB 中有但 Markdown 中已不存在的标注（孤儿标注）。
+ * 由用户手动触发，避免 vault.read 竞态导致误删。
+ *
+ * @param app Obsidian App 实例
+ * @returns 清理的标注数量
+ */
+export async function cleanOrphanAnnotations(app: App, store: AnnotationStore = annotationStore): Promise<number> {
+  const allAnnotations = store.getAllAnnotations();
+  if (allAnnotations.length === 0) return 0;
+
+  // 按文件分组
+  const byFile = new Map<string, Annotation[]>();
+  for (const ann of allAnnotations) {
+    let list = byFile.get(ann.filePath);
+    if (!list) {
+      list = [];
+      byFile.set(ann.filePath, list);
+    }
+    list.push(ann);
+  }
+
+  let cleaned = 0;
+
+  for (const [filePath, annotations] of byFile) {
+    const file = app.vault.getAbstractFileByPath(filePath);
+
+    // 源文件已不存在：删除该文件全部标注
+    // 使用 duck typing，避免在测试环境中导入 obsidian 运行时
+    if (!file || (file as any).extension !== 'md') {
+      const count = await deleteAnnotationsForFile(filePath);
+      cleaned += count;
+      console.log(`MarkVault clean orphans: deleted ${count} annotations for missing file "${filePath}"`);
+      continue;
+    }
+
+    try {
+      const content = await app.vault.read(file as TFile);
+      const mdAnnotations = parseAllAnnotationsFromMarkdown(content, filePath);
+      const mdUuids = new Set(mdAnnotations.map(a => a.uuid));
+
+      for (const ann of annotations) {
+        if (!mdUuids.has(ann.uuid)) {
+          await deleteAnnotation(ann.uuid);
+          cleaned++;
+          console.log(`MarkVault clean orphans: deleted orphan annotation ${ann.uuid} from "${filePath}"`);
+        }
+      }
+    } catch (err) {
+      console.warn(`MarkVault clean orphans: failed to read "${filePath}"`, err);
+    }
+  }
+
+  return cleaned;
 }
