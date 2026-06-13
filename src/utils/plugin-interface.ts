@@ -1,4 +1,5 @@
 import type { ModifyGuard } from './modify-guard';
+import type { AnnotationModal } from '../ui/editor/annotation-modal';
 
 /**
  * 侧边栏需要的 Plugin 接口
@@ -13,6 +14,12 @@ export interface MarkVaultPluginInterface {
 
   /** 取消标注的"正在编辑"状态 */
   unmarkAnnotationActive(uuid: string, filePath?: string): void;
+
+  /** 注册当前打开的 AnnotationModal */
+  registerActiveAnnotationModal(uuid: string, modal: AnnotationModal): void;
+
+  /** 注销已关闭的 AnnotationModal */
+  unregisterActiveAnnotationModal(uuid: string): void;
 
   /** 更新指定文件的 span 缓存 */
   updateSpanCache(filePath: string): Promise<void>;

@@ -45,8 +45,8 @@ export async function getAllAnnotations(): Promise<Annotation[]> {
 }
 
 /** 删除指定笔记的所有标注 */
-export async function deleteAnnotationsForFile(filePath: string): Promise<void> {
-  await annotationStore.deleteAnnotationsForFile(filePath);
+export async function deleteAnnotationsForFile(filePath: string): Promise<number> {
+  return await annotationStore.deleteAnnotationsForFile(filePath);
 }
 
 // ─── 过滤查询 ─────────────────────────────────────────

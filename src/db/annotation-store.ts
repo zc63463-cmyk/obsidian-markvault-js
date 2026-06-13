@@ -725,8 +725,9 @@ export class AnnotationStore {
 
   /**
    * 删除指定文件的所有标注。
+   * @returns 删除的标注数量
    */
-  async deleteAnnotationsForFile(filePath: string): Promise<void> {
+  async deleteAnnotationsForFile(filePath: string): Promise<number> {
     this._assertInitialized();
 
     await this.ensureFileLoaded(filePath);
@@ -755,8 +756,10 @@ export class AnnotationStore {
         }
         await this._writeIndexFile();
       }
-      return;
+      return 0;
     }
+
+    const deletedCount = uuidSet.size;
 
     // 🔧 审计修复：先删除分片文件，再清理内存索引
     // 这样即使后续内存清理失败，重启后 ensureFileLoaded 读取失败时也能恢复
@@ -794,6 +797,8 @@ export class AnnotationStore {
 
     // 🔧 P0 修复：立即写回 _index.json，防止重启后残留孤儿条目
     await this._writeIndexFile();
+
+    return deletedCount;
   }
 
   /**

@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, MarkdownRenderer, Component } from 'obsidian';
+import { Plugin, MarkdownView, TFile, MarkdownRenderer, Component, Notice } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, PresetColorId, Annotation } from './types/annotation';
 import { DEFAULT_SETTINGS, PRESET_COLORS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
@@ -38,6 +38,10 @@ export default class MarkVaultPlugin extends Plugin {
 
   // 🆕 uuid → filePath 反向映射，用于精确维护 _activeAnnotationFilePaths
   private _activeAnnotationUuidToFilePath = new Map<string, string>();
+
+  // 🆕 当前打开的 AnnotationModal 实例（按 uuid 索引）
+  // 用于在文件被删除/重命名时自动关闭对应 Modal
+  private _activeAnnotationModals = new Map<string, AnnotationModal>();
 
   // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
@@ -85,7 +89,31 @@ export default class MarkVaultPlugin extends Plugin {
     return this._activeAnnotationFilePaths.has(filePath);
   }
 
-  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync（5s 冷却） */
+  /** 注册当前打开的 AnnotationModal */
+  public registerActiveAnnotationModal(uuid: string, modal: AnnotationModal): void {
+    this._activeAnnotationModals.set(uuid, modal);
+  }
+
+  /** 注销已关闭的 AnnotationModal */
+  public unregisterActiveAnnotationModal(uuid: string): void {
+    this._activeAnnotationModals.delete(uuid);
+  }
+
+  /** 关闭指定文件上所有打开的 AnnotationModal */
+  public closeActiveModalsForFile(filePath: string): void {
+    for (const [uuid, modal] of this._activeAnnotationModals) {
+      const fp = this._activeAnnotationUuidToFilePath.get(uuid);
+      if (fp === filePath) {
+        try {
+          modal.close();
+        } catch (err) {
+          console.error('MarkVault: failed to close active modal for deleted file', uuid, err);
+        }
+      }
+    }
+  }
+
+  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync（30s 冷却） */
   public markFileSynced(filePath: string): void {
     this._syncCooldown.set(filePath, Date.now());
   }
@@ -231,11 +259,32 @@ export default class MarkVaultPlugin extends Plugin {
           if (file instanceof TFile && file.extension === 'md') {
             console.log(`MarkVault: file deleted — cleaning up annotations for "${file.path}"`);
             try {
-              await annotationStore.deleteAnnotationsForFile(file.path);
+              // 如果当前活跃文件是被删除文件，清空引用
+              if (this.activeFilePath === file.path) {
+                this.activeFilePath = null;
+              }
+
+              // 关闭该文件上所有打开的 AnnotationModal
+              this.closeActiveModalsForFile(file.path);
+
+              // 清理该文件的活跃标注保护状态
+              const activeUuids = Array.from(this._activeAnnotationUuids);
+              for (const uuid of activeUuids) {
+                if (this._activeAnnotationUuidToFilePath.get(uuid) === file.path) {
+                  this.unmarkAnnotationActive(uuid, file.path);
+                }
+              }
+
+              const deletedCount = await annotationStore.deleteAnnotationsForFile(file.path);
               await this.refreshSidebar();
-              console.log(`MarkVault: annotations cleaned up for deleted file "${file.path}"`);
+
+              if (deletedCount > 0) {
+                new Notice(`Cleaned up ${deletedCount} annotations for deleted file`, 4000);
+              }
+              console.log(`MarkVault: annotations cleaned up for deleted file "${file.path}" (${deletedCount})`);
             } catch (err) {
               console.error('MarkVault: failed to clean up annotations for deleted file', file.path, err);
+              new Notice('Failed to clean up annotations for deleted file', 5000);
             }
           }
         }),
@@ -251,23 +300,38 @@ export default class MarkVaultPlugin extends Plugin {
           if (file instanceof TFile && file.extension === 'md') {
             console.log(`MarkVault: file renamed "${oldPath}" → "${file.path}"`);
             try {
+              // 关闭旧文件上打开的 Modal，避免保存时路径错误
+              this.closeActiveModalsForFile(oldPath);
+
               await annotationStore.renameAnnotationsForFile(oldPath, file.path);
+
               // 如果当前活跃文件就是被重命名的文件，更新 activeFilePath
               if (this.activeFilePath === oldPath) {
                 this.activeFilePath = file.path;
               }
+
+              // 🔧 审计修复：更新活跃标注的 uuid→filePath 映射
+              for (const [uuid, fp] of this._activeAnnotationUuidToFilePath) {
+                if (fp === oldPath) {
+                  this._activeAnnotationUuidToFilePath.set(uuid, file.path);
+                }
+              }
+
               // 🔧 审计修复：更新 _activeAnnotationFilePaths，防止 Modal 编辑保护失效
               if (this._activeAnnotationFilePaths.has(oldPath)) {
                 this._activeAnnotationFilePaths.delete(oldPath);
                 this._activeAnnotationFilePaths.add(file.path);
               }
+
               // 🔧 审计修复：更新 _syncCooldown 中的冷却条目
               const cooldownTime = this._syncCooldown.get(oldPath);
               if (cooldownTime !== undefined) {
                 this._syncCooldown.delete(oldPath);
                 this._syncCooldown.set(file.path, cooldownTime);
               }
+
               await this.refreshSidebar();
+              new Notice(`Annotations migrated for renamed file`, 4000);
               console.log(`MarkVault: annotations migrated for renamed file`);
             } catch (err) {
               console.error('MarkVault: failed to migrate annotations for renamed file', oldPath, '→', file.path, err);
@@ -815,10 +879,14 @@ export default class MarkVaultPlugin extends Plugin {
         },
       );
 
+      // 注册打开的 Modal，便于文件删除/重命名时自动关闭
+      this.registerActiveAnnotationModal(uuid, modal);
+
       // Modal 关闭时如果没有触发回调（如按 Esc），也取消保护
       // 使用 Modal 的 onClose 生命周期钩子
       const originalOnClose = modal.onClose.bind(modal);
       modal.onClose = () => {
+        this.unregisterActiveAnnotationModal(uuid);
         this.unmarkAnnotationActive(uuid, annotation.filePath);
         originalOnClose();
       };

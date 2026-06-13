@@ -1753,9 +1753,13 @@ export class AnnotationSidebar extends ItemView {
       },
     );
 
+    // 注册打开的 Modal，便于文件删除/重命名时自动关闭
+    plugin.registerActiveAnnotationModal(annotation.uuid, modal);
+
     // Modal 关闭时取消保护
     const originalOnClose = modal.onClose.bind(modal);
     modal.onClose = () => {
+      plugin.unregisterActiveAnnotationModal(annotation.uuid);
       plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
       originalOnClose();
     };
