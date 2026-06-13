@@ -55,6 +55,26 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
           });
       });
 
+      // 𝗕 Bold
+      menu.addItem((item) => {
+        item.setTitle('𝗕 Bold')
+          .setIcon('bold')
+          .onClick(async () => {
+            await createAnnotation(plugin, editor, view, 'bold', plugin.settings.defaultHighlightColor);
+          });
+      });
+
+      // U̲ Underline
+      menu.addItem((item) => {
+        item.setTitle('U̲ Underline')
+          .setIcon('underline')
+          .onClick(async () => {
+            await createAnnotation(plugin, editor, view, 'underline', plugin.settings.defaultHighlightColor);
+          });
+      });
+
+      menu.addSeparator();
+
       // 颜色选择（扁平展示，视觉分组）
       menu.addItem((item) => {
         item.setTitle('   ── Colors ──')
@@ -180,25 +200,6 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
         }
       }
 
-      menu.addSeparator();
-
-      // 𝗕 Bold
-      menu.addItem((item) => {
-        item.setTitle('𝗕 Bold')
-          .setIcon('bold')
-          .onClick(async () => {
-            await createAnnotation(plugin, editor, view, 'bold', plugin.settings.defaultHighlightColor);
-          });
-      });
-
-      // U̲ Underline
-      menu.addItem((item) => {
-        item.setTitle('U̲ Underline')
-          .setIcon('underline')
-          .onClick(async () => {
-            await createAnnotation(plugin, editor, view, 'underline', plugin.settings.defaultHighlightColor);
-          });
-      });
     }),
   );
 }

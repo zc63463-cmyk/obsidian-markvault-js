@@ -29,6 +29,7 @@ import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData 
 import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeToolbar } from './ui/reading/ReadingModeToolbar';
 import { ReadingModeClickDelegate } from './ui/reading/ReadingModeClickDelegate';
+import { ReadingModeContextMenu } from './ui/reading/ReadingModeContextMenu';
 
 export default class MarkVaultPlugin extends Plugin {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
@@ -60,6 +61,7 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 阅读模式相关模块
   private readingToolbar: ReadingModeToolbar | null = null;
   private readingClickDelegate: ReadingModeClickDelegate | null = null;
+  private readingContextMenu: ReadingModeContextMenu | null = null;
 
   // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
@@ -457,12 +459,19 @@ export default class MarkVaultPlugin extends Plugin {
 
     // ── 阅读模式：选中文本浮动工具条 ──
     try {
-      this.readingToolbar = new ReadingModeToolbar(this, {
-        createReadingAnnotation: (req) => this.createReadingAnnotation(req.selectedText, req.color, req.type, req.kind),
-      });
+      const readingHost = {
+        createReadingAnnotation: (req: { selectedText: string; color: string; type: AnnotationType; kind: Annotation['kind'] }) =>
+          this.createReadingAnnotation(req.selectedText, req.color, req.type, req.kind),
+        getDefaultColor: () => this.settings.defaultHighlightColor,
+      };
+
+      this.readingToolbar = new ReadingModeToolbar(this, readingHost);
       this.readingToolbar.setup();
+
+      this.readingContextMenu = new ReadingModeContextMenu(this, readingHost);
+      this.readingContextMenu.setup();
     } catch (err) {
-      console.error('MarkVault: failed to register reading mode toolbar', err);
+      console.error('MarkVault: failed to register reading mode toolbar/context menu', err);
     }
 
     console.log('MarkVault: plugin loaded successfully');
@@ -472,6 +481,7 @@ export default class MarkVaultPlugin extends Plugin {
     console.log('MarkVault: unloading plugin');
     try {
       this.readingToolbar?.destroy();
+      this.readingContextMenu?.destroy?.();
       this.readingClickDelegate?.destroy();
       this.modifyGuard.releaseAll();
       await annotationStore.shutdown();
