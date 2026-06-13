@@ -28,6 +28,7 @@ import {
   WidgetType,
 } from '@codemirror/view';
 import { PRESET_COLORS, type AnnotationType, type SpanRange } from '../types/annotation';
+import { NATIVE_ANCHOR_REGEX } from './native-annotation';
 
 // ─── 外部注入的文件路径解析器 ──────────────────────────────
 
@@ -63,6 +64,10 @@ const MARK_FULL_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_EXTRACT_REGEX = /\b([\w-]+)="([^"]*)"/g;
 /** 匹配 %%markvault:%% 锚点行（note 段可选） */
 const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
+/** 匹配自然语法粗体标注：%%mv:i:uuid:bold:color%%**文本**（旧） */
+const NATIVE_BOLD_REGEX = /%%mv:i:([^:%]+):bold:([^:%]+)%%\*\*([^*]+?)\*\*/g;
+/** 匹配粗体试验田：<b class="..."> 包裹 */
+const NATIVE_BOLD_B_REGEX = /%%mv:i:([^:%]+):bold:([^:%]+)%%<b\s+class="markvault-native\s+markvault-bold\s+markvault-([^"\s]+)(?:\s+markvault-clickable)?"\s+data-uuid="[^"]+"\s+data-type="bold"\s+data-color="[^"]+">([^<]*)<\/b>/g;
 
 // ─── Span Annotation Cache ──────────────────────────────────
 
@@ -165,6 +170,22 @@ class BlockAnchorWidget extends WidgetType {
   toDOM() {
     const span = document.createElement('span');
     span.className = 'markvault-block-anchor-hidden';
+    span.style.display = 'none';
+    return span;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
+}
+
+/**
+ * 隐藏 %%mv:i:...%% 自然语法锚点的 Widget
+ */
+class NativeAnchorWidget extends WidgetType {
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'markvault-native-anchor-hidden';
     span.style.display = 'none';
     return span;
   }
@@ -324,7 +345,98 @@ class MarkVaultDecorator implements PluginValue {
       }
     }
 
-    // ── 3. 块级/Span 锚点隐藏 ──
+    // ── 3. 自然语法粗体装饰 ──
+    // 兼容旧 **文本** 与新的 <b class="..."> 包裹，隐藏标签、高亮内部文本
+
+    // 3.1 旧版 **文本**
+    NATIVE_BOLD_REGEX.lastIndex = 0;
+    let nativeBoldMatch: RegExpExecArray | null;
+    while ((nativeBoldMatch = NATIVE_BOLD_REGEX.exec(doc)) !== null) {
+      const uuid = nativeBoldMatch[1];
+      const color = nativeBoldMatch[2];
+      const innerText = nativeBoldMatch[3];
+
+      const anchorEnd = nativeBoldMatch.index + nativeBoldMatch[0].indexOf('**');
+      const innerStart = anchorEnd + 2;
+      const innerEnd = innerStart + innerText.length;
+
+      if (innerStart >= innerEnd) continue;
+
+      decoItems.push({
+        from: innerStart,
+        to: innerEnd,
+        deco: Decoration.mark({
+          class: `markvault-bold markvault-${color}`,
+          attributes: {
+            'data-uuid': uuid,
+            'data-type': 'bold',
+            'data-color': color,
+            'data-kind': 'inline',
+          },
+        }),
+      });
+    }
+
+    // 3.2 新版 <b class="..."> 包裹：隐藏锚点与 <b> 标签，给内部文本加 class
+    NATIVE_BOLD_B_REGEX.lastIndex = 0;
+    let nativeBoldBMatch: RegExpExecArray | null;
+    while ((nativeBoldBMatch = NATIVE_BOLD_B_REGEX.exec(doc)) !== null) {
+      const uuid = nativeBoldBMatch[1];
+      const color = nativeBoldBMatch[2];
+      const innerText = nativeBoldBMatch[4];
+
+      const full = nativeBoldBMatch[0];
+      const anchorLen = full.indexOf('<b');
+      const openingTagLen = full.indexOf('>') + 1 - anchorLen;
+      const closeTagLen = 4; // </b>
+
+      const anchorStart = nativeBoldBMatch.index;
+      const anchorEnd = anchorStart + anchorLen;
+      const innerStart = anchorEnd + openingTagLen;
+      const innerEnd = innerStart + innerText.length;
+      const closeStart = innerEnd;
+      const closeEnd = closeStart + closeTagLen;
+
+      if (innerStart >= innerEnd) continue;
+
+      // 隐藏隐身锚点
+      decoItems.push({
+        from: anchorStart,
+        to: anchorEnd,
+        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+      });
+
+      // 隐藏 <b> 开标签
+      decoItems.push({
+        from: anchorEnd,
+        to: innerStart,
+        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+      });
+
+      // 高亮内部文本
+      decoItems.push({
+        from: innerStart,
+        to: innerEnd,
+        deco: Decoration.mark({
+          class: `markvault-bold markvault-${color}`,
+          attributes: {
+            'data-uuid': uuid,
+            'data-type': 'bold',
+            'data-color': color,
+            'data-kind': 'inline',
+          },
+        }),
+      });
+
+      // 隐藏 </b> 闭标签
+      decoItems.push({
+        from: closeStart,
+        to: closeEnd,
+        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+      });
+    }
+
+    // ── 4. 块级/Span 锚点隐藏 ──
     // 在编辑模式下隐藏 %%markvault:...%% 和 %%markvault-span:...%% 锚点行
     const lines = doc.split('\n');
     let lineOffset = 0;
@@ -345,6 +457,21 @@ class MarkVaultDecorator implements PluginValue {
         });
       }
       lineOffset += lineText.length + 1; // +1 for \n
+    }
+
+    // ── 4. 自然语法锚点隐藏 ──
+    // 在编辑模式下隐藏 %%mv:i:uuid:type:color%% 隐身锚点
+    NATIVE_ANCHOR_REGEX.lastIndex = 0;
+    let nativeMatch: RegExpExecArray | null;
+    while ((nativeMatch = NATIVE_ANCHOR_REGEX.exec(doc)) !== null) {
+      decoItems.push({
+        from: nativeMatch.index,
+        to: nativeMatch.index + nativeMatch[0].length,
+        deco: Decoration.replace({
+          widget: new NativeAnchorWidget(),
+          block: false,
+        }),
+      });
     }
 
     // 按位置排序（RangeSetBuilder 要求递增）

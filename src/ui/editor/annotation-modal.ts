@@ -3,6 +3,7 @@ import type { Annotation, AnnotationType, PresetColorId } from '../../types/anno
 import { PRESET_COLORS } from '../../types/annotation';
 import { updateAnnotation, deleteAnnotation, addAnnotation } from '../../db/annotation-repo';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
+import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
 import { encodeFields, applyTemplate } from '../../utils/fields';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 
@@ -391,6 +392,13 @@ export class AnnotationModal extends Modal {
           color: updates.color,
           type: updates.type,
         });
+      } else if (this.annotation.format === 'native') {
+        // 自然语法标注：隐身锚点 + 原生 Markdown 包裹
+        // note/tags/fields 只存在 Store 中，锚点只保存 uuid/type/color
+        newContent = updateNativeAnnotation(content, this.annotation.uuid, {
+          color: updates.color,
+          type: updates.type,
+        }) ?? content;
       } else {
         // 行内标注：更新 <mark> 标签
         newContent = updateMarkTag(content, this.annotation.uuid, {
@@ -470,6 +478,9 @@ export class AnnotationModal extends Modal {
           }
           if (this.annotation.kind === 'block') {
             return removeBlockAnchor(content, this.annotation.uuid);
+          }
+          if (this.annotation.format === 'native') {
+            return removeNativeAnnotation(content, this.annotation.uuid) ?? content;
           }
           const result = removeMarkTag(content, this.annotation.uuid);
           return result ? result.content : content;

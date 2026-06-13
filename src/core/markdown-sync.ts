@@ -1,6 +1,7 @@
 import { annotationStore } from '../db/annotation-store';
 import type { Annotation } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor } from './annotation-parser';
+import { stripNativeAnnotations } from './native-annotation';
 import { batchRecoverOffsets } from './offset-recovery';
 import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation } from '../db/annotation-repo';
 
@@ -53,9 +54,9 @@ export async function syncFromMarkdown(
     // 🔧 P0 修复：fullText 计算移到循环外，避免 O(n×content_size)
     // 🔧 修复：fullText 计算时同时 strip <mark> 标签和 %%markvault%% 锚点行
     // 防止锚点行碎片混入 contextBefore/contextAfter
-    const fullText = content
+    const fullText = stripNativeAnnotations(content
       .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-      .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+      .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
     for (const ann of toAdd) {
       const startOffset = computeOffsetInPlainContent(content, ann.startOffset);
       const { contextBefore, contextAfter } = extractContextFromContent(fullText, startOffset, ann.text);
@@ -145,6 +146,11 @@ export async function syncFromMarkdown(
     }
     if (mdAnn.type !== dbAnn.type) {
       updates.type = mdAnn.type;
+    }
+
+    // format: 自然语法 / mark 格式以 Markdown 为准
+    if (mdAnn.format !== dbAnn.format) {
+      updates.format = mdAnn.format;
     }
 
     // targetHash: block/span 的目标内容指纹，从 Markdown 重新计算
@@ -270,9 +276,9 @@ export async function recoverAndSyncOffsets(
 function computeOffsetInPlainContent(markdownContent: string, markTagOffset: number): number {
   const beforeMark = markdownContent.substring(0, markTagOffset);
   // 🔧 修复：移除之前所有 mark 标签 + anchor 锚点行
-  const plainBefore = beforeMark
+  const plainBefore = stripNativeAnnotations(beforeMark
     .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
   return plainBefore.length;
 }
 
@@ -280,9 +286,9 @@ function computeOffsetInPlainContent(markdownContent: string, markTagOffset: num
  * 获取用于偏移恢复的纯文本（移除 <mark> 标签和块级/span 锚点）
  */
 export function getPlainTextForOffsetRecovery(markdownContent: string): string {
-  return markdownContent
+  return stripNativeAnnotations(markdownContent
     .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
 }
 
 /**

@@ -3,6 +3,7 @@ import type { Annotation } from '../../../types/annotation';
 import { PRESET_COLORS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
 import { updateSpanAnchor, updateBlockAnchor, updateMarkTag } from '../../../core/annotation-parser';
+import { updateNativeAnnotation } from '../../../core/native-annotation';
 import { updateAnnotation } from '../../../db/annotation-repo';
 
 /**
@@ -240,7 +241,9 @@ export class AnnotationCard {
         const content = await this.host.app.vault.read(file);
         let newContent: string;
 
-        if (annotation.kind === 'span') {
+        if (annotation.format === 'native') {
+          newContent = updateNativeAnnotation(content, annotation.uuid, { color: colorId, type: annotation.type }) ?? content;
+        } else if (annotation.kind === 'span') {
           newContent = updateSpanAnchor(content, annotation.uuid, { color: colorId });
         } else if (annotation.kind === 'block') {
           newContent = updateBlockAnchor(content, annotation.uuid, { color: colorId });

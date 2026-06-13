@@ -4,6 +4,7 @@ import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../..
 import { PRESET_COLORS } from '../../types/annotation';
 import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
+import { buildNativeAnnotation } from '../../core/native-annotation';
 import { computeSignature, computeSpanSignature } from '../../core/block-fingerprint';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
@@ -174,7 +175,7 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
                       await updateAnnotation(annotation.uuid, { fields });
 
                       // 更新 Markdown
-                      if (annotation.kind === 'inline' || !annotation.kind) {
+                      if ((annotation.kind === 'inline' || !annotation.kind) && annotation.format !== 'native') {
                         const file = view.file;
                         if (file instanceof TFile) {
                           const content = await plugin.app.vault.read(file);
@@ -345,16 +346,23 @@ async function createSimpleAnnotation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
     kind: 'inline',
+    format: (plugin.settings.useNativeSyntax || type === 'bold') ? 'native' : 'mark',
   };
 
   plugin.modifyGuard.acquire(filePath);
 
   try {
-    const markTag = buildMarkTag(annotation);
-    editor.replaceSelection(markTag);
-    annotation.endOffset = startOffset + markTag.length;
-
-    console.log(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
+    if (plugin.settings.useNativeSyntax || type === 'bold') {
+      const nativeTag = buildNativeAnnotation(annotation);
+      editor.replaceSelection(nativeTag);
+      annotation.endOffset = startOffset + nativeTag.length;
+      console.log(`MarkVault: created native inline annotation ${uuid} in ${filePath}`);
+    } else {
+      const markTag = buildMarkTag(annotation);
+      editor.replaceSelection(markTag);
+      annotation.endOffset = startOffset + markTag.length;
+      console.log(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
+    }
 
     await addAnnotation(annotation);
     plugin.markFileSynced(filePath);

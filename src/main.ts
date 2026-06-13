@@ -20,10 +20,11 @@ import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInf
 import { batchRecoverOffsets } from './core/offset-recovery';
 import { AnnotationModal } from './ui/editor/annotation-modal';
 import { initAnnotationStore, annotationStore } from './db/annotation-store';
-import { addAnnotation } from './db/annotation-repo';
+import { addAnnotation, getAnnotationByUuid } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor } from './core/annotation-parser';
+import { buildNativeAnnotation } from './core/native-annotation';
 import { computeSignature } from './core/block-fingerprint';
 import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
 
@@ -434,6 +435,9 @@ export default class MarkVaultPlugin extends Plugin {
               htmlEl.addClass('markvault-has-note');
             }
           });
+
+          // 🆕 v3.0: 处理自然语法标注（隐身锚点 + 原生 Markdown 包裹）
+          await this.processNativeAnnotations(el, ctx.sourcePath);
 
           // 🆕 v2.0: 处理块级锚点标注
           // 检测 %%markvault:uuid:type:color:note%% 注释锚点
@@ -959,6 +963,69 @@ export default class MarkVaultPlugin extends Plugin {
   }
 
   /**
+   * 处理自然 Markdown 语法标注（隐身锚点 + 原生包裹）
+   * 在阅读模式 DOM 中，Obsidian 会将 %%mv:i:uuid:type:color%% 渲染为 COMMENT 节点。
+   * 我们找到该注释节点，给紧随其后的原生元素（<mark>/<strong>/<u>）加上颜色、点击等样式。
+   */
+  private async processNativeAnnotations(el: HTMLElement, sourcePath: string): Promise<void> {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT);
+    const anchors: { node: Comment; uuid: string; type: AnnotationType; color: string }[] = [];
+
+    let node: Node | null;
+    while ((node = walker.nextNode()) !== null) {
+      const text = node.textContent || '';
+      const match = text.match(/^mv:i:([^:]+):([^:]+):([^:]+)$/);
+      if (match) {
+        anchors.push({
+          node: node as Comment,
+          uuid: match[1],
+          type: match[2] as AnnotationType,
+          color: match[3],
+        });
+      }
+    }
+
+    for (const anchor of anchors) {
+      const targetEl = this.findNextContentElement(anchor.node);
+      if (!targetEl) continue;
+
+      const annotation = await getAnnotationByUuid(anchor.uuid);
+      const type = anchor.type;
+      const color = anchor.color;
+      const preset = DEFAULT_SETTINGS.presetColors.find((c) => c.id === color);
+      const hex = preset ? preset.hex : color;
+
+      targetEl.addClass('markvault-native', `markvault-${type}`, `markvault-${color}`, 'markvault-clickable');
+      targetEl.dataset.uuid = anchor.uuid;
+      targetEl.dataset.type = type;
+      targetEl.dataset.color = color;
+      targetEl.style.cursor = 'pointer';
+
+      switch (type) {
+        case 'highlight':
+          targetEl.style.backgroundColor = `${hex}66`;
+          targetEl.style.borderRadius = '2px';
+          targetEl.style.padding = '1px 0';
+          break;
+        case 'bold':
+          // 粗体标注的视觉样式完全由 CSS class（markvault-bold + markvault-<color>）控制
+          // 不设置内联样式，便于用户/主题覆盖
+          break;
+        case 'underline':
+          targetEl.style.textDecoration = 'underline';
+          targetEl.style.textDecorationColor = hex;
+          targetEl.style.textUnderlineOffset = '2px';
+          break;
+      }
+
+      if (annotation?.note) {
+        targetEl.setAttribute('title', annotation.note);
+        targetEl.addClass('markvault-has-note');
+      }
+    }
+  }
+
+  /**
    * 在阅读模式下高亮 span 标注的文本片段
    * span 标注不修改原文，只通过 spanRanges 记录纯文本片段位置。
    * 这里根据 spanRanges 从源文件提取文本，然后在渲染后的 DOM 中包裹对应文本。
@@ -1294,6 +1361,41 @@ export default class MarkVaultPlugin extends Plugin {
 
         await addAnnotation(annotation);
         console.log(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
+        this.markFileSynced(filePath);
+        await this.refreshSidebar();
+      } else if (this.settings.useNativeSyntax || type === 'bold') {
+        // ── 自然语法标注：隐身锚点 + 原生 Markdown 包裹 ──
+        const annotation: Annotation = {
+          uuid,
+          filePath,
+          type,
+          color,
+          text: selectedText,
+          note: '',
+          tags: [],
+          startOffset,
+          endOffset,
+          startLine: 0,
+          contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
+          contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          kind: 'inline',
+          format: 'native',
+        };
+
+        const nativeTag = buildNativeAnnotation(annotation);
+        const newContent = content.substring(0, startOffset) + nativeTag + content.substring(endOffset);
+        await this.app.vault.modify(view.file, newContent);
+
+        if (view.previewMode) {
+          view.previewMode.rerender(true);
+        }
+
+        annotation.endOffset = startOffset + nativeTag.length;
+        await addAnnotation(annotation);
+
+        console.log(`MarkVault: created reading-mode native annotation ${uuid} in ${filePath}`);
         this.markFileSynced(filePath);
         await this.refreshSidebar();
       } else {

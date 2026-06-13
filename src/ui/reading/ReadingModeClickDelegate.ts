@@ -63,6 +63,18 @@ export class ReadingModeClickDelegate {
         }
       }
 
+      // 4. 检查自然语法标注（markvault-native）
+      if (!foundMark) {
+        el = target;
+        while (el && el !== document.body) {
+          if (el.hasClass?.('markvault-native') && el.hasAttribute('data-uuid')) {
+            foundMark = el;
+            break;
+          }
+          el = el.parentElement;
+        }
+      }
+
       if (!foundMark) return; // 不是点击标注，忽略
 
       // 关键修复：判断是否在 CM6 编辑区域中

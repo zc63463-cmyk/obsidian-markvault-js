@@ -11,6 +11,7 @@ import {
 import { debounce } from '../../utils/debounce';
 import { AnnotationModal } from '../editor/annotation-modal';
 import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/annotation-parser';
+import { removeNativeAnnotation } from '../../core/native-annotation';
 import { StatsView } from './views/StatsView';
 import { CurrentFileToolbar } from './components/CurrentFileToolbar';
 import { FilterBar } from './components/FilterBar';
@@ -490,27 +491,36 @@ export class AnnotationSidebar extends ItemView {
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.openFile(file);
 
-    const view = leaf.view;
+    let view = leaf.view;
     if (!(view instanceof MarkdownView)) return;
 
-    // 阅读模式下没有 editor，切换到源码模式
-    if (!view.editor) {
-      const state = leaf.getViewState();
-      if (state.state) {
-        state.state.mode = 'source';
-        await leaf.setViewState(state);
-      }
-    }
-    if (!view.editor) return;
-
-    // ── 基于 UUID 锚点搜索定位（不依赖存储的偏移量，永不漂移） ──
     try {
+      // ── 策略 1：阅读模式下直接滚动到渲染后的 DOM 元素 ──
+      if (view.getMode() === 'preview') {
+        const scrolled = await this.scrollToPreviewAnnotation(view, annotation.uuid);
+        if (scrolled) return;
+
+        // 阅读模式下找不到元素（可能未渲染），降级到源码模式
+        const state = leaf.getViewState();
+        if (state?.state) {
+          state.state.mode = 'source';
+          await leaf.setViewState(state);
+        }
+        view = leaf.view as MarkdownView;
+      }
+
+      // ── 策略 2：源码模式基于 UUID 锚点搜索定位 ──
+      const editor = (view as MarkdownView).editor;
+      if (!editor) return;
+
       const content = await this.app.vault.read(file);
       let searchStr: string;
       if (annotation.kind === 'block') {
         searchStr = `markvault:${annotation.uuid}`;
       } else if (annotation.kind === 'span') {
         searchStr = `markvault-span:${annotation.uuid}`;
+      } else if (annotation.format === 'native') {
+        searchStr = `mv:i:${annotation.uuid}`;
       } else {
         searchStr = `data-uuid="${annotation.uuid}"`;
       }
@@ -519,23 +529,59 @@ export class AnnotationSidebar extends ItemView {
       if (idx === -1) {
         // 锚点可能被删除，降级为行号定位
         console.warn(`MarkVault: UUID ${annotation.uuid} not found in source`);
-        view.editor.setCursor({ line: annotation.startLine, ch: 0 });
-        view.editor.scrollIntoView(
+        editor.setCursor({ line: annotation.startLine, ch: 0 });
+        editor.scrollIntoView(
           { from: { line: annotation.startLine, ch: 0 }, to: { line: annotation.startLine + 1, ch: 0 } },
           true,
         );
         return;
       }
 
-      const pos = view.editor.offsetToPos(idx);
-      view.editor.setCursor(pos);
-      view.editor.scrollIntoView({
+      const pos = editor.offsetToPos(idx);
+      editor.setCursor(pos);
+      editor.scrollIntoView({
         from: pos,
         to: { line: pos.line + 1, ch: 0 },
       }, true);
     } catch (err) {
       console.error('MarkVault: jumpToAnnotation error', err);
     }
+  }
+
+  /**
+   * 在阅读模式 DOM 中查找并滚动到指定 uuid 的标注元素
+   * 阅读模式渲染是异步的，因此采用轮询等待 post-processor 完成
+   */
+  private async scrollToPreviewAnnotation(view: MarkdownView, uuid: string): Promise<boolean> {
+    const container = view.previewMode?.containerEl;
+    if (!container) return false;
+
+    // 先尝试立即查找（文件已打开且渲染完成时）
+    let el = container.querySelector(`[data-uuid="${uuid}"]`) as HTMLElement | null;
+
+    // 若未渲染，强制 rerender，然后轮询等待 post-processor 生效
+    if (!el && view.previewMode?.rerender) {
+      view.previewMode.rerender(true);
+    }
+
+    // 最多轮询 2 秒（20 × 100ms）
+    for (let i = 0; i < 20 && !el; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      el = container.querySelector(`[data-uuid="${uuid}"]`) as HTMLElement | null;
+    }
+
+    if (!el) return false;
+
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // 高亮闪烁 1.5s，帮助用户定位
+    const originalOutline = el.style.outline;
+    el.style.outline = '2px solid #FACC15';
+    setTimeout(() => {
+      el!.style.outline = originalOutline;
+    }, 1500);
+
+    return true;
   }
 
   private async editAnnotation(annotation: Annotation) {
@@ -590,6 +636,10 @@ export class AnnotationSidebar extends ItemView {
    * 返回清理后的内容；如果未找到锚点则返回 null。
    */
   private removeAnnotationFromContent(content: string, annotation: Annotation): string | null {
+    if (annotation.format === 'native') {
+      const result = removeNativeAnnotation(content, annotation.uuid);
+      return result ?? null;
+    }
     if (annotation.kind === 'block') {
       const result = removeBlockAnchor(content, annotation.uuid);
       return result !== content ? result : null;

@@ -100,6 +100,18 @@ export class MarkVaultSettingTab extends PluginSettingTab {
         });
       });
 
+    // 自然 Markdown 语法（试验）
+    new Setting(containerEl)
+      .setName('Use native Markdown syntax (experimental)')
+      .setDesc('Create annotations as stealth anchors + native Markdown wrappers (==highlight==, **bold**, <u>underline</u>) instead of <mark> tags')
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.useNativeSyntax);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.useNativeSyntax = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
     // ── 字段模板管理 ──
     containerEl.createEl('h3', { text: 'Field Templates' });
 

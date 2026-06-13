@@ -1298,6 +1298,8 @@ export class AnnotationStore {
         clean.fields = annotation.fields;
       }
     }
+    if (annotation.format !== undefined) clean.format = annotation.format;
+    if (annotation.targetHash !== undefined) clean.targetHash = annotation.targetHash;
     return clean;
   }
 

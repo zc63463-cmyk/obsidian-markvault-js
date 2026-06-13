@@ -44,6 +44,9 @@ export interface Annotation {
 
   // v3.0: 自定义字段
   fields?: Record<string, string>;  // 自定义键值对
+
+  // v3.0: 自然 Markdown 语法标注格式
+  format?: 'mark' | 'native';  // 'native' = 隐身锚点 + 原生 Markdown 包裹
 }
 
 /** Span 标注的文本片段范围 */
@@ -151,6 +154,7 @@ export interface MarkVaultSettings {
   enableAutoSync: boolean;
   fieldTemplates: FieldTemplate[];         // 字段模板列表
   defaultTemplateId: string;              // 默认模板 ID（空字符串表示无默认模板）
+  useNativeSyntax: boolean;               // 使用自然 Markdown 语法（隐身锚点 + 原生包裹）
 }
 
 export const DEFAULT_SETTINGS: MarkVaultSettings = {
@@ -161,6 +165,7 @@ export const DEFAULT_SETTINGS: MarkVaultSettings = {
   sidebarDefaultSort: 'position',
   contextWindowSize: 50,
   enableAutoSync: true,
+  useNativeSyntax: false,
   fieldTemplates: [
     {
       id: 'academic',
