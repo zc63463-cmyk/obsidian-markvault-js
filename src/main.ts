@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS, PRESET_COLORS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
-import { syncFromMarkdown, recoverAndSyncOffsets, upgradeMarkdownAnnotations } from './core/markdown-sync';
+import { syncFromMarkdown } from './core/markdown-sync';
 import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { AnnotationModal } from './ui/editor/annotation-modal';
@@ -493,9 +493,11 @@ export default class MarkVaultPlugin extends Plugin {
       return;
     }
 
-    // 冷却期检查：文件最近被同步过，避免短时间内重复 sync
+    // 冷却期检查：文件最近被插件修改过，跳过短时间内重复的 sync
+    // 大文件 vault.modify 后 Obsidian 的元数据重解析可能耗时 30s+，
+    // 期间/之后触发的 file-open 事件不应再执行昂贵的全量同步
     const lastSync = this._syncCooldown.get(file.path);
-    if (lastSync && (Date.now() - lastSync) < 5000) {
+    if (lastSync && (Date.now() - lastSync) < 30000) {
       return;
     }
 
@@ -506,38 +508,20 @@ export default class MarkVaultPlugin extends Plugin {
     // 🔧 P1 修复：冷却期在 sync 开始前设置，防止并发 onFileOpen
     this._syncCooldown.set(file.path, Date.now());
 
+    // 🔧 性能修复：onFileOpen 只做轻量级同步。
+    // 分片 JSON 已在 initialize() 预加载，ensureFileLoaded 只读单文件分片；
+    // 全量 syncFromMarkdown + recoverAndSyncOffsets + upgradeMarkdownAnnotations
+    // 改由 rebuildDatabase 命令手动触发，避免大文件打开/修改后阻塞 UI 40s+。
     try {
       await annotationStore.ensureFileLoaded(file.path);
-
-      let content = await this.app.vault.read(file);
-
-      // 0. 自动升级旧格式标注
-      const upgradedContent = await upgradeMarkdownAnnotations(content, file.path);
-      if (upgradedContent !== null && upgradedContent !== content) {
-        this.modifyGuard.acquire(file.path);
-        try {
-          await this.app.vault.modify(file, upgradedContent);
-        } finally {
-          this.modifyGuard.release(file.path);
-        }
-        content = upgradedContent;
-      }
-
-      // 1. syncFromMarkdown
-      const syncResult = await syncFromMarkdown(content, file.path);
-
-      // 2. 偏移恢复
-      const recovered = await recoverAndSyncOffsets(content, file.path);
-
-      // 3. span 缓存
       await this.updateSpanCache(file.path);
 
-      // 4. 刷新侧边栏
+      // 刷新侧边栏延迟到下一帧，避免阻塞当前事件循环
       setTimeout(async () => {
         await this.refreshSidebar();
       }, 100);
     } catch (err) {
-      console.error('MarkVault: error syncing file', file.path, err);
+      console.error('MarkVault: error in lightweight file open sync', file.path, err);
     }
   }
 

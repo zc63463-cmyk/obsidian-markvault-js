@@ -274,6 +274,8 @@ export class AnnotationSidebar extends ItemView {
             } finally {
               plugin.modifyGuard.release(this.currentFilePath);
             }
+            // vault.modify 完成后再次延长冷却期，覆盖元数据重解析耗时
+            plugin.markFileSynced(this.currentFilePath);
             console.log(`MarkVault: clear all — MD cleaned`);
           }
           // 🔧 P0 修复：MD 未变化时不视为错误（可能锚点已不存在），继续完成清理
@@ -1804,6 +1806,8 @@ export class AnnotationSidebar extends ItemView {
         } finally {
           plugin.modifyGuard.release(annotation.filePath);
         }
+        // vault.modify 完成后再次延长冷却期，覆盖元数据重解析耗时
+        plugin.markFileSynced(annotation.filePath);
       }
 
       await plugin.updateSpanCache(annotation.filePath);
