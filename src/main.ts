@@ -14,6 +14,7 @@ import {
 } from './core/block-fingerprint';
 import { parseBlockAnchors, computeSpanRanges, findSpanEndLine } from './core/annotation-parser';
 import { scanMarkdownContexts } from './core/md-context';
+import { markdownToPlainWithMap } from './core/markdown-plain';
 import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
@@ -1240,11 +1241,12 @@ export default class MarkVaultPlugin extends Plugin {
       const content = await this.app.vault.read(view.file);
 
       // 在源文件中查找选中文本（支持多处相同文本的上下文定位）
-      const idx = this.findBestTextOffset(content, selectedText);
-      if (idx === -1) {
+      const offsetResult = this.findBestTextOffset(content, selectedText);
+      if (!offsetResult) {
         console.error('MarkVault: selected text not found in source file');
         return;
       }
+      const { startOffset, endOffset } = offsetResult;
 
       // 统一加锁，分支内部只执行 modify，锁统一在外层 finally 释放
       this.modifyGuard.acquire(filePath);
@@ -1252,7 +1254,7 @@ export default class MarkVaultPlugin extends Plugin {
       if (kind === 'block') {
         // ── 块标注：在选中文本所在块的边界前插入锚点 ──
         // 向前搜索块边界（空行、标题、callout 起始）
-        const beforeText = content.substring(0, idx);
+        const beforeText = content.substring(0, startOffset);
         const blockStart = this.findBlockBoundary(beforeText);
 
         const anchor = buildBlockAnchor({
@@ -1296,9 +1298,6 @@ export default class MarkVaultPlugin extends Plugin {
         await this.refreshSidebar();
       } else {
         // ── 行内标注：包裹 <mark> 标签 ──
-        const startOffset = idx;
-        const endOffset = idx + selectedText.length;
-
         const annotation: Annotation = {
           uuid,
           filePath,
@@ -1310,7 +1309,7 @@ export default class MarkVaultPlugin extends Plugin {
           startOffset,
           endOffset,
           startLine: 0,
-          contextBefore: content.substring(Math.max(0, idx - 40), idx),
+          contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
           contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -1319,7 +1318,7 @@ export default class MarkVaultPlugin extends Plugin {
 
         const markTag = buildMarkTag(annotation);
 
-        const newContent = content.substring(0, idx) + markTag + content.substring(endOffset);
+        const newContent = content.substring(0, startOffset) + markTag + content.substring(endOffset);
         await this.app.vault.modify(view.file, newContent);
 
         // 强制阅读模式重新渲染，确保 post-processor 立即生效
@@ -1344,17 +1343,33 @@ export default class MarkVaultPlugin extends Plugin {
   }
 
   /**
-   * 在阅读模式选中的文本中，找到其在 Markdown 源文件中的最佳偏移。
-   * 如果文件内只有一处匹配，直接返回；如果有多处匹配，
-   * 尝试通过 DOM selection 所在段落上下文定位到 Markdown 中对应段落。
+   * 在阅读模式选中的文本中，找到其在 Markdown 源文件中的最佳偏移范围。
+   *
+   * 返回源文件中的 [startOffset, endOffset)，用于包裹 <mark> 或定位块边界。
+   * 阅读模式下用户看到的是渲染后的纯文本，因此先把 Markdown 源文本转成纯文本
+   * 并维护偏移映射。
    */
-  private findBestTextOffset(content: string, selectedText: string): number {
-    const firstIdx = content.indexOf(selectedText);
-    const lastIdx = content.lastIndexOf(selectedText);
-    if (firstIdx === -1) return -1;
-    if (firstIdx === lastIdx) return firstIdx;
+  private findBestTextOffset(content: string, selectedText: string): { startOffset: number; endOffset: number } | null {
+    const { plain, map } = markdownToPlainWithMap(content);
+    const normalizedSelected = selectedText.replace(/\s+/g, ' ').trim();
 
-    // 多处匹配：尝试通过 DOM selection 的段落上下文定位
+    let plainIdx = plain.indexOf(normalizedSelected);
+    if (plainIdx !== -1) {
+      const startOffset = map[plainIdx];
+      const endOffset = map[plainIdx + normalizedSelected.length - 1] + 1;
+      return { startOffset, endOffset };
+    }
+
+    // 尝试去除首尾空格后的匹配
+    const trimmedSelected = selectedText.trim();
+    plainIdx = plain.indexOf(trimmedSelected);
+    if (plainIdx !== -1) {
+      const startOffset = map[plainIdx];
+      const endOffset = map[plainIdx + trimmedSelected.length - 1] + 1;
+      return { startOffset, endOffset };
+    }
+
+    // 仍未找到：尝试通过 DOM 段落上下文定位
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0) {
       const range = sel.getRangeAt(0);
@@ -1369,25 +1384,22 @@ export default class MarkVaultPlugin extends Plugin {
           el &&
           (blockTags.includes(el.tagName) || el.hasClass?.('markdown-preview-sizer'))
         ) {
-          const paragraphText = el.textContent || '';
-          const idxInParagraph = paragraphText.indexOf(selectedText);
+          const paragraphText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const idxInParagraph = paragraphText.indexOf(normalizedSelected);
           if (idxInParagraph !== -1) {
-            // 优先搜索完整段落文本
-            const paraIdx = content.indexOf(paragraphText);
-            if (paraIdx !== -1) {
-              return paraIdx + idxInParagraph;
-            }
-
-            // 段落文本可能被截断：用选区及前后一段文本作为上下文匹配
-            const contextStart = Math.max(0, idxInParagraph - 20);
+            // 用段落中一段上下文在 plain 中定位
+            const contextStart = Math.max(0, idxInParagraph - 30);
             const contextEnd = Math.min(
               paragraphText.length,
-              idxInParagraph + selectedText.length + 20,
+              idxInParagraph + normalizedSelected.length + 30,
             );
             const context = paragraphText.substring(contextStart, contextEnd);
-            const contextIdx = content.indexOf(context);
+            const contextIdx = plain.indexOf(context);
             if (contextIdx !== -1) {
-              return contextIdx + (idxInParagraph - contextStart);
+              const innerIdx = idxInParagraph - contextStart;
+              const startOffset = map[contextIdx + innerIdx];
+              const endOffset = map[contextIdx + innerIdx + normalizedSelected.length - 1] + 1;
+              return { startOffset, endOffset };
             }
           }
           break;
@@ -1396,8 +1408,8 @@ export default class MarkVaultPlugin extends Plugin {
       }
     }
 
-    console.warn(`MarkVault: multiple matches for "${selectedText}", falling back to first occurrence`);
-    return firstIdx;
+    console.warn(`MarkVault: selected text not found in source file: "${selectedText}"`);
+    return null;
   }
 
   /** 向前查找块边界位置（空行、标题行、callout行 之后） */
