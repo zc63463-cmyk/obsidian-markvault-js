@@ -605,31 +605,40 @@ export default class MarkVaultPlugin extends Plugin {
   // ─── 增量偏移修正 ──────────────────────────────
 
   private pendingOffsetFix: Promise<void> | null = null;
+  private pendingChanges: ChangeInfo[] = [];
 
   private handleDocChange(changes: ChangeInfo[]): void {
     if (!this.activeFilePath) return;
 
-    // 如果已经有待处理的修正，等它完成
+    // 累积变更，避免连续编辑时丢失中间变更
+    this.pendingChanges.push(...changes);
+
+    // 如果已经有处理任务在运行，直接返回；队列会被该任务消费
     if (this.pendingOffsetFix) return;
 
     this.pendingOffsetFix = (async () => {
       try {
-        const filePath = this.activeFilePath;
-        if (!filePath) return;
+        while (this.pendingChanges.length > 0) {
+          // 取出当前队列中的所有变更
+          const batch = this.pendingChanges.splice(0);
 
-        const annotations = await annotationStore.getAnnotationsForFile(filePath);
-        if (annotations.length === 0) return;
+          const filePath = this.activeFilePath;
+          if (!filePath) return;
 
-        const result = await applyIncrementalOffsetFix(filePath, changes, annotations);
+          const annotations = await annotationStore.getAnnotationsForFile(filePath);
+          if (annotations.length === 0) continue;
 
-        if (result.updated > 0 || result.deleted > 0) {
-          console.log(`MarkVault: offset fix — updated: ${result.updated}, deleted: ${result.deleted}`);
+          const result = await applyIncrementalOffsetFix(filePath, batch, annotations);
 
-          // 🔧 BUG-7 修复：偏移修正后刷新 span 缓存，确保 CM6 装饰使用最新偏移
-          await this.updateSpanCache(filePath);
+          if (result.updated > 0 || result.deleted > 0) {
+            console.log(`MarkVault: offset fix — updated: ${result.updated}, deleted: ${result.deleted}`);
 
-          if (result.deleted > 0) {
-            await this.refreshSidebar();
+            // 🔧 BUG-7 修复：偏移修正后刷新 span 缓存，确保 CM6 装饰使用最新偏移
+            await this.updateSpanCache(filePath);
+
+            if (result.deleted > 0) {
+              await this.refreshSidebar();
+            }
           }
         }
       } catch (err) {
@@ -1106,8 +1115,8 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       const content = await this.app.vault.read(view.file);
 
-      // 在源文件中查找选中文本
-      const idx = content.indexOf(selectedText);
+      // 在源文件中查找选中文本（支持多处相同文本的上下文定位）
+      const idx = this.findBestTextOffset(content, selectedText);
       if (idx === -1) {
         console.error('MarkVault: selected text not found in source file');
         return;
@@ -1197,6 +1206,63 @@ export default class MarkVaultPlugin extends Plugin {
       this.markFileSynced(filePath);
       window.getSelection()?.removeAllRanges();
     }
+  }
+
+  /**
+   * 在阅读模式选中的文本中，找到其在 Markdown 源文件中的最佳偏移。
+   * 如果文件内只有一处匹配，直接返回；如果有多处匹配，
+   * 尝试通过 DOM selection 所在段落上下文定位到 Markdown 中对应段落。
+   */
+  private findBestTextOffset(content: string, selectedText: string): number {
+    const firstIdx = content.indexOf(selectedText);
+    const lastIdx = content.lastIndexOf(selectedText);
+    if (firstIdx === -1) return -1;
+    if (firstIdx === lastIdx) return firstIdx;
+
+    // 多处匹配：尝试通过 DOM selection 的段落上下文定位
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0);
+      let container: Node | null = range.commonAncestorContainer;
+      const blockTags = ['P', 'LI', 'DIV', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION'];
+
+      while (container && container !== document.body) {
+        const el = container.nodeType === Node.ELEMENT_NODE
+          ? (container as HTMLElement)
+          : container.parentElement;
+        if (
+          el &&
+          (blockTags.includes(el.tagName) || el.hasClass?.('markdown-preview-sizer'))
+        ) {
+          const paragraphText = el.textContent || '';
+          const idxInParagraph = paragraphText.indexOf(selectedText);
+          if (idxInParagraph !== -1) {
+            // 优先搜索完整段落文本
+            const paraIdx = content.indexOf(paragraphText);
+            if (paraIdx !== -1) {
+              return paraIdx + idxInParagraph;
+            }
+
+            // 段落文本可能被截断：用选区及前后一段文本作为上下文匹配
+            const contextStart = Math.max(0, idxInParagraph - 20);
+            const contextEnd = Math.min(
+              paragraphText.length,
+              idxInParagraph + selectedText.length + 20,
+            );
+            const context = paragraphText.substring(contextStart, contextEnd);
+            const contextIdx = content.indexOf(context);
+            if (contextIdx !== -1) {
+              return contextIdx + (idxInParagraph - contextStart);
+            }
+          }
+          break;
+        }
+        container = container.parentNode;
+      }
+    }
+
+    console.warn(`MarkVault: multiple matches for "${selectedText}", falling back to first occurrence`);
+    return firstIdx;
   }
 
   /** 向前查找块边界位置（空行、标题行、callout行 之后） */
