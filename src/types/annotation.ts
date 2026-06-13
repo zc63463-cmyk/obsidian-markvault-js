@@ -39,6 +39,9 @@ export interface Annotation {
   // v2.1: Span 标注（方案C）
   spanRanges?: SpanRange[];    // Span 标注的文本片段位置范围
 
+  // v2.2: Block/Span 目标内容指纹，用于锚点漂移后找回目标
+  targetHash?: string;
+
   // v3.0: 自定义字段
   fields?: Record<string, string>;  // 自定义键值对
 }

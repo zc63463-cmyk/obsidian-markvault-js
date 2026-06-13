@@ -5,6 +5,15 @@ import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/Ann
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
 import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from './core/markdown-sync';
+import {
+  computeBlockSignature,
+  computeSpanSignature,
+  findBlockLineBySignature,
+  findSpanLineBySignature,
+  detectBlockTypeAtLine,
+} from './core/block-fingerprint';
+import { parseBlockAnchors, computeSpanRanges, findSpanEndLine } from './core/annotation-parser';
+import { scanMarkdownContexts } from './core/md-context';
 import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
@@ -14,7 +23,9 @@ import { addAnnotation } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
 import { buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
+import { computeSignature } from './core/block-fingerprint';
 import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
+
 import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeToolbar } from './ui/reading/ReadingModeToolbar';
 import { ReadingModeClickDelegate } from './ui/reading/ReadingModeClickDelegate';
@@ -558,13 +569,19 @@ export default class MarkVaultPlugin extends Plugin {
 
   /**
    * 强制同步当前文件：
-   * 1. 从 Markdown 同步元数据（note / tags / color / type / fields）
-   * 2. 对行内标注执行偏移恢复，修正因外部编辑导致的偏移漂移
-   * 3. 更新 span 缓存并刷新侧边栏
+   * 1. 从 Markdown 同步元数据（note / tags / color / type / fields / targetHash）
+   * 2. 对行内标注执行偏移恢复
+   * 3. 对 block/span 标注执行目标位置恢复（基于 targetHash 指纹）
+   * 4. 更新 span 缓存并刷新侧边栏
    */
-  async forceSyncFile(
-    filePath: string,
-  ): Promise<{ added: number; updated: number; recovered: number; failed: number }> {
+  async forceSyncFile(filePath: string): Promise<{
+    added: number;
+    updated: number;
+    inlineRecovered: number;
+    blocksRecovered: number;
+    spansRecovered: number;
+    failed: number;
+  }> {
     if (!this._storeReady) {
       throw new Error('MarkVault: annotation database not initialized');
     }
@@ -584,7 +601,9 @@ export default class MarkVaultPlugin extends Plugin {
 
     let added = 0;
     let updated = 0;
-    let recovered = 0;
+    let inlineRecovered = 0;
+    let blocksRecovered = 0;
+    let spansRecovered = 0;
     let failed = 0;
 
     this.modifyGuard.acquire(filePath);
@@ -598,14 +617,14 @@ export default class MarkVaultPlugin extends Plugin {
 
       // 2. 行内标注偏移恢复
       const plainText = getPlainTextForOffsetRecovery(content);
-      const annotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
+      const inlineAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
         (a) => !a.kind || a.kind === 'inline',
       );
 
-      if (annotations.length > 0 && plainText.length > 0) {
-        const recoverResults = batchRecoverOffsets(plainText, annotations);
+      if (inlineAnnotations.length > 0 && plainText.length > 0) {
+        const recoverResults = batchRecoverOffsets(plainText, inlineAnnotations);
         for (const r of recoverResults) {
-          const ann = annotations.find((a) => a.uuid === r.uuid);
+          const ann = inlineAnnotations.find((a) => a.uuid === r.uuid);
           if (!ann) continue;
 
           const offsetChanged = r.startOffset !== ann.startOffset || r.endOffset !== ann.endOffset;
@@ -622,13 +641,118 @@ export default class MarkVaultPlugin extends Plugin {
               contextBefore,
               contextAfter,
             });
-            recovered++;
+            inlineRecovered++;
           }
         }
-        failed = annotations.length - recoverResults.length;
+        failed += inlineAnnotations.length - recoverResults.length;
       }
 
-      // 3. 刷新缓存与 UI
+      // 3. block / span 目标位置恢复
+      const blockSpanAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
+        (a) => a.kind === 'block' || a.kind === 'span',
+      );
+
+      if (blockSpanAnnotations.length > 0) {
+        const lines = content.split('\n');
+        const anchors = parseBlockAnchors(content);
+        const anchorByUuid = new Map(anchors.map((a) => [a.uuid, a]));
+
+        for (const ann of blockSpanAnnotations) {
+          const anchor = anchorByUuid.get(ann.uuid);
+          if (!anchor) {
+            // Markdown 中已找不到该锚点，无法自动恢复
+            failed++;
+            continue;
+          }
+
+          if (ann.kind === 'block') {
+            const preferredLine = ann.targetLine ?? anchor.anchorLine + 1;
+            const currentSig = computeBlockSignature(lines, preferredLine, ann.blockType);
+
+            if (ann.targetHash && currentSig && currentSig !== ann.targetHash) {
+              const foundLine = findBlockLineBySignature(
+                lines,
+                ann.blockType || 'paragraph',
+                ann.targetHash,
+                preferredLine,
+              );
+              if (foundLine !== null) {
+                await annotationStore.updateAnnotation(ann.uuid, {
+                  targetLine: foundLine,
+                  anchorLine: anchor.anchorLine,
+                  blockType: ann.blockType || detectBlockTypeAtLine(lines, foundLine),
+                });
+                blocksRecovered++;
+              } else {
+                failed++;
+              }
+            } else {
+              // 指纹一致或没有指纹，仅同步 anchorLine
+              if (anchor.anchorLine !== ann.anchorLine) {
+                await annotationStore.updateAnnotation(ann.uuid, { anchorLine: anchor.anchorLine });
+              }
+            }
+          } else if (ann.kind === 'span') {
+            // 跳过锚点行、空行、特殊围栏，找到 span 实际内容起始行
+            let actualTargetLine = anchor.anchorLine + 1;
+            for (let i = actualTargetLine; i < lines.length; i++) {
+              const trimmed = lines[i].trim();
+              if (
+                trimmed.startsWith('%%markvault') ||
+                trimmed === '$$' ||
+                trimmed === '$$$' ||
+                trimmed.startsWith('```') ||
+                trimmed === ''
+              ) {
+                actualTargetLine = i + 1;
+                continue;
+              }
+              actualTargetLine = i;
+              break;
+            }
+
+            if (actualTargetLine < lines.length) {
+              const endLine = findSpanEndLine(lines, actualTargetLine);
+              const fullSpanText = lines.slice(actualTargetLine, endLine + 1).join('\n');
+              const currentSig = computeSpanSignature(fullSpanText);
+
+              // 如果指纹不匹配，在附近搜索
+              if (ann.targetHash && currentSig && currentSig !== ann.targetHash) {
+                const foundLine = findSpanLineBySignature(
+                  lines,
+                  ann.targetHash,
+                  actualTargetLine,
+                );
+                if (foundLine !== null) {
+                  actualTargetLine = foundLine;
+                } else {
+                  failed++;
+                  continue;
+                }
+              }
+
+              const newSpanRanges = computeSpanRanges(content, actualTargetLine, fullSpanText);
+              const changed =
+                actualTargetLine !== ann.targetLine ||
+                anchor.anchorLine !== ann.anchorLine ||
+                JSON.stringify(newSpanRanges) !== JSON.stringify(ann.spanRanges);
+
+              if (changed) {
+                await annotationStore.updateAnnotation(ann.uuid, {
+                  targetLine: actualTargetLine,
+                  anchorLine: anchor.anchorLine,
+                  spanRanges: newSpanRanges,
+                });
+                spansRecovered++;
+              }
+            } else {
+              failed++;
+            }
+          }
+        }
+      }
+
+      // 4. 刷新缓存与 UI
       this.markFileSynced(filePath);
       await this.updateSpanCache(filePath);
       this.scheduleSidebarRefresh();
@@ -636,7 +760,7 @@ export default class MarkVaultPlugin extends Plugin {
       this.modifyGuard.release(filePath);
     }
 
-    return { added, updated, recovered, failed };
+    return { added, updated, inlineRecovered, blocksRecovered, spansRecovered, failed };
   }
 
   /** 调度侧边栏刷新，使用 requestAnimationFrame 并去重 */
@@ -1043,6 +1167,7 @@ export default class MarkVaultPlugin extends Plugin {
           createdAt: Date.now(),
           updatedAt: Date.now(),
           kind: 'block',
+          targetHash: computeSignature(selectedText),
         };
 
         await addAnnotation(annotation);

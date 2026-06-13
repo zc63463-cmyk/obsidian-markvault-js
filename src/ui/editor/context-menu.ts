@@ -4,6 +4,7 @@ import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../..
 import { PRESET_COLORS } from '../../types/annotation';
 import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
+import { computeSignature, computeSpanSignature } from '../../core/block-fingerprint';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from '../../core/md-context';
@@ -446,6 +447,7 @@ async function createSpanAnnotation(
     kind: 'span',
     anchorLine,
     spanRanges,
+    targetHash: computeSpanSignature(selection),
   };
 
   plugin.modifyGuard.acquire(filePath);
@@ -545,6 +547,7 @@ async function createBlockAnnotation(
     blockType: blockInfo.type,
     targetLine: anchorLine + 1, // 锚点下一行是目标块
     anchorLine,
+    targetHash: computeSignature(blockInfo.content),
   };
 
   plugin.modifyGuard.acquire(filePath);
@@ -655,7 +658,9 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
           const parts = [
             result.added > 0 ? `${result.added} added` : '',
             result.updated > 0 ? `${result.updated} updated` : '',
-            result.recovered > 0 ? `${result.recovered} offsets recovered` : '',
+            result.inlineRecovered > 0 ? `${result.inlineRecovered} inline offsets recovered` : '',
+            result.blocksRecovered > 0 ? `${result.blocksRecovered} blocks recovered` : '',
+            result.spansRecovered > 0 ? `${result.spansRecovered} spans recovered` : '',
             result.failed > 0 ? `${result.failed} failed` : '',
           ].filter(Boolean);
           const msg = parts.length > 0 ? parts.join(', ') : 'no changes detected';

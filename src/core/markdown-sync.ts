@@ -147,6 +147,11 @@ export async function syncFromMarkdown(
       updates.type = mdAnn.type;
     }
 
+    // targetHash: block/span 的目标内容指纹，从 Markdown 重新计算
+    if ((mdAnn.kind === 'block' || mdAnn.kind === 'span') && mdAnn.targetHash && mdAnn.targetHash !== dbAnn.targetHash) {
+      updates.targetHash = mdAnn.targetHash;
+    }
+
     // 🆕 Phase 3: fields 同步
     // 仅对 inline 标注同步 fields（block/span 的 fields 不在 MD 中）
     if (mdAnn.kind === 'inline' || mdAnn.kind === undefined) {

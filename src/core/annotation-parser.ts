@@ -3,6 +3,7 @@ import type { AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
 import { encodeFields, decodeFields } from '../utils/fields';
 import { scanMarkdownContexts } from './md-context';
+import { computeBlockSignature, computeSpanSignature } from './block-fingerprint';
 
 const MARK_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_REGEX = /\b([\w-]+)="([^"]*)"/g;
@@ -636,6 +637,11 @@ export function parseAllAnnotationsFromMarkdown(
     let spanRanges: SpanRange[] | undefined;
     let text = blockContent;
 
+    // 计算 block/span 目标内容指纹
+    const targetHash = isSpan
+      ? computeSpanSignature(text)
+      : computeBlockSignature(lines, actualTargetLine, isSpan ? undefined : 'paragraph');
+
     if (isSpan && actualTargetLine < lines.length) {
       // span 标注：收集 actualTargetLine 到下一个空行或下一个锚点行之间的所有内容
       const endLine = findSpanEndLine(lines, actualTargetLine);
@@ -667,6 +673,7 @@ export function parseAllAnnotationsFromMarkdown(
       targetLine: actualTargetLine,
       anchorLine: anchor.anchorLine,
       spanRanges,
+      targetHash,
       _source: 'markdown' as const,
     };
   });
@@ -678,7 +685,7 @@ export function parseAllAnnotationsFromMarkdown(
  * 查找 span 标注覆盖的结束行
  * 从 targetLine 开始，到空行或下一个锚点行为止
  */
-function findSpanEndLine(lines: string[], startLine: number): number {
+export function findSpanEndLine(lines: string[], startLine: number): number {
   let endLine = startLine;
   for (let i = startLine; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -709,7 +716,7 @@ function findSpanEndLine(lines: string[], startLine: number): number {
  * 计算 span 标注的文本片段偏移范围
  * 扫描目标内容中的特殊区域，返回纯文本片段的文档偏移
  */
-function computeSpanRanges(content: string, targetLine: number, targetText: string): SpanRange[] {
+export function computeSpanRanges(content: string, targetLine: number, targetText: string): SpanRange[] {
   // 计算目标行在文档中的偏移
   const lines = content.split('\n');
   let lineOffset = 0;

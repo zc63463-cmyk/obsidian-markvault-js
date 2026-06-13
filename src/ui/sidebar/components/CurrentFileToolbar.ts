@@ -14,7 +14,14 @@ export interface CurrentFileToolbarHost {
   getPluginInstance(): MarkVaultPluginInterface | null;
   removeAnnotationFromContent(content: string, annotation: Annotation): string | null;
   onCleared(filePath: string): Promise<void>;
-  syncCurrentFile(filePath: string): Promise<{ added: number; updated: number; recovered: number; failed: number }>;
+  syncCurrentFile(filePath: string): Promise<{
+    added: number;
+    updated: number;
+    inlineRecovered: number;
+    blocksRecovered: number;
+    spansRecovered: number;
+    failed: number;
+  }>;
 }
 
 export class CurrentFileToolbar {
@@ -70,10 +77,13 @@ export class CurrentFileToolbar {
       const result = await this.host.syncCurrentFile(filePath);
       notice.hide();
 
+      const recoveredTotal = result.inlineRecovered + result.blocksRecovered + result.spansRecovered;
       const parts = [
         result.added > 0 ? `${result.added} added` : '',
         result.updated > 0 ? `${result.updated} updated` : '',
-        result.recovered > 0 ? `${result.recovered} offsets recovered` : '',
+        result.inlineRecovered > 0 ? `${result.inlineRecovered} inline offsets recovered` : '',
+        result.blocksRecovered > 0 ? `${result.blocksRecovered} blocks recovered` : '',
+        result.spansRecovered > 0 ? `${result.spansRecovered} spans recovered` : '',
         result.failed > 0 ? `${result.failed} failed` : '',
       ].filter(Boolean);
       const msg = parts.length > 0 ? parts.join(', ') : 'no changes detected';

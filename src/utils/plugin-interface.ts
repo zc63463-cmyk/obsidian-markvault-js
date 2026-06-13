@@ -31,8 +31,15 @@ export interface MarkVaultPluginInterface {
   /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync */
   markFileSynced(filePath: string): void;
 
-  /** 强制同步当前文件：同步元数据并恢复偏移 */
-  forceSyncFile(filePath: string): Promise<{ added: number; updated: number; recovered: number; failed: number }>;
+  /** 强制同步当前文件：同步元数据并恢复偏移、块/span 目标位置 */
+  forceSyncFile(filePath: string): Promise<{
+    added: number;
+    updated: number;
+    inlineRecovered: number;
+    blocksRecovered: number;
+    spansRecovered: number;
+    failed: number;
+  }>;
 
   /** 插件设置 */
   settings: MarkVaultSettings;
