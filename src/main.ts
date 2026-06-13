@@ -1,5 +1,5 @@
 import { Plugin, MarkdownView, TFile, Notice } from 'obsidian';
-import type { MarkVaultSettings, AnnotationType, Annotation } from './types/annotation';
+import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
 import { DEFAULT_SETTINGS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
@@ -23,7 +23,7 @@ import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { addAnnotation } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
-import { buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
+import { buildMarkTag, buildBlockAnchor, buildSpanAnchor } from './core/annotation-parser';
 import { computeSignature } from './core/block-fingerprint';
 import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
 
@@ -1297,41 +1297,98 @@ export default class MarkVaultPlugin extends Plugin {
         this.markFileSynced(filePath);
         await this.refreshSidebar();
       } else {
-        // ── 行内标注：包裹 <mark> 标签 ──
-        const annotation: Annotation = {
-          uuid,
-          filePath,
-          type,
-          color,
-          text: selectedText,
-          note: '',
-          tags: [],
-          startOffset,
-          endOffset,
-          startLine: 0,
-          contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
-          contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          kind: 'inline',
-        };
+        const sourceSelected = content.substring(startOffset, endOffset);
+        const scan = scanMarkdownContexts(sourceSelected);
 
-        const markTag = buildMarkTag(annotation);
+        if (scan.hasSpecialContent) {
+          // ── span 标注：选区包含公式/代码/链接等 Markdown 语法，不能直接用 <mark> 包裹 ──
+          const beforeText = content.substring(0, startOffset);
+          const blockStart = this.findBlockBoundary(beforeText);
+          const anchorLine = content.substring(0, blockStart).split('\n').length - 1;
 
-        const newContent = content.substring(0, startOffset) + markTag + content.substring(endOffset);
-        await this.app.vault.modify(view.file, newContent);
+          const anchor = buildSpanAnchor({ uuid, type, color, note: '' });
+          const anchorWithNewline = anchor + '\n';
+          const newContent = content.substring(0, blockStart) + anchorWithNewline + content.substring(blockStart);
+          await this.app.vault.modify(view.file, newContent);
 
-        // 强制阅读模式重新渲染，确保 post-processor 立即生效
-        if (view.previewMode) {
-          view.previewMode.rerender(true);
+          if (view.previewMode) {
+            view.previewMode.rerender(true);
+          }
+
+          const insertedLen = anchorWithNewline.length;
+          const spanRanges: SpanRange[] = [];
+          for (const seg of scan.segments) {
+            if (seg.type === 'text' && seg.content.trim().length > 0) {
+              spanRanges.push({
+                from: startOffset + seg.startOffset + insertedLen,
+                to: startOffset + seg.endOffset + insertedLen,
+              });
+            }
+          }
+
+          const annotation: Annotation = {
+            uuid,
+            filePath,
+            type,
+            color,
+            text: selectedText,
+            note: '',
+            tags: [],
+            startOffset: blockStart,
+            endOffset: blockStart + anchor.length,
+            startLine: 0,
+            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
+            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            kind: 'span',
+            anchorLine,
+            spanRanges,
+            targetHash: computeSpanSignature(selectedText),
+          };
+
+          await addAnnotation(annotation);
+          await this.updateSpanCache(filePath);
+          console.log(`MarkVault: created reading-mode span annotation ${uuid} in ${filePath}`);
+          this.markFileSynced(filePath);
+          await this.refreshSidebar();
+        } else {
+          // ── 行内标注：包裹 <mark> 标签 ──
+          const annotation: Annotation = {
+            uuid,
+            filePath,
+            type,
+            color,
+            text: selectedText,
+            note: '',
+            tags: [],
+            startOffset,
+            endOffset,
+            startLine: 0,
+            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
+            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            kind: 'inline',
+          };
+
+          const markTag = buildMarkTag(annotation);
+
+          const newContent = content.substring(0, startOffset) + markTag + content.substring(endOffset);
+          await this.app.vault.modify(view.file, newContent);
+
+          // 强制阅读模式重新渲染，确保 post-processor 立即生效
+          if (view.previewMode) {
+            view.previewMode.rerender(true);
+          }
+
+          annotation.endOffset = startOffset + markTag.length;
+          await addAnnotation(annotation);
+
+          console.log(`MarkVault: created reading-mode inline annotation ${uuid} in ${filePath}`);
+          this.markFileSynced(filePath);
+          await this.refreshSidebar();
         }
-
-        annotation.endOffset = startOffset + markTag.length;
-        await addAnnotation(annotation);
-
-        console.log(`MarkVault: created reading-mode inline annotation ${uuid} in ${filePath}`);
-        this.markFileSynced(filePath);
-        await this.refreshSidebar();
       }
     } catch (err) {
       console.error('MarkVault: failed to create reading-mode annotation', err);
