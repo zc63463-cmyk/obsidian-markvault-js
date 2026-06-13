@@ -47,6 +47,9 @@ export default class MarkVaultPlugin extends Plugin {
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
   private _syncCooldown: Map<string, number> = new Map();
 
+  // 🆕 侧边栏刷新去重标志，避免 onFileOpen 高频触发时产生刷新堆积
+  private _pendingSidebarRefresh = false;
+
   // 🆕 AnnotationStore 是否初始化成功
   private _storeReady = false;
 
@@ -593,13 +596,24 @@ export default class MarkVaultPlugin extends Plugin {
       await annotationStore.ensureFileLoaded(file.path);
       await this.updateSpanCache(file.path);
 
-      // 刷新侧边栏延迟到下一帧，避免阻塞当前事件循环
-      setTimeout(async () => {
-        await this.refreshSidebar();
-      }, 100);
+      // 刷新侧边栏调度到下一帧，避免阻塞当前事件循环并去重
+      this.scheduleSidebarRefresh();
     } catch (err) {
       console.error('MarkVault: error in lightweight file open sync', file.path, err);
     }
+  }
+
+  /** 调度侧边栏刷新，使用 requestAnimationFrame 并去重 */
+  private scheduleSidebarRefresh(): void {
+    if (this._pendingSidebarRefresh) return;
+    this._pendingSidebarRefresh = true;
+
+    requestAnimationFrame(() => {
+      this._pendingSidebarRefresh = false;
+      this.refreshSidebar().catch((err) => {
+        console.error('MarkVault: scheduled sidebar refresh failed', err);
+      });
+    });
   }
 
   // ─── 增量偏移修正 ──────────────────────────────
