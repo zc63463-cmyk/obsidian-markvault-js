@@ -105,3 +105,15 @@ export async function adjustOffsetsAfterEdit(
     await annotationStore.batchUpdateOffsets(updates);
   }
 }
+
+// ─── 字段查询 ─────────────────────────────────────────
+
+/** 获取所有已加载标注中出现过的字段键名列表 */
+export function getFieldKeys(): string[] {
+  return annotationStore.getFieldKeys();
+}
+
+/** 获取指定字段键的所有已出现值列表 */
+export function getFieldValues(key: string): string[] {
+  return annotationStore.getFieldValues(key);
+}

@@ -19,4 +19,7 @@ export interface MarkVaultPluginInterface {
 
   /** 刷新侧边栏 */
   refreshSidebar(): Promise<void>;
+
+  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync */
+  markFileSynced(filePath: string): void;
 }

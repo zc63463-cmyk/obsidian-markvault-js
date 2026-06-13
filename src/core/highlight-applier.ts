@@ -61,8 +61,8 @@ function resolveFilePath(): string | null {
 const MARK_FULL_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 /** 从属性字符串中提取属性 */
 const ATTR_EXTRACT_REGEX = /\b([\w-]+)="([^"]*)"/g;
-/** 匹配 %%markvault:%% 锚点行 */
-const BLOCK_ANCHOR_REGEX = /%%markvault:([^:]+):([^:]+):([^:]+):([^%]*)%%/g;
+/** 匹配 %%markvault:%% 锚点行（note 段可选） */
+const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
 
 // ─── Span Annotation Cache ──────────────────────────────────
 
@@ -326,7 +326,7 @@ class MarkVaultDecorator implements PluginValue {
     for (let i = 0; i < lines.length; i++) {
       const lineText = lines[i];
       const trimmed = lineText.trim();
-      if (/^%%markvault(-span)?:[^:]+:[^:]+:[^:]+:[^%]*%%$/.test(trimmed)) {
+      if (/^%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%$/.test(trimmed)) {
         const from = lineOffset;
         const to = lineOffset + lineText.length;
         // 隐藏整行锚点内容，但保留换行符

@@ -49,26 +49,31 @@ export async function syncFromMarkdown(
 
   // 1. Markdown 有但 DB 没有 → 添加到 DB
   const toAdd = markdownAnnotations.filter(a => !dbUuids.has(a.uuid));
-  for (const ann of toAdd) {
-    // 补充上下文
-    const fullText = content.replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1');
-    const startOffset = computeOffsetInPlainContent(content, ann.startOffset);
-    const { contextBefore, contextAfter } = extractContextFromContent(fullText, startOffset, ann.text);
+  if (toAdd.length > 0) {
+    // 🔧 P0 修复：fullText 计算移到循环外，避免 O(n×content_size)
+    // 🔧 修复：fullText 计算时同时 strip <mark> 标签和 %%markvault%% 锚点行
+    // 防止锚点行碎片混入 contextBefore/contextAfter
+    const fullText = content
+      .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
+      .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+    for (const ann of toAdd) {
+      const startOffset = computeOffsetInPlainContent(content, ann.startOffset);
+      const { contextBefore, contextAfter } = extractContextFromContent(fullText, startOffset, ann.text);
 
-    // 确保 note 是字符串而不是 undefined
-    const annotationToAdd: Annotation = {
-      ...ann,
-      note: ann.note || '',
-      tags: ann.tags || [],
-      startOffset,
-      contextBefore,
-      contextAfter,
-      createdAt: ann.createdAt || Date.now(),
-      updatedAt: ann.updatedAt || Date.now(),
-    };
+      const annotationToAdd: Annotation = {
+        ...ann,
+        note: ann.note || '',
+        tags: ann.tags || [],
+        startOffset,
+        contextBefore,
+        contextAfter,
+        createdAt: ann.createdAt || Date.now(),
+        updatedAt: ann.updatedAt || Date.now(),
+      };
 
-    await addAnnotation(annotationToAdd);
-    added++;
+      await addAnnotation(annotationToAdd);
+      added++;
+    }
   }
 
   // 2. DB 有但 Markdown 没有 → 🔧 不再自动删除！
@@ -87,36 +92,44 @@ export async function syncFromMarkdown(
   // 策略：以 DB 为准，只有当 Markdown 中的值非空且与 DB 不同时才更新 DB
   // 这样可以防止 sync 覆盖用户在 Modal 中输入的批注
   const toUpdate = markdownAnnotations.filter(a => dbUuids.has(a.uuid));
-  for (const mdAnn of toUpdate) {
-    const dbAnn = dbAnnotations.find(a => a.uuid === mdAnn.uuid);
-    if (!dbAnn) continue;
+  if (toUpdate.length > 0) {
+    // 🔧 P1 修复：构建 O(1) 查找 Map，避免循环内 O(k) 的 .find()
+    const dbMap = new Map(dbAnnotations.map(a => [a.uuid, a]));
+    for (const mdAnn of toUpdate) {
+      const dbAnn = dbMap.get(mdAnn.uuid);
+      if (!dbAnn) continue;
 
-    // 确定需要更新的字段
-    const updates: Partial<Annotation> = {};
+      // 确定需要更新的字段
+      const updates: Partial<Annotation> = {};
 
-    // note: DB-first 策略 — 优先保留 DB 中的值
-    // - 如果 MD 有值且 DB 不同 → 用户可能在 MD 中手动编辑了，更新 DB
-    // - 如果 MD 为空但 DB 有值 → 保留 DB 值（可能是 sync 读到了旧 MD）
-    // - 如果 MD 有值且 DB 为空 → 更新 DB
-    const mdNote = mdAnn.note || '';
-    const dbNote = dbAnn.note || '';
-    if (mdNote !== dbNote) {
-      if (mdNote && !dbNote) {
-        // MD 有值，DB 为空 → 更新 DB
-        updates.note = mdNote;
-      } else if (mdNote && dbNote) {
-        // 双方都有值但不同 → 以 MD 为准（用户可能手动编辑了 MD）
-        updates.note = mdNote;
+      // note: DB-first 策略 — 优先保留 DB 中的值
+      // - 如果 MD 有值且 DB 不同 → 用户可能在 MD 中手动编辑了，更新 DB
+      // - 如果 MD 为空但 DB 有值 → 保留 DB 值（可能是 sync 读到了旧 MD）
+      // - 如果 MD 有值且 DB 为空 → 更新 DB
+      // 🔧 安全检查：如果 MD note 看起来像另一个标注的锚点格式，拒绝更新
+      const mdNote = mdAnn.note || '';
+      const dbNote = dbAnn.note || '';
+      const looksLikeAnchor = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(highlight|bold|underline):(yellow|green|blue|pink|purple):?$/.test(mdNote.trim());
+      if (mdNote !== dbNote) {
+        if (looksLikeAnchor) {
+          // 拒绝：MD note 字段包含另一个标注的锚点格式数据
+          console.warn(`MarkVault sync: refusing to update note for ${mdAnn.uuid} — MD note looks like anchor: "${mdNote}"`);
+        } else if (mdNote && !dbNote) {
+          // MD 有值，DB 为空 → 更新 DB
+          updates.note = mdNote;
+        } else if (mdNote && dbNote) {
+          // 双方都有值但不同 → 以 MD 为准（用户可能手动编辑了 MD）
+          updates.note = mdNote;
+        }
+        // 如果 MD 为空但 DB 有值 → 不更新，保留 DB 的值
       }
-      // 如果 MD 为空但 DB 有值 → 不更新，保留 DB 的值
-    }
 
-    // tags: 类似逻辑
-    const mdTags = mdAnn.tags.join(',');
-    const dbTags = dbAnn.tags.join(',');
-    if (mdTags !== dbTags) {
-      // 以非空的一方为准
-      if (mdTags && !dbTags) {
+      // tags: 类似逻辑
+      const mdTags = mdAnn.tags.join(',');
+      const dbTags = dbAnn.tags.join(',');
+      if (mdTags !== dbTags) {
+        // 以非空的一方为准
+        if (mdTags && !dbTags) {
         updates.tags = mdAnn.tags;
       } else if (!mdTags && dbTags) {
         // Markdown 为空，保留 DB 值，不更新
@@ -134,6 +147,25 @@ export async function syncFromMarkdown(
       updates.type = mdAnn.type;
     }
 
+    // 🆕 Phase 3: fields 同步
+    // 仅对 inline 标注同步 fields（block/span 的 fields 不在 MD 中）
+    if (mdAnn.kind === 'inline' || mdAnn.kind === undefined) {
+      const mdFields = mdAnn.fields || {};
+      const dbFields = dbAnn.fields || {};
+      const mdFieldsStr = JSON.stringify(mdFields);
+      const dbFieldsStr = JSON.stringify(dbFields);
+      if (mdFieldsStr !== dbFieldsStr) {
+        if (Object.keys(mdFields).length > 0 && Object.keys(dbFields).length === 0) {
+          // MD 有 fields，DB 无 → 更新 DB
+          updates.fields = mdFields;
+        } else if (Object.keys(mdFields).length > 0 && Object.keys(dbFields).length > 0) {
+          // 双方都有但不同 → 以 MD 为准（用户可能手动编辑了 MD）
+          updates.fields = mdFields;
+        }
+        // MD 无 fields 但 DB 有 → 保留 DB（防止 inline 标注的 MD 中 data-fields 被手动删除后 DB 数据被清除）
+      }
+    }
+
     if (Object.keys(updates).length > 0) {
       console.log(`MarkVault sync: updating annotation ${mdAnn.uuid} with`, updates);
       await annotationStore.updateAnnotation(mdAnn.uuid, {
@@ -143,6 +175,7 @@ export async function syncFromMarkdown(
       updated++;
     }
   }
+  } // if (toUpdate.length > 0)
 
   return { added, removed, updated, upgraded };
 }
@@ -199,7 +232,10 @@ export async function recoverAndSyncOffsets(
   content: string,
   filePath: string,
 ): Promise<number> {
-  const plainContent = content.replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1');
+  // 🔧 修复：plainContent 同时 strip <mark> 标签和 %%markvault%% 锚点行
+  const plainContent = content
+    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
   const dbAnnotations = await getAnnotationsForFile(filePath);
 
   if (dbAnnotations.length === 0) return 0;
@@ -228,8 +264,10 @@ export async function recoverAndSyncOffsets(
  */
 function computeOffsetInPlainContent(markdownContent: string, markTagOffset: number): number {
   const beforeMark = markdownContent.substring(0, markTagOffset);
-  // 移除之前所有 mark 标签
-  const plainBefore = beforeMark.replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1');
+  // 🔧 修复：移除之前所有 mark 标签 + anchor 锚点行
+  const plainBefore = beforeMark
+    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
   return plainBefore.length;
 }
 

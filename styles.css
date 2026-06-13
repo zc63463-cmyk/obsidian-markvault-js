@@ -1,5 +1,90 @@
 /* ─── MarkVault Plugin Styles ─────────────────────── */
 
+/* ─── 阅读模式浮动工具条 ─── */
+
+.markvault-reading-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--background-primary, #ffffff);
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.15));
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  opacity: 0;
+  transform: translate(-50%, 0) scale(0.8);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.markvault-reading-type-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.markvault-reading-type-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.12));
+  background: var(--background-secondary, #f5f5f5);
+  cursor: pointer;
+  font-size: 0.7em;
+  font-weight: 600;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all 0.12s ease;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.markvault-reading-type-btn:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--text-muted);
+}
+.markvault-reading-type-btn.active {
+  background: var(--interactive-accent, #7c3aed);
+  color: var(--text-on-accent, white);
+  border-color: var(--interactive-accent, #7c3aed);
+}
+.markvault-reading-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--background-modifier-border, rgba(0,0,0,0.12));
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+.markvault-reading-color-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.markvault-reading-color-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.12s ease;
+  flex-shrink: 0;
+}
+.markvault-reading-color-btn:hover {
+  transform: scale(1.25);
+  border-color: var(--text-normal);
+  box-shadow: 0 0 6px rgba(0,0,0,0.2);
+}
+.markvault-reading-toolbar-label {
+  font-size: 0.65em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 2px;
+  pointer-events: none;
+}
+
 /* ─── 高亮样式 (5种颜色 × 3种类型) ─── */
 
 /* Highlight */
@@ -157,27 +242,49 @@
 /* ─── 过滤栏 ─── */
 
 .markvault-filter-section {
-  padding: 8px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--background-modifier-border);
   flex-shrink: 0;
 }
 
-.markvault-filter-bar {
+/* 紧凑行布局 */
+.markvault-filter-row {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 6px;
+}
+.markvault-filter-row:last-child {
+  margin-bottom: 0;
+}
+
+/* 分组：标签 + 按钮横排 */
+.markvault-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.markvault-filter-group-label {
+  font-size: 0.7em;
+  color: var(--text-faint);
+  font-weight: 500;
+  margin-right: 1px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .markvault-filter-btn {
-  padding: 3px 8px;
+  padding: 2px 7px;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--background-secondary);
   color: var(--text-muted);
-  font-size: 0.8em;
+  font-size: 0.75em;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
+  line-height: 1.3;
 }
 .markvault-filter-btn:hover {
   background: var(--background-modifier-hover);
@@ -189,58 +296,135 @@
 }
 
 /* 颜色过滤 */
-.markvault-filter-colors {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 6px;
-}
-
 .markvault-color-btn {
-  padding: 2px 8px;
+  padding: 2px 7px;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--background-secondary);
   color: var(--text-muted);
-  font-size: 0.75em;
+  font-size: 0.7em;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
 }
 .markvault-color-btn.active {
   border-color: var(--interactive-accent);
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
+.markvault-color-mini {
+  font-size: 0.68em;
+}
 .markvault-color-dot {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   padding: 0;
-  min-width: 20px;
+  min-width: 16px;
 }
 .markvault-color-dot.active {
-  transform: scale(1.2);
+  transform: scale(1.15);
   box-shadow: 0 0 0 2px var(--interactive-accent);
 }
 
 /* 排序 */
-.markvault-filter-sort {
-  display: flex;
-  gap: 4px;
-}
-
 .markvault-sort-btn {
-  padding: 2px 8px;
+  padding: 2px 7px;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
+  border-radius: 3px;
   background: var(--background-secondary);
   color: var(--text-muted);
   font-size: 0.75em;
   cursor: pointer;
+  transition: all 0.12s ease;
 }
 .markvault-sort-btn.active {
   background: var(--interactive-accent);
   color: var(--text-on-accent);
   border-color: var(--interactive-accent);
+}
+
+/* ─── By Field 过滤区 ─── */
+
+.markvault-filter-field-row {
+  gap: 5px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.markvault-field-filter-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.markvault-field-filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 0.72em;
+  background: var(--background-modifier-form-field, rgba(0,0,0,0.06));
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.12));
+  border-radius: 4px;
+  padding: 1px 2px 1px 5px;
+  line-height: 1.4;
+  cursor: default;
+  transition: all 0.12s ease;
+  max-width: 180px;
+}
+.markvault-field-filter-tag:hover {
+  border-color: var(--text-faint);
+}
+.markvault-field-filter-key {
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 55px;
+}
+.markvault-field-filter-eq {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.markvault-field-filter-val {
+  color: var(--text-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70px;
+}
+.markvault-field-filter-remove {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0 2px;
+  margin-left: 1px;
+  line-height: 1;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.markvault-field-filter-remove:hover {
+  color: var(--text-error, #e74c3c);
+  background: var(--background-modifier-hover);
+}
+
+.markvault-add-field-filter-btn {
+  padding: 2px 8px;
+  border: 1px dashed var(--background-modifier-border, rgba(0,0,0,0.18));
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.72em;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  flex-shrink: 0;
+}
+.markvault-add-field-filter-btn:hover {
+  border-color: var(--interactive-accent, #7c3aed);
+  color: var(--interactive-accent, #7c3aed);
+  background: var(--interactive-hover, rgba(124,58,237,0.08));
 }
 
 /* ─── 批量操作栏 ─── */
@@ -469,6 +653,66 @@
   background: var(--tag-background);
   padding: 1px 6px;
   border-radius: 3px;
+}
+
+/* ─── 卡片字段标签 (Phase 3) ─── */
+.markvault-card-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+.markvault-field-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 0.72em;
+  line-height: 1.4;
+  background: var(--background-modifier-form-field, rgba(0,0,0,0.06));
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.12));
+  border-radius: 4px;
+  padding: 1px 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  max-width: 160px;
+}
+.markvault-field-tag:hover {
+  border-color: var(--interactive-accent, #7c3aed);
+  background: var(--interactive-hover, rgba(124,58,237,0.08));
+}
+.markvault-field-tag-key {
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60px;
+}
+.markvault-field-tag-sep {
+  color: var(--text-faint);
+  font-weight: 400;
+  flex-shrink: 0;
+}
+.markvault-field-tag-value {
+  color: var(--text-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+.markvault-field-more {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 3px;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.markvault-field-more:hover {
+  color: var(--interactive-accent, #7c3aed);
+  background: var(--interactive-hover, rgba(124,58,237,0.08));
 }
 
 .markvault-card-actions {
@@ -952,4 +1196,54 @@
 .markvault-block-line-deco {
   background-color: var(--markvault-block-bg, #FACC1522);
   border-left: var(--markvault-block-border, 3px solid #FACC15);
+}
+
+/* ─── 当前文件工具栏 ─── */
+
+.markvault-file-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  background: var(--background-secondary, #f5f5f5);
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+}
+
+.markvault-file-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted, #666);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.markvault-clear-file-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--text-error, #e74c3c);
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-error, #e74c3c);
+  transition: background 0.15s;
+}
+
+.markvault-clear-file-btn:hover {
+  background: var(--text-error, #e74c3c);
+  color: #fff;
+}
+
+.markvault-clear-icon {
+  font-size: 13px;
+}
+
+.markvault-clear-label {
+  font-weight: 500;
 }

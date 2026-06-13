@@ -1,6 +1,7 @@
 import type { Annotation, MarkAttributes, BlockAnchorAttributes, SpanRange } from '../types/annotation';
 import type { AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
+import { encodeFields, decodeFields } from '../utils/fields';
 import { scanMarkdownContexts } from './md-context';
 
 const MARK_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
@@ -73,6 +74,7 @@ function parseMarkVaultAnnotations(
       updatedAt: 0,
       kind: 'inline', // 🔧 标记为行内标注
       groupUuid: attrs.groupUuid, // 🔧 保留组 ID
+      fields: attrs.fields ? decodeFields(attrs.fields) : undefined,
       _source: 'markdown',
     });
   }
@@ -243,7 +245,15 @@ export function buildMarkTag(annotation: Annotation, groupUuid?: string): string
   }
 
   if (annotation.tags.length > 0) {
-    attrs.push(`data-tags="${annotation.tags.join(',')}"`);
+    attrs.push(`data-tags="${escapeAttr(annotation.tags.join(','))}"`);
+  }
+
+  // 🆕 Phase 3: 写入 data-fields 属性
+  if (annotation.fields && Object.keys(annotation.fields).length > 0) {
+    const encodedFields = encodeFields(annotation.fields);
+    if (encodedFields) {
+      attrs.push(`data-fields="${escapeAttr(encodedFields)}"`);
+    }
   }
 
   return `<mark ${attrs.join(' ')}>${annotation.text}</mark>`;
@@ -275,7 +285,7 @@ export function removeMarkTag(content: string, uuid: string): { content: string;
 export function updateMarkTag(
   content: string,
   uuid: string,
-  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type'>>,
+  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type'>> & { fields?: string },
 ): string {
   const regex = new RegExp(
     `(<mark\\s+[^>]*data-uuid="${escapeRegex(uuid)}"[^>]*>)([\\s\\S]*?)(<\\/mark>)`,
@@ -330,6 +340,21 @@ export function updateMarkTag(
         }
       } else {
         newOpenTag = newOpenTag.replace(/\s*data-tags="[^"]*"/, '');
+      }
+    }
+
+    // 🆕 Phase 3: 更新 fields
+    if (updates.fields !== undefined) {
+      if (updates.fields) {
+        // 有 fields 值 → 写入/替换 data-fields 属性
+        if (/data-fields="/.test(newOpenTag)) {
+          newOpenTag = newOpenTag.replace(/data-fields="[^"]*"/, `data-fields="${escapeAttr(updates.fields)}"`);
+        } else {
+          newOpenTag = newOpenTag.replace(/>$/, ` data-fields="${escapeAttr(updates.fields)}">`);
+        }
+      } else {
+        // fields 为空字符串 → 移除 data-fields 属性
+        newOpenTag = newOpenTag.replace(/\s*data-fields="[^"]*"/, '');
       }
     }
 
@@ -426,7 +451,8 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
   const results: ParsedBlockAnchor[] = [];
 
   // 1. 解析 block 格式：%%markvault:uuid:type:color:note%%
-  const blockRegex = /%%markvault:([^:]+):([^:]+):([^:]+):([^%]*)%%/g;
+  // 🔧 修复：note 段可选，支持 %%markvault:uuid:type:color%% (无冒号) 和 %%markvault:uuid:type:color:%% (空note)
+  const blockRegex = /%%markvault:([^:%]+):([^:%]+):([^:%]+)(?::([^%]*))?%%/g;
   let match: RegExpExecArray | null;
   while ((match = blockRegex.exec(content)) !== null) {
     const anchorOffset = match.index;
@@ -435,7 +461,7 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
       uuid: match[1],
       type: match[2] as AnnotationType,
       color: match[3],
-      note: decodeAnchorField(match[4]),
+      note: match[4] ? decodeAnchorField(match[4]) : '',
       anchorOffset,
       anchorLine: lineCount - 1,
       anchorKind: 'block',
@@ -443,7 +469,8 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
   }
 
   // 2. 解析 span 格式：%%markvault-span:uuid:type:color:note%%
-  const spanRegex = /%%markvault-span:([^:]+):([^:]+):([^:]+):([^%]*)%%/g;
+  // 🔧 修复：note 段可选，同上
+  const spanRegex = /%%markvault-span:([^:%]+):([^:%]+):([^:%]+)(?::([^%]*))?%%/g;
   while ((match = spanRegex.exec(content)) !== null) {
     const anchorOffset = match.index;
     const lineCount = content.substring(0, anchorOffset).split('\n').length;
@@ -451,7 +478,7 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
       uuid: match[1],
       type: match[2] as AnnotationType,
       color: match[3],
-      note: decodeAnchorField(match[4]),
+      note: match[4] ? decodeAnchorField(match[4]) : '',
       anchorOffset,
       anchorLine: lineCount - 1,
       anchorKind: 'span',
@@ -465,7 +492,8 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
  * 从 Markdown 内容中移除指定 uuid 的块级锚点
  */
 export function removeBlockAnchor(content: string, uuid: string): string {
-  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:[^%]*%%\\n?`, 'g');
+  // 🔧 P1 修复：使用非贪婪匹配，避免 note 中包含 % 时截断
+  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:[\\s\\S]*?%%\\n?`, 'g');
   return content.replace(regex, '');
 }
 
@@ -473,7 +501,8 @@ export function removeBlockAnchor(content: string, uuid: string): string {
  * 从 Markdown 内容中移除指定 uuid 的 span 锚点
  */
 export function removeSpanAnchor(content: string, uuid: string): string {
-  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:[^%]*%%\\n?`, 'g');
+  // 🔧 P1 修复：使用非贪婪匹配，避免 note 中包含 % 时截断
+  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:[\\s\\S]*?%%\\n?`, 'g');
   return content.replace(regex, '');
 }
 
@@ -504,12 +533,14 @@ export function updateBlockAnchor(
     note: string;
   }>,
 ): string {
-  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:]*):([^:]*):([^%]*)%%`);
+  // 🔧 修复：支持无 note 段的格式 %%markvault:uuid:type:color%%
+  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^%]*))?%%`);
 
-  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string) => {
+  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string | undefined) => {
     const type = updates.type || oldType;
     const color = updates.color || oldColor;
-    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : oldNote;
+    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : (oldNote || '');
+    // 始终写入 note 段（即使为空），保持格式一致性
     return `%%markvault:${uuid}:${type}:${color}:${note}%%`;
   });
 }
@@ -526,12 +557,13 @@ export function updateSpanAnchor(
     note: string;
   }>,
 ): string {
-  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:([^:]*):([^:]*):([^%]*)%%`);
+  // 🔧 修复：支持无 note 段的格式 %%markvault-span:uuid:type:color%%
+  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^%]*))?%%`);
 
-  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string) => {
+  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string | undefined) => {
     const type = updates.type || oldType;
     const color = updates.color || oldColor;
-    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : oldNote;
+    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : (oldNote || '');
     return `%%markvault-span:${uuid}:${type}:${color}:${note}%%`;
   });
 }
@@ -574,12 +606,28 @@ export function parseAllAnnotationsFromMarkdown(
   // 2. 块级/span 锚点标注
   const blockAnchors = parseBlockAnchors(content);
   const blockAnnotations: Array<Annotation & { _source: 'markdown' }> = blockAnchors.map(anchor => {
-    // 找到锚点下方的内容
+    // 🔧 修复：跳过锚点行、公式分隔符、代码围栏，找到有意义的内容行
     const lines = content.split('\n');
     const targetLine = anchor.anchorLine + 1; // 锚点下一行是目标块的起始
     let blockContent = '';
-    if (targetLine < lines.length) {
-      blockContent = lines[targetLine];
+    let actualTargetLine = targetLine;
+
+    // 向前扫描，跳过非内容行
+    for (let i = targetLine; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (trimmed.startsWith('%%markvault') || trimmed === '$$' || trimmed === '$$$' || trimmed.startsWith('```')) {
+        actualTargetLine = i + 1;
+        continue;
+      }
+      // 跳过空行（但记录，因为后面可能需要空行分隔）
+      if (trimmed === '') {
+        actualTargetLine = i + 1;
+        continue;
+      }
+      // 找到第一个有意义的内容行
+      blockContent = trimmed;
+      actualTargetLine = i;
+      break;
     }
 
     const isSpan = anchor.anchorKind === 'span';
@@ -588,15 +636,15 @@ export function parseAllAnnotationsFromMarkdown(
     let spanRanges: SpanRange[] | undefined;
     let text = blockContent;
 
-    if (isSpan && targetLine < lines.length) {
-      // span 标注：收集锚点行到下一个空行或下一个锚点行之间的所有内容
-      // 并扫描出文本片段的偏移范围
-      const endLine = findSpanEndLine(lines, targetLine);
-      const fullSpanText = lines.slice(targetLine, endLine + 1).join('\n');
-      text = fullSpanText;
+    if (isSpan && actualTargetLine < lines.length) {
+      // span 标注：收集 actualTargetLine 到下一个空行或下一个锚点行之间的所有内容
+      const endLine = findSpanEndLine(lines, actualTargetLine);
+      const fullSpanText = lines.slice(actualTargetLine, endLine + 1).join('\n');
+      // 过滤掉锚点行本身（以防 targetLine 回退到锚点行）
+      text = fullSpanText.replace(/^%%markvault(-span)?:[^%]+%%\n?/g, '').trim() || fullSpanText;
 
       // 计算文本片段在文档中的偏移
-      spanRanges = computeSpanRanges(content, targetLine, fullSpanText);
+      spanRanges = computeSpanRanges(content, actualTargetLine, fullSpanText);
     }
 
     return {
@@ -609,14 +657,14 @@ export function parseAllAnnotationsFromMarkdown(
       tags: [],
       startOffset: anchor.anchorOffset,
       endOffset: anchor.anchorOffset,
-      startLine: targetLine,
+      startLine: actualTargetLine,
       contextBefore: '',
       contextAfter: '',
       createdAt: 0,
       updatedAt: 0,
       kind: isSpan ? 'span' as const : 'block' as const,
       blockType: isSpan ? undefined : 'paragraph',
-      targetLine,
+      targetLine: actualTargetLine,
       anchorLine: anchor.anchorLine,
       spanRanges,
       _source: 'markdown' as const,
@@ -634,8 +682,19 @@ function findSpanEndLine(lines: string[], startLine: number): number {
   let endLine = startLine;
   for (let i = startLine; i < lines.length; i++) {
     const line = lines[i].trim();
-    // 空行或另一个锚点行 → 结束
-    if (line === '' || /^%%markvault(-span)?:/.test(line)) {
+    // 🔧 修复：如果是锚点行且 i === startLine，也跳过（因为 span 锚点可能落在 targetLine 上）
+    if (/^%%markvault(-span)?:/.test(line)) {
+      if (i === startLine) {
+        // targetLine 本身就是锚点行，跳到下一个有效行
+        continue;
+      }
+      if (i > startLine) {
+        endLine = i - 1;
+      }
+      break;
+    }
+    // 空行 → 结束
+    if (line === '') {
       if (i > startLine) {
         endLine = i - 1;
       }

@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownView, TFile, Component, Menu, MarkdownRenderer } from 'obsidian';
+import { ItemView, WorkspaceLeaf, MarkdownView, TFile, Component, Menu, MarkdownRenderer, Notice } from 'obsidian';
 import type { Annotation, AnnotationFilter, AnnotationType } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
 import {
@@ -6,13 +6,15 @@ import {
   queryAnnotations,
   deleteAnnotation,
   updateAnnotation,
+  addAnnotation,
   getAnnotationStats,
   getAllAnnotations,
   getAnnotationByUuid,
 } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 import { AnnotationModal } from '../editor/annotation-modal';
-import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/annotation-parser';
+import { removeMarkTag, removeBlockAnchor, removeSpanAnchor, updateMarkTag, updateBlockAnchor, updateSpanAnchor } from '../../core/annotation-parser';
+import { getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 
 export const MARKVAULT_SIDEBAR_VIEW_TYPE = 'markvault-sidebar';
 
@@ -42,6 +44,9 @@ export class AnnotationSidebar extends ItemView {
 
   // 缓存
   private allAnnotationsCache: Annotation[] = [];
+
+  // Phase 3: 字段过滤状态
+  private fieldFilterEntries: Array<{ key: string; value: string }> = [];
 
   // Plugin 实例引用（用于访问 modifyGuard 等保护机制）
   private pluginInstance: import('../../utils/plugin-interface').MarkVaultPluginInterface | null = null;
@@ -119,6 +124,7 @@ export class AnnotationSidebar extends ItemView {
 
     this.selectedUuids.clear();
     this.batchMode = false;
+    this.fieldFilterEntries = [];
 
     // ── Tab 栏 ──
     this.renderTabBar();
@@ -192,17 +198,126 @@ export class AnnotationSidebar extends ItemView {
     batchToggle.addEventListener('click', async () => {
       this.batchMode = !this.batchMode;
       batchToggle.toggleClass('active', this.batchMode);
-      await this.refreshListOnly();
+      await this.renderContent(); // 🔧 P0 修复：批量栏需要 renderContent 才显示
     });
   }
 
   // ─── 当前笔记视图 ──────────────────────────────────────
+
+  // ─── 当前文件工具栏 ──────────────────────────────────
+
+  /** 渲染当前文件操作工具栏（文件名 + 清空标注按钮） */
+  private renderCurrentFileToolbar(container: HTMLElement) {
+    const toolbar = container.createDiv({ cls: 'markvault-file-toolbar' });
+
+    // 文件名
+    const fileName = this.currentFilePath!.split('/').pop() || this.currentFilePath!;
+    toolbar.createSpan({ cls: 'markvault-file-name', text: `📄 ${fileName}` });
+
+    // 清空标注按钮
+    const clearBtn = toolbar.createEl('button', {
+      cls: 'markvault-clear-file-btn',
+      title: 'Delete all annotations in this file',
+    });
+    clearBtn.createSpan({ text: '🗑️', cls: 'markvault-clear-icon' });
+    clearBtn.createSpan({ text: 'Clear all', cls: 'markvault-clear-label' });
+
+    clearBtn.addEventListener('click', async () => {
+      if (!this.currentFilePath) return;
+      const annotations = await getAnnotationsForFile(this.currentFilePath);
+      if (annotations.length === 0) return;
+
+      const confirmed = confirm(
+        `Delete all ${annotations.length} annotations in "${fileName}"?\n\nThis will remove all highlights, blocks, and spans from this file.`
+      );
+      if (!confirmed) return;
+
+      const plugin = this.pluginInstance;
+      if (!plugin) return;
+      const notice = new Notice(`Deleting ${annotations.length} annotations...`, 0);
+
+      // 🔧 先设置冷却，关闭 onFileOpen 同步窗口
+      plugin.markFileSynced(this.currentFilePath);
+
+      // 🔧 备份所有标注 + 清理保护状态
+      const backups = new Map<string, Annotation>();
+      for (const ann of annotations) {
+        backups.set(ann.uuid, { ...ann, tags: [...ann.tags] });
+        plugin.unmarkAnnotationActive(ann.uuid, ann.filePath);
+      }
+
+      // 🔧 统一 try/catch：任何步骤失败均可完整回滚
+      try {
+        // ── ① 批量删除 DB ──
+        let dbDeleted = 0;
+        for (const ann of annotations) {
+          await deleteAnnotation(ann.uuid);
+          dbDeleted++;
+        }
+        console.log(`MarkVault: clear all — ${dbDeleted} DB annotations deleted`);
+
+        // ── ② 清理 MD ──
+        const file = this.app.vault.getAbstractFileByPath(this.currentFilePath);
+        if (file instanceof TFile) {
+          const content = await this.app.vault.read(file);
+          let newContent = content;
+
+          for (const ann of annotations) {
+            if (ann.kind === 'block') {
+              newContent = removeBlockAnchor(newContent, ann.uuid);
+            } else if (ann.kind === 'span') {
+              newContent = removeSpanAnchor(newContent, ann.uuid);
+            } else {
+              const result = removeMarkTag(newContent, ann.uuid);
+              if (result) newContent = result.content;
+            }
+          }
+
+          if (newContent !== content) {
+            plugin.modifyGuard.acquire(this.currentFilePath);
+            try {
+              await this.app.vault.modify(file, newContent);
+            } finally {
+              plugin.modifyGuard.release(this.currentFilePath);
+            }
+            console.log(`MarkVault: clear all — MD cleaned`);
+          }
+          // 🔧 P0 修复：MD 未变化时不视为错误（可能锚点已不存在），继续完成清理
+        }
+
+        await plugin.updateSpanCache(this.currentFilePath);
+        notice.hide();
+        new Notice(`✅ Deleted ${annotations.length} annotations from "${fileName}"`, 4000);
+        await this.refreshListOnly();
+
+      } catch (err) {
+        // 🔧 统一回滚：恢复所有备份标注
+        plugin.modifyGuard.releaseNow(this.currentFilePath!);
+        console.error('MarkVault: clear all failed, rolling back DB', err);
+        let restored = 0;
+        for (const [uuid, backup] of backups) {
+          try {
+            await addAnnotation(backup);
+            restored++;
+          } catch (addErr) {
+            console.error(`MarkVault: rollback add failed for ${uuid}`, addErr);
+          }
+        }
+        notice.hide();
+        new Notice(`❌ Failed (${restored}/${backups.size} annotations rolled back)`, 5000);
+        await this.refreshListOnly();
+      }
+    });
+  }
 
   private async renderCurrentNoteView(container: HTMLElement) {
     if (!this.currentFilePath) {
       container.createDiv({ cls: 'markvault-empty-state', text: 'Open a file to see its annotations' });
       return;
     }
+
+    // 文件名工具栏 — 清空标注按钮
+    this.renderCurrentFileToolbar(container);
 
     // 过滤栏
     const filterBar = container.createDiv({ cls: 'markvault-filter-section' });
@@ -412,19 +527,24 @@ export class AnnotationSidebar extends ItemView {
   private renderFilterBar(container: HTMLElement) {
     container.empty();
 
+    // ── 第一行：类型 + 颜色（紧凑横排） ──
+    const row1 = container.createDiv({ cls: 'markvault-filter-row' });
+
     // 类型过滤
     const typeFilters: Array<{ label: string; value: AnnotationFilter['type']; icon: string }> = [
       { label: 'All', value: 'all', icon: '✦' },
-      { label: 'Highlight', value: 'highlight', icon: '🎨' },
-      { label: 'Bold', value: 'bold', icon: '𝗕' },
-      { label: 'Underline', value: 'underline', icon: 'U̲' },
+      { label: 'HL', value: 'highlight', icon: '' },
+      { label: 'Bold', value: 'bold', icon: '' },
+      { label: 'UL', value: 'underline', icon: '' },
     ];
 
-    const typeBar = container.createDiv({ cls: 'markvault-filter-bar' });
+    const typeGroup = row1.createDiv({ cls: 'markvault-filter-group' });
+    typeGroup.createSpan({ cls: 'markvault-filter-group-label', text: 'Type' });
     for (const tf of typeFilters) {
-      const btn = typeBar.createEl('button', {
-        text: `${tf.icon} ${tf.label}`,
+      const btn = typeGroup.createEl('button', {
+        text: tf.icon ? `${tf.icon}` : tf.label,
         cls: `markvault-filter-btn ${this.filter.type === tf.value ? 'active' : ''}`,
+        attr: { title: tf.label },
       });
       btn.addEventListener('click', async () => {
         this.filter.type = tf.value;
@@ -432,19 +552,19 @@ export class AnnotationSidebar extends ItemView {
       });
     }
 
-    // 颜色过滤
-    const colorBar = container.createDiv({ cls: 'markvault-filter-colors' });
-    const allColorBtn = colorBar.createEl('button', {
+    // 颜色过滤（小圆点）
+    const colorGroup = row1.createDiv({ cls: 'markvault-filter-group' });
+    colorGroup.createSpan({ cls: 'markvault-filter-group-label', text: 'Color' });
+    const allColorBtn = colorGroup.createEl('button', {
       text: 'All',
-      cls: `markvault-color-btn ${this.filter.color === 'all' ? 'active' : ''}`,
+      cls: `markvault-color-btn markvault-color-mini ${this.filter.color === 'all' ? 'active' : ''}`,
     });
     allColorBtn.addEventListener('click', async () => {
       this.filter.color = 'all';
       await this.refreshListOnly();
     });
-
     for (const pc of PRESET_COLORS) {
-      const colorBtn = colorBar.createEl('button', {
+      const colorBtn = colorGroup.createEl('button', {
         cls: `markvault-color-btn markvault-color-dot ${this.filter.color === pc.id ? 'active' : ''}`,
         attr: { title: pc.label },
       });
@@ -455,16 +575,41 @@ export class AnnotationSidebar extends ItemView {
       });
     }
 
-    // 是否有批注过滤
-    const noteBar = container.createDiv({ cls: 'markvault-filter-bar' });
-    const noteFilters: Array<{ label: string; value: boolean | undefined; icon: string }> = [
-      { label: 'All', value: undefined, icon: '📋' },
-      { label: 'With Note', value: true, icon: '📝' },
+    // ── 第二行：排序 + 批注 + 字段过滤 ──
+    const row2 = container.createDiv({ cls: 'markvault-filter-row' });
+
+    // 排序
+    const sortGroup = row2.createDiv({ cls: 'markvault-filter-group' });
+    sortGroup.createSpan({ cls: 'markvault-filter-group-label', text: 'Sort' });
+    const sortOptions: Array<{ label: string; value: AnnotationFilter['sortBy']; icon: string }> = [
+      { label: 'Pos', value: 'position', icon: '' },
+      { label: 'New', value: 'createdAt', icon: '' },
+      { label: 'Upd', value: 'updatedAt', icon: '' },
+    ];
+    for (const so of sortOptions) {
+      const btn = sortGroup.createEl('button', {
+        text: so.label,
+        cls: `markvault-sort-btn ${this.filter.sortBy === so.value ? 'active' : ''}`,
+        attr: { title: so.label === 'Pos' ? 'Position' : so.label === 'New' ? 'Newest' : 'Updated' },
+      });
+      btn.addEventListener('click', async () => {
+        this.filter.sortBy = so.value;
+        await this.refreshListOnly();
+      });
+    }
+
+    // 批注过滤
+    const noteGroup = row2.createDiv({ cls: 'markvault-filter-group' });
+    noteGroup.createSpan({ cls: 'markvault-filter-group-label', text: 'Note' });
+    const noteFilters: Array<{ label: string; value: boolean | undefined }> = [
+      { label: 'All', value: undefined },
+      { label: '✎', value: true },
     ];
     for (const nf of noteFilters) {
-      const btn = noteBar.createEl('button', {
-        text: `${nf.icon} ${nf.label}`,
+      const btn = noteGroup.createEl('button', {
+        text: nf.label,
         cls: `markvault-filter-btn ${this.filter.hasNote === nf.value ? 'active' : ''}`,
+        attr: { title: nf.value === undefined ? 'All' : 'With Note' },
       });
       btn.addEventListener('click', async () => {
         this.filter.hasNote = nf.value;
@@ -472,23 +617,87 @@ export class AnnotationSidebar extends ItemView {
       });
     }
 
-    // 排序
-    const sortBar = container.createDiv({ cls: 'markvault-filter-sort' });
-    const sortOptions: Array<{ label: string; value: AnnotationFilter['sortBy']; icon: string }> = [
-      { label: 'Position', value: 'position', icon: '📍' },
-      { label: 'Newest', value: 'createdAt', icon: '🆕' },
-      { label: 'Updated', value: 'updatedAt', icon: '🔄' },
-    ];
-    for (const so of sortOptions) {
-      const btn = sortBar.createEl('button', {
-        text: `${so.icon} ${so.label}`,
-        cls: `markvault-sort-btn ${this.filter.sortBy === so.value ? 'active' : ''}`,
+    // ── 第三行：By Field（内联下拉式） ──
+    const fieldRow = container.createDiv({ cls: 'markvault-filter-row markvault-filter-field-row' });
+    fieldRow.createSpan({ cls: 'markvault-filter-group-label', text: '🏷️' });
+
+    // 字段过滤条件标签（横排显示）
+    if (this.fieldFilterEntries.length > 0) {
+      const tagsWrap = fieldRow.createDiv({ cls: 'markvault-field-filter-tags' });
+      for (let i = 0; i < this.fieldFilterEntries.length; i++) {
+        const entry = this.fieldFilterEntries[i];
+        const filterTag = tagsWrap.createDiv({ cls: 'markvault-field-filter-tag' });
+        filterTag.createSpan({ cls: 'markvault-field-filter-key', text: entry.key });
+        filterTag.createSpan({ cls: 'markvault-field-filter-eq', text: '=' });
+        filterTag.createSpan({ cls: 'markvault-field-filter-val', text: entry.value });
+        const removeBtn = filterTag.createEl('button', {
+          text: '✕',
+          cls: 'markvault-field-filter-remove',
+        });
+        removeBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          this.fieldFilterEntries.splice(i, 1);
+          await this.refreshListOnly();
+        });
+      }
+    }
+
+    // 添加字段过滤按钮（+ 图标）
+    const addFieldFilterBtn = fieldRow.createEl('button', {
+      text: this.fieldFilterEntries.length > 0 ? '+' : '+ Field',
+      cls: 'markvault-add-field-filter-btn',
+      attr: { title: 'Add field filter' },
+    });
+    addFieldFilterBtn.addEventListener('click', async () => {
+      const fieldKeys = await getFieldKeys();
+      this.showAddFieldFilterMenu(addFieldFilterBtn, fieldKeys);
+    });
+  }
+
+  // ─── 字段过滤菜单 ──────────────────────────────────────
+
+  private showAddFieldFilterMenu(anchor: HTMLElement, fieldKeys: string[]) {
+    const menu = new Menu();
+
+    if (fieldKeys.length === 0) {
+      menu.addItem((item) => {
+        item.setTitle('No fields found in annotations').setDisabled(true);
       });
-      btn.addEventListener('click', async () => {
-        this.filter.sortBy = so.value;
-        await this.refreshListOnly();
+    } else {
+      for (const key of fieldKeys) {
+        menu.addItem((item) => {
+          item.setTitle(key).onClick(async () => {
+            // 选择 key 后，显示 value 列表
+            const values = await getFieldValues(key);
+            this.showFieldValueMenu(anchor, key, values);
+          });
+        });
+      }
+    }
+
+    menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
+  }
+
+  private showFieldValueMenu(anchor: HTMLElement, key: string, values: string[]) {
+    const menu = new Menu();
+
+    for (const val of values) {
+      menu.addItem((item) => {
+        item.setTitle(val).onClick(async () => {
+          // 添加过滤条件
+          this.fieldFilterEntries.push({ key, value: val });
+          await this.refreshListOnly();
+        });
       });
     }
+
+    if (values.length === 0) {
+      menu.addItem((item) => {
+        item.setTitle('No values found').setDisabled(true);
+      });
+    }
+
+    menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
   }
 
   // ─── 批量操作栏 ────────────────────────────────────────
@@ -550,47 +759,153 @@ export class AnnotationSidebar extends ItemView {
       const confirmed = confirm(`Delete ${this.selectedUuids.size} annotations?`);
       if (!confirmed) return;
 
-      // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
       const plugin = this.pluginInstance;
+      if (!plugin) return;
 
+      // 🔧 P0 修复：两阶段提交，支持跨文件原子回滚
+      type BatchDeleteFileEntry = {
+        file: TFile;
+        originalContent: string;
+        newContent: string;
+        items: Array<{ uuid: string; kind: string }>;
+        backups: Map<string, Annotation>;
+      };
+
+      const byFile = new Map<string, BatchDeleteFileEntry>();
+      const missingUuids: string[] = [];
+
+      // ── Phase 1: 收集数据并预计算每文件的 MD 变更 ──
       for (const uuid of this.selectedUuids) {
         const annotation = await getAnnotationByUuid(uuid);
-        if (annotation) {
-          await deleteAnnotation(uuid);
-          try {
-            const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
-            if (file instanceof TFile) {
-              const content = await this.app.vault.read(file);
-              let newContent: string | null = null;
+        if (!annotation) {
+          missingUuids.push(uuid);
+          continue;
+        }
 
-              if (annotation.kind === 'block') {
-                const result = removeBlockAnchor(content, uuid);
-                if (result !== content) newContent = result;
-              } else if (annotation.kind === 'span') {
-                const result = removeSpanAnchor(content, uuid);
-                if (result !== content) newContent = result;
-              } else {
-                const result = removeMarkTag(content, uuid);
-                if (result) newContent = result.content;
-              }
+        // 清理活跃保护状态
+        plugin.unmarkAnnotationActive(uuid, annotation.filePath);
 
-              if (newContent && plugin) {
-                plugin.modifyGuard.acquire(annotation.filePath);
-                try {
-                  await this.app.vault.modify(file, newContent);
-                } finally {
-                  plugin.modifyGuard.release(annotation.filePath);
-                }
-              }
-            }
-          } catch (err) {
-            if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
-            console.error('MarkVault: batch delete mark error', err);
+        let entry = byFile.get(annotation.filePath);
+        if (!entry) {
+          const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
+          if (!(file instanceof TFile)) {
+            missingUuids.push(uuid);
+            continue;
+          }
+          const content = await this.app.vault.read(file);
+          entry = {
+            file,
+            originalContent: content,
+            newContent: content,
+            items: [],
+            backups: new Map(),
+          };
+          byFile.set(annotation.filePath, entry);
+        }
+
+        entry.backups.set(uuid, JSON.parse(JSON.stringify(annotation)));
+        entry.items.push({ uuid, kind: annotation.kind || 'inline' });
+      }
+
+      // 预计算每个文件清理锚点后的内容
+      for (const entry of byFile.values()) {
+        for (const item of entry.items) {
+          if (item.kind === 'block') {
+            entry.newContent = removeBlockAnchor(entry.newContent, item.uuid);
+          } else if (item.kind === 'span') {
+            entry.newContent = removeSpanAnchor(entry.newContent, item.uuid);
+          } else {
+            const result = removeMarkTag(entry.newContent, item.uuid);
+            if (result) entry.newContent = result.content;
           }
         }
       }
+
+      // ── Phase 2: 统一删除 DB ──
+      for (const entry of byFile.values()) {
+        for (const uuid of entry.backups.keys()) {
+          await deleteAnnotation(uuid);
+        }
+      }
+
+      // ── Phase 3: 应用 MD 修改；任意文件失败则全量回滚 ──
+      const modifiedFiles: string[] = [];
+      let hasFailure = false;
+      let lastError: unknown = null;
+
+      for (const [filePath, entry] of byFile) {
+        if (entry.newContent === entry.originalContent) continue;
+
+        plugin.markFileSynced(filePath);
+        plugin.modifyGuard.acquire(filePath);
+        try {
+          await this.app.vault.modify(entry.file, entry.newContent);
+          modifiedFiles.push(filePath);
+        } catch (mdErr) {
+          lastError = mdErr;
+          hasFailure = true;
+          break;
+        } finally {
+          plugin.modifyGuard.release(filePath);
+        }
+      }
+
+      if (hasFailure) {
+        // 回滚 DB：恢复所有已删除的标注
+        for (const entry of byFile.values()) {
+          for (const backup of entry.backups.values()) {
+            try {
+              await addAnnotation(backup);
+            } catch (addErr) {
+              console.error('MarkVault: batch delete rollback add failed', addErr);
+            }
+          }
+        }
+
+        // 回滚 MD：将已成功修改的文件恢复为原始内容
+        for (const filePath of modifiedFiles) {
+          const entry = byFile.get(filePath)!;
+          plugin.modifyGuard.acquire(filePath);
+          try {
+            await this.app.vault.modify(entry.file, entry.originalContent);
+          } catch (restoreErr) {
+            console.error(`MarkVault: batch delete MD restore failed for ${filePath}`, restoreErr);
+          } finally {
+            plugin.modifyGuard.release(filePath);
+          }
+        }
+
+        new Notice(
+          `Batch delete failed: ${lastError instanceof Error ? lastError.message : 'unknown error'}`,
+          5000,
+        );
+      } else {
+        new Notice(
+          `Deleted ${this.selectedUuids.size - missingUuids.length} annotations`,
+          4000,
+        );
+      }
+
+      // 更新 span 缓存
+      for (const filePath of byFile.keys()) {
+        try {
+          await plugin.updateSpanCache(filePath);
+        } catch (err) {
+          console.error('MarkVault: batch delete spanCache error', filePath, err);
+        }
+      }
+
       this.selectedUuids.clear();
       await this.renderContent();
+    });
+
+    // 🆕 Phase 3: 导出按钮
+    const exportBtn = bar.createEl('button', {
+      text: '📥 Export',
+      cls: 'markvault-batch-btn',
+    });
+    exportBtn.addEventListener('click', () => {
+      this.showExportMenu(exportBtn);
     });
 
     // 选中计数
@@ -603,6 +918,117 @@ export class AnnotationSidebar extends ItemView {
     if (countEl) {
       countEl.textContent = `${this.selectedUuids.size} selected`;
     }
+  }
+
+  // ─── 导出功能 ──────────────────────────────────────────
+
+  private showExportMenu(anchor: HTMLElement) {
+    const menu = new Menu();
+
+    // 导出当前过滤结果
+    menu.addItem((item) => {
+      item.setTitle('Export filtered (JSON)')
+        .onClick(async () => {
+          await this.exportFiltered('json');
+        });
+    });
+
+    menu.addItem((item) => {
+      item.setTitle('Export filtered (Markdown)')
+        .onClick(async () => {
+          await this.exportFiltered('markdown');
+        });
+    });
+
+    // 导出选中标注
+    if (this.selectedUuids.size > 0) {
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle(`Export ${this.selectedUuids.size} selected (JSON)`)
+          .onClick(async () => {
+            await this.exportSelected('json');
+          });
+      });
+      menu.addItem((item) => {
+        item.setTitle(`Export ${this.selectedUuids.size} selected (Markdown)`)
+          .onClick(async () => {
+            await this.exportSelected('markdown');
+          });
+      });
+    }
+
+    menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
+  }
+
+  private async exportFiltered(format: 'json' | 'markdown') {
+    let annotations: Annotation[];
+
+    if (this.activeTab === 'current' && this.currentFilePath) {
+      annotations = await queryAnnotations({
+        ...this.filter,
+      });
+      annotations = annotations.filter(a => a.filePath === this.currentFilePath);
+    } else {
+      annotations = await queryAnnotations(this.filter);
+    }
+
+    this.doExport(annotations, format);
+  }
+
+  private async exportSelected(format: 'json' | 'markdown') {
+    const annotations: Annotation[] = [];
+    for (const uuid of this.selectedUuids) {
+      const ann = await getAnnotationByUuid(uuid);
+      if (ann) annotations.push(ann);
+    }
+    this.doExport(annotations, format);
+  }
+
+  private doExport(annotations: Annotation[], format: 'json' | 'markdown') {
+    const dateStr = new Date().toISOString().slice(0, 10);
+
+    if (format === 'json') {
+      const content = JSON.stringify(annotations, null, 2);
+      this.downloadFile(content, `markvault-export-${dateStr}.json`, 'application/json');
+    } else {
+      // Markdown 格式：按文件分组
+      const byFile = new Map<string, Annotation[]>();
+      for (const a of annotations) {
+        const fileName = a.filePath.split('/').pop() || a.filePath;
+        if (!byFile.has(fileName)) byFile.set(fileName, []);
+        byFile.get(fileName)!.push(a);
+      }
+
+      let md = `# MarkVault Export\n\nExported: ${new Date().toLocaleString()}\nTotal: ${annotations.length} annotations\n\n---\n\n`;
+
+      for (const [fileName, items] of byFile) {
+        md += `## ${fileName}\n\n`;
+        for (const a of items) {
+          md += `> ${a.text.replace(/\n/g, '\n> ')}\n\n`;
+          if (a.note) md += `**Note**: ${a.note}\n\n`;
+          if (a.fields && Object.keys(a.fields).length > 0) {
+            const fieldsStr = Object.entries(a.fields).map(([k, v]) => `${k}=${v}`).join(', ');
+            md += `**Fields**: ${fieldsStr}\n\n`;
+          }
+          if (a.tags.length > 0) {
+            md += `**Tags**: ${a.tags.map(t => `#${t}`).join(' ')}\n\n`;
+          }
+          md += `---\n\n`;
+        }
+      }
+
+      this.downloadFile(md, `markvault-export-${dateStr}.md`, 'text/markdown');
+    }
+  }
+
+  private downloadFile(content: string, filename: string, mimeType: string) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   private showBatchColorMenu(anchor: HTMLElement) {
@@ -622,35 +1048,80 @@ export class AnnotationSidebar extends ItemView {
   private async batchChangeColor(colorId: string) {
     if (this.selectedUuids.size === 0) return;
 
-    // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
     const plugin = this.pluginInstance;
+    if (!plugin) return;
+
+    // 🔧 审计修复：按文件分组 + 保存原始颜色用于回滚
+    const byFile = new Map<string, Array<{ uuid: string; kind: string; originalColor: string }>>();
 
     for (const uuid of this.selectedUuids) {
       const annotation = await getAnnotationByUuid(uuid);
-      if (annotation) {
-        await updateAnnotation(uuid, { color: colorId });
-        // 更新 Markdown
-        try {
-          const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
-          if (file instanceof TFile) {
-            const content = await this.app.vault.read(file);
-            const { updateMarkTag } = await import('../../core/annotation-parser');
-            const newContent = updateMarkTag(content, uuid, { color: colorId });
-            if (newContent !== content && plugin) {
-              plugin.modifyGuard.acquire(annotation.filePath);
-              try {
-                await this.app.vault.modify(file, newContent);
-              } finally {
-                plugin.modifyGuard.release(annotation.filePath);
-              }
-            }
+      if (!annotation) continue;
+
+      const originalColor = annotation.color;
+      await updateAnnotation(uuid, { color: colorId });
+
+      let group = byFile.get(annotation.filePath);
+      if (!group) {
+        group = [];
+        byFile.set(annotation.filePath, group);
+      }
+      group.push({ uuid, kind: annotation.kind || 'inline', originalColor });
+    }
+
+    // 批量处理：每个文件只做一次 vault.modify
+    const affectedFiles = new Set<string>();
+    for (const [filePath, items] of byFile) {
+      try {
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) continue;
+
+        const content = await this.app.vault.read(file);
+        let newContent = content;
+
+        for (const item of items) {
+          if (item.kind === 'span') {
+            newContent = updateSpanAnchor(newContent, item.uuid, { color: colorId });
+          } else if (item.kind === 'block') {
+            newContent = updateBlockAnchor(newContent, item.uuid, { color: colorId });
+          } else {
+            newContent = updateMarkTag(newContent, item.uuid, { color: colorId });
           }
-        } catch (err) {
-          if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
-          console.error('MarkVault: batch color change error', err);
         }
+
+        if (newContent !== content) {
+          plugin.modifyGuard.acquire(filePath);
+          try {
+            await this.app.vault.modify(file, newContent);
+          } catch (mdErr) {
+            // 🔧 P0 修复：MD 失败，回滚该文件所有标注
+            console.error(`MarkVault: batch color change MD error for ${filePath}, rolling back`, mdErr);
+            for (const item of items) {
+              await updateAnnotation(item.uuid, { color: item.originalColor });
+            }
+            throw mdErr;
+          } finally {
+            plugin.modifyGuard.release(filePath);
+          }
+        }
+
+        plugin.markFileSynced(filePath);
+        affectedFiles.add(filePath);
+      } catch (err) {
+        plugin.modifyGuard.releaseNow(filePath);
+        console.error('MarkVault: batch color change error', filePath, err);
       }
     }
+
+    // 更新 span 缓存
+    for (const filePath of affectedFiles) {
+      try {
+        await plugin.updateSpanCache(filePath);
+      } catch (err) {
+        console.error('MarkVault: batch color change spanCache error', filePath, err);
+      }
+    }
+
     this.selectedUuids.clear();
     await this.renderContent();
   }
@@ -714,25 +1185,21 @@ export class AnnotationSidebar extends ItemView {
       header.createSpan({ text: fileName, cls: 'markvault-file-group-name' });
       header.createSpan({ text: `${items.length}`, cls: 'markvault-file-group-count' });
 
-      // 文件头点击 → 打开文件
-      header.addEventListener('click', async () => {
+      // 文件头 — 点击展开/折叠，双击打开文件
+      // 标注列表（默认折叠）
+      const list = groupEl.createDiv({ cls: 'markvault-file-group-list' });
+      let expanded = false;
+      header.addEventListener('click', () => {
+        expanded = !expanded;
+        list.toggleClass('expanded', expanded);
+        header.toggleClass('expanded', expanded);
+      });
+      header.addEventListener('dblclick', async () => {
         const firstItem = items[0];
         const file = this.app.vault.getAbstractFileByPath(firstItem.filePath);
         if (file instanceof TFile) {
           await this.app.workspace.getLeaf(false).openFile(file);
         }
-      });
-
-      // 标注列表（默认折叠）
-      const list = groupEl.createDiv({ cls: 'markvault-file-group-list' });
-
-      // 折叠/展开
-      let expanded = false;
-      header.addEventListener('click', (e) => {
-        if (e.target !== header) return;
-        expanded = !expanded;
-        list.toggleClass('expanded', expanded);
-        header.toggleClass('expanded', expanded);
       });
 
       for (const annotation of items) {
@@ -850,20 +1317,10 @@ export class AnnotationSidebar extends ItemView {
       this.showQuickColorMenu(colorBtn, annotation);
     });
 
-    // 标注原文 — 使用 MarkdownRenderer 渲染，支持 LaTeX 公式等
+    // 标注原文 — 使用 MarkdownRenderer 统一渲染，支持链接、公式、粗体等
     const textEl = card.createDiv({ cls: 'markvault-card-text' });
-    // 🔧 v2.0: 对块级标注和含特殊内容的标注使用 Markdown 渲染
-    // 对纯文本标注保持原样（避免过度渲染）
-    const needsRender = annotation.kind === 'block' || annotation.kind === 'span'
-      || annotation.text.includes('$')
-      || annotation.text.includes('`')
-      || annotation.text.includes('**')
-      || annotation.text.includes('==')
-      || annotation.text.includes('|')
-      || annotation.text.includes('>');
 
-    if (needsRender && this.component_) {
-      // 异步渲染 Markdown（包括 LaTeX 公式）
+    if (this.component_) {
       MarkdownRenderer.renderMarkdown(
         annotation.text,
         textEl,
@@ -888,6 +1345,63 @@ export class AnnotationSidebar extends ItemView {
       const tagsEl = card.createDiv({ cls: 'markvault-card-tags' });
       for (const tag of annotation.tags) {
         tagsEl.createSpan({ cls: 'markvault-tag', text: `#${tag}` });
+      }
+    }
+
+    // 🆕 Phase 3: Fields 展示
+    if (annotation.fields && Object.keys(annotation.fields).length > 0) {
+      const fieldsEl = card.createDiv({ cls: 'markvault-card-fields' });
+      const entries = Object.entries(annotation.fields);
+      const showCount = Math.min(entries.length, 3);
+
+      for (let i = 0; i < showCount; i++) {
+        const [k, v] = entries[i];
+        const fieldTag = fieldsEl.createSpan({ cls: 'markvault-field-tag' });
+        fieldTag.createSpan({ text: k, cls: 'markvault-field-tag-key' });
+        fieldTag.createSpan({ text: ':', cls: 'markvault-field-tag-sep' });
+        fieldTag.createSpan({ text: v, cls: 'markvault-field-tag-value' });
+
+        // 点击字段标签 → 快速添加到过滤条件
+        fieldTag.addEventListener('click', (e) => {
+          e.stopPropagation();
+          // 检查是否已存在
+          const exists = this.fieldFilterEntries.some(fe => fe.key === k && fe.value === v);
+          if (!exists) {
+            this.fieldFilterEntries.push({ key: k, value: v });
+            this.refreshListOnly();
+          }
+        });
+      }
+
+      // 超过 3 个折叠
+      if (entries.length > 3) {
+        const moreEl = fieldsEl.createSpan({
+          cls: 'markvault-field-more',
+          text: `${entries.length - 3} more...`,
+        });
+        let expanded = false;
+        moreEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          expanded = !expanded;
+          if (expanded) {
+            // 展开剩余
+            for (let i = 3; i < entries.length; i++) {
+              const [k, v] = entries[i];
+              const fieldTag = fieldsEl.createSpan({ cls: 'markvault-field-tag' });
+              fieldTag.createSpan({ text: k, cls: 'markvault-field-tag-key' });
+              fieldTag.createSpan({ text: ':', cls: 'markvault-field-tag-sep' });
+              fieldTag.createSpan({ text: v, cls: 'markvault-field-tag-value' });
+            }
+            moreEl.textContent = 'less';
+          } else {
+            // 折叠：移除索引 >= 3 的字段标签
+            const allFieldTags = fieldsEl.querySelectorAll('.markvault-field-tag');
+            for (let i = 3; i < allFieldTags.length; i++) {
+              allFieldTags[i].remove();
+            }
+            moreEl.textContent = `${entries.length - 3} more...`;
+          }
+        });
       }
     }
 
@@ -952,10 +1466,12 @@ export class AnnotationSidebar extends ItemView {
   }
 
   private async quickChangeColor(annotation: Annotation, colorId: string) {
+    // 🔧 P0 修复：捕获原始颜色用于 MD 失败时回滚
+    const originalColor = annotation.color;
     await updateAnnotation(annotation.uuid, { color: colorId });
-    // 更新 Markdown
-    // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
+
     const plugin = this.pluginInstance;
+    if (!plugin) return;
     try {
       const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
       if (file instanceof TFile) {
@@ -963,35 +1479,32 @@ export class AnnotationSidebar extends ItemView {
         let newContent: string;
 
         if (annotation.kind === 'span') {
-          // Span 标注：更新 %%markvault-span:...%% 锚点
-          const { updateSpanAnchor } = await import('../../core/annotation-parser');
           newContent = updateSpanAnchor(content, annotation.uuid, { color: colorId });
         } else if (annotation.kind === 'block') {
-          // 块级标注：更新 %%markvault:...%% 锚点
-          const { updateBlockAnchor } = await import('../../core/annotation-parser');
           newContent = updateBlockAnchor(content, annotation.uuid, { color: colorId });
         } else {
-          // 行内标注：更新 <mark> 标签
-          const { updateMarkTag } = await import('../../core/annotation-parser');
           newContent = updateMarkTag(content, annotation.uuid, { color: colorId });
         }
 
-        if (newContent !== content && plugin) {
+        if (newContent !== content) {
           plugin.modifyGuard.acquire(annotation.filePath);
           try {
             await this.app.vault.modify(file, newContent);
+          } catch (mdErr) {
+            // 🔧 P0 修复：MD 失败，回滚 DB
+            console.error('MarkVault: quickChangeColor MD error, rolling back', mdErr);
+            await updateAnnotation(annotation.uuid, { color: originalColor });
+            throw mdErr;
           } finally {
             plugin.modifyGuard.release(annotation.filePath);
           }
         }
 
-        // 🔧 刷新 span 缓存
-        if (plugin?.updateSpanCache) {
-          await plugin.updateSpanCache(annotation.filePath);
-        }
+        plugin.markFileSynced(annotation.filePath);
+        await plugin.updateSpanCache(annotation.filePath);
       }
     } catch (err) {
-      if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
+      plugin.modifyGuard.releaseNow(annotation.filePath);
       console.error('MarkVault: quick color change error', err);
     }
     await this.refreshListOnly();
@@ -1000,32 +1513,28 @@ export class AnnotationSidebar extends ItemView {
   // ─── 加载标注列表 ──────────────────────────────────────
 
   private async loadAndRenderAnnotations(container: HTMLElement, filePath: string) {
-    console.log(`MarkVault sidebar: loadAndRenderAnnotations — filePath=${filePath}, search=${this.searchQuery}, filter=${JSON.stringify(this.filter)}`);
     let annotations: Annotation[];
 
-    if (this.searchQuery && this.searchQuery.trim()) {
+    // 🔧 P0 修复：fieldFilters 存在时始终走 queryAnnotations，否则会被跳过
+    const hasActiveFilters = this.searchQuery?.trim()
+      || this.filter.type !== 'all'
+      || this.filter.color !== 'all'
+      || this.filter.hasNote
+      || (this.filter.fieldFilters && Object.keys(this.filter.fieldFilters).length > 0);
+
+    if (hasActiveFilters) {
       annotations = await queryAnnotations({
         ...this.filter,
-        searchQuery: this.searchQuery,
+        searchQuery: this.searchQuery?.trim() || undefined,
       });
       annotations = annotations.filter(a => a.filePath === filePath);
-    } else if (this.filter.type === 'all' && this.filter.color === 'all' && !this.filter.hasNote) {
+    } else {
       annotations = await getAnnotationsForFile(filePath);
       if (this.filter.sortBy === 'createdAt') {
         annotations.sort((a, b) => b.createdAt - a.createdAt);
       } else if (this.filter.sortBy === 'updatedAt') {
         annotations.sort((a, b) => b.updatedAt - a.updatedAt);
       }
-    } else {
-      annotations = await queryAnnotations(this.filter);
-      annotations = annotations.filter(a => a.filePath === filePath);
-    }
-
-    console.log(`MarkVault sidebar: found ${annotations.length} annotations for ${filePath}`);
-
-    // 调试：打印前几个标注的详细信息
-    if (annotations.length > 0) {
-      console.log(`MarkVault sidebar: first annotation uuid=${annotations[0].uuid}, text="${annotations[0].text.substring(0, 50)}...", note="${annotations[0].note?.substring(0, 50) || ''}"`);
     }
 
     if (annotations.length === 0) {
@@ -1058,6 +1567,15 @@ export class AnnotationSidebar extends ItemView {
       filtered = filtered.filter(a => a.note && a.note.trim().length > 0);
     }
 
+    // 🔧 P0 修复：字段过滤 — applySearchFilter 中处理 all notes 视图
+    if (this.filter.fieldFilters && Object.keys(this.filter.fieldFilters).length > 0) {
+      for (const [key, value] of Object.entries(this.filter.fieldFilters)) {
+        filtered = filtered.filter(a =>
+          a.fields && a.fields[key] !== undefined && a.fields[key] === value,
+        );
+      }
+    }
+
     // 搜索
     if (this.searchQuery && this.searchQuery.trim()) {
       const q = this.searchQuery.toLowerCase();
@@ -1065,7 +1583,10 @@ export class AnnotationSidebar extends ItemView {
         a.text.toLowerCase().includes(q) ||
         a.note.toLowerCase().includes(q) ||
         a.tags.some(t => t.toLowerCase().includes(q)) ||
-        a.filePath.toLowerCase().includes(q),
+        a.filePath.toLowerCase().includes(q) ||
+        (a.fields && Object.entries(a.fields).some(([k, v]) =>
+          k.toLowerCase().includes(q) || v.toLowerCase().includes(q)
+        )),
       );
     }
 
@@ -1092,6 +1613,16 @@ export class AnnotationSidebar extends ItemView {
     const listContainer = this.containerEl_?.querySelector('.markvault-sidebar-list') as HTMLElement;
     if (!listContainer) return;
     listContainer.empty();
+
+    // 同步字段过滤条件到 filter
+    if (this.fieldFilterEntries.length > 0) {
+      this.filter.fieldFilters = {};
+      for (const entry of this.fieldFilterEntries) {
+        this.filter.fieldFilters[entry.key] = entry.value;
+      }
+    } else {
+      this.filter.fieldFilters = undefined;
+    }
 
     // 更新过滤栏状态
     const filterSection = this.containerEl_?.querySelector('.markvault-filter-section');
@@ -1133,36 +1664,51 @@ export class AnnotationSidebar extends ItemView {
     await leaf.openFile(file);
 
     const view = leaf.view;
-    if (view instanceof MarkdownView && view.editor) {
-      // 🔧 v2.0 修复：先尝试精确偏移定位，如果失败则用行号定位
-      // 对 span/block 标注：startOffset=endOffset=锚点偏移，优先使用 startLine
-      if (annotation.kind === 'span' || annotation.kind === 'block') {
-        // span/block 标注：startLine 指向内容起始行
-        const targetLine = annotation.startLine;
-        view.editor.setCursor({ line: targetLine, ch: 0 });
-        view.editor.scrollIntoView(
-          { from: { line: targetLine, ch: 0 }, to: { line: targetLine + 1, ch: 0 } },
-          true,
-        );
-      } else {
-        try {
-          const pos = view.editor.offsetToPos(annotation.startOffset);
-          view.editor.setCursor(pos);
-          view.editor.scrollIntoView({
-            from: pos,
-            to: view.editor.offsetToPos(annotation.endOffset),
-          }, true);
-        } catch {
-          // 偏移失效时降级为行号定位
-          view.editor.setCursor({ line: annotation.startLine, ch: 0 });
-          view.editor.scrollIntoView(
-            { from: { line: annotation.startLine, ch: 0 }, to: { line: annotation.startLine + 1, ch: 0 } },
-            true,
-          );
-        }
+    if (!(view instanceof MarkdownView)) return;
+
+    // 阅读模式下没有 editor，切换到源码模式
+    if (!view.editor) {
+      const state = leaf.getViewState();
+      if (state.state) {
+        state.state.mode = 'source';
+        await leaf.setViewState(state);
       }
     }
+    if (!view.editor) return;
 
+    // ── 基于 UUID 锚点搜索定位（不依赖存储的偏移量，永不漂移） ──
+    try {
+      const content = await this.app.vault.read(file);
+      let searchStr: string;
+      if (annotation.kind === 'block') {
+        searchStr = `markvault:${annotation.uuid}`;
+      } else if (annotation.kind === 'span') {
+        searchStr = `markvault-span:${annotation.uuid}`;
+      } else {
+        searchStr = `data-uuid="${annotation.uuid}"`;
+      }
+
+      const idx = content.indexOf(searchStr);
+      if (idx === -1) {
+        // 锚点可能被删除，降级为行号定位
+        console.warn(`MarkVault: UUID ${annotation.uuid} not found in source`);
+        view.editor.setCursor({ line: annotation.startLine, ch: 0 });
+        view.editor.scrollIntoView(
+          { from: { line: annotation.startLine, ch: 0 }, to: { line: annotation.startLine + 1, ch: 0 } },
+          true,
+        );
+        return;
+      }
+
+      const pos = view.editor.offsetToPos(idx);
+      view.editor.setCursor(pos);
+      view.editor.scrollIntoView({
+        from: pos,
+        to: { line: pos.line + 1, ch: 0 },
+      }, true);
+    } catch (err) {
+      console.error('MarkVault: jumpToAnnotation error', err);
+    }
   }
 
   private async editAnnotation(annotation: Annotation) {
@@ -1186,55 +1732,13 @@ export class AnnotationSidebar extends ItemView {
         await this.refreshListOnly();
       },
       async (uuid) => {
-        // 删除回调
+        // 🔧 审计修复：Modal 已处理 MD 移除，回调只做清理
         plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
+        plugin.markFileSynced(annotation.filePath);
         try {
-          const ann = await getAnnotationByUuid(uuid);
-          if (ann) {
-            const file = this.app.vault.getAbstractFileByPath(ann.filePath);
-            if (file instanceof TFile) {
-              const content = await this.app.vault.read(file);
-
-              // 🆕 v2.0: 根据标注类型选择不同的删除方式
-              if (ann.kind === 'block') {
-                // 块级标注：移除 %%markvault:...%% 锚点
-                const newContent = removeBlockAnchor(content, uuid);
-                if (newContent !== content) {
-                  plugin.modifyGuard.acquire(ann.filePath);
-                  try {
-                    await this.app.vault.modify(file, newContent);
-                  } finally {
-                    plugin.modifyGuard.release(ann.filePath);
-                  }
-                }
-              } else if (ann.kind === 'span') {
-                // Span 标注：移除 %%markvault-span:...%% 锚点
-                const newContent = removeSpanAnchor(content, uuid);
-                if (newContent !== content) {
-                  plugin.modifyGuard.acquire(ann.filePath);
-                  try {
-                    await this.app.vault.modify(file, newContent);
-                  } finally {
-                    plugin.modifyGuard.release(ann.filePath);
-                  }
-                }
-              } else {
-                // 行内标注：移除 <mark> 标签
-                const result = removeMarkTag(content, uuid);
-                if (result) {
-                  plugin.modifyGuard.acquire(ann.filePath);
-                  try {
-                    await this.app.vault.modify(file, result.content);
-                  } finally {
-                    plugin.modifyGuard.release(ann.filePath);
-                  }
-                }
-              }
-            }
-          }
+          await plugin.updateSpanCache(annotation.filePath);
         } catch (err) {
-          plugin.modifyGuard.releaseNow(annotation.filePath);
-          console.error('MarkVault: sidebar delete annotation error', err);
+          console.error('MarkVault: sidebar edit delete spanCache error', annotation.filePath, err);
         }
         await this.refreshListOnly();
       },
@@ -1252,55 +1756,67 @@ export class AnnotationSidebar extends ItemView {
 
   private async deleteAnnotationWithConfirm(annotation: Annotation) {
     const confirmed = confirm(`Delete annotation "${annotation.text.substring(0, 50)}..."?`);
-    if (confirmed) {
-      await deleteAnnotation(annotation.uuid);
-      // 🔧 P0 修复：设置 modifyGuard 防止 syncFromMarkdown 覆盖
-      const plugin = this.pluginInstance;
-      try {
-        const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
-        if (file instanceof TFile) {
-          const content = await this.app.vault.read(file);
+    if (!confirmed) return;
 
-          // 🆕 v2.0: 根据标注类型选择不同的删除方式
-          if (annotation.kind === 'block') {
-            // 块级标注：移除 %%markvault:...%% 锚点
-            const newContent = removeBlockAnchor(content, annotation.uuid);
-            if (newContent !== content && plugin) {
-              plugin.modifyGuard.acquire(annotation.filePath);
-              try {
-                await this.app.vault.modify(file, newContent);
-              } finally {
-                plugin.modifyGuard.release(annotation.filePath);
-              }
-            }
-          } else if (annotation.kind === 'span') {
-            // Span 标注：移除 %%markvault-span:...%% 锚点
-            const newContent = removeSpanAnchor(content, annotation.uuid);
-            if (newContent !== content && plugin) {
-              plugin.modifyGuard.acquire(annotation.filePath);
-              try {
-                await this.app.vault.modify(file, newContent);
-              } finally {
-                plugin.modifyGuard.release(annotation.filePath);
-              }
-            }
-          } else {
-            // 行内标注：移除 <mark> 标签
-            const result = removeMarkTag(content, annotation.uuid);
-            if (result && plugin) {
-              plugin.modifyGuard.acquire(annotation.filePath);
-              try {
-                await this.app.vault.modify(file, result.content);
-              } finally {
-                plugin.modifyGuard.release(annotation.filePath);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        if (plugin) plugin.modifyGuard.releaseNow(annotation.filePath);
-        console.error('MarkVault: sidebar delete annotation error', err);
+    const plugin = this.pluginInstance;
+    if (!plugin) return;
+
+    // 🔧 审计修复：清理活跃保护状态（防止 Modal 打开时从侧边栏删除）
+    plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
+
+    // 🔧 P0 修复：保存原始数据用于 MD 失败时回滚（深拷贝确保不丢失可选字段）
+    const backup: Annotation = JSON.parse(JSON.stringify(annotation));
+
+    try {
+      await deleteAnnotation(annotation.uuid);
+
+      const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
+      if (!(file instanceof TFile)) {
+        new Notice('Annotation deleted (source file not found)', 3000);
+        await this.refreshListOnly();
+        return;
       }
+
+      const content = await this.app.vault.read(file);
+      let newContent: string | null = null;
+
+      if (annotation.kind === 'block') {
+        const result = removeBlockAnchor(content, annotation.uuid);
+        if (result !== content) newContent = result;
+      } else if (annotation.kind === 'span') {
+        const result = removeSpanAnchor(content, annotation.uuid);
+        if (result !== content) newContent = result;
+      } else {
+        const result = removeMarkTag(content, annotation.uuid);
+        if (result) newContent = result.content;
+      }
+
+      if (newContent) {
+        // 提前关闭同步窗口，避免 vault.modify 触发 onFileOpen 重复 sync
+        plugin.markFileSynced(annotation.filePath);
+        plugin.modifyGuard.acquire(annotation.filePath);
+        try {
+          await this.app.vault.modify(file, newContent);
+        } catch (mdErr) {
+          // 🔧 P0 修复：MD 失败，回滚 DB
+          console.error('MarkVault: sidebar delete MD error, rolling back', mdErr);
+          await addAnnotation(backup);
+          throw mdErr;
+        } finally {
+          plugin.modifyGuard.release(annotation.filePath);
+        }
+      }
+
+      await plugin.updateSpanCache(annotation.filePath);
+      new Notice('Annotation deleted', 3000);
+      await this.refreshListOnly();
+    } catch (err) {
+      plugin.modifyGuard.releaseNow(annotation.filePath);
+      console.error('MarkVault: sidebar delete annotation error', err);
+      new Notice(
+        `Failed to delete annotation: ${err instanceof Error ? err.message : 'unknown error'}`,
+        5000,
+      );
       await this.refreshListOnly();
     }
   }

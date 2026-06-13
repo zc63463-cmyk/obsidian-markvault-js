@@ -140,12 +140,58 @@ export class AnnotationStore {
       await this._writeIndexFile();
     }
 
-    // 根据 _indexData 构建 _byFile 空索引（不加载分片数据）
+    // 🔧 修复：预加载所有标注数据到内存，确保 getAllAnnotations() 无需打开文件即可返回结果
     this._byFile.clear();
-    for (const entry of Object.values(this._indexData.entries)) {
-      if (!this._byFile.has(entry.filePath)) {
-        this._byFile.set(entry.filePath, new Set());
+    const filePaths = Object.values(this._indexData.entries).map(e => e.filePath);
+    let loadedCount = 0;
+    for (const filePath of filePaths) {
+      try {
+        if (!this._loadedFiles.has(filePath)) {
+          await this.ensureFileLoaded(filePath);
+          loadedCount++;
+        }
+      } catch (err) {
+        console.warn(`MarkVault: failed to preload annotations for ${filePath}`, err);
       }
+    }
+    if (loadedCount > 0) {
+      console.log(`MarkVault: preloaded ${loadedCount} annotation files (${this._byUuid.size} total annotations)`);
+    }
+
+    // 🔧 审计修复：清理 _indexData 中的孤儿条目
+    // 如果 index 中有条目但分片文件已被删除，ensureFileLoaded 会创建空的 byFile entry
+    // 这些空 entry 应该被清理，防止 _index.json 膨胀
+    let orphanCleaned = 0;
+    for (const [filePath, uuidSet] of this._byFile) {
+      if (uuidSet.size === 0) {
+        this._byFile.delete(filePath);
+        this._loadedFiles.delete(filePath);
+        const key = FileEncoder.encodeFilePath(filePath);
+        delete this._indexData.entries[key];
+        orphanCleaned++;
+      }
+    }
+    if (orphanCleaned > 0) {
+      console.log(`MarkVault: cleaned ${orphanCleaned} orphan index entries`);
+      await this._writeIndexFile();
+    }
+
+    // 🔧 修复：清理已被污染的 note 字段
+    // 某些标注的 note 字段被错误写入了其他标注的 uuid:type:color 格式
+    // 检测并清理这些污染数据
+    const dirtyNotePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(highlight|bold|underline):(yellow|green|blue|pink|purple):?$/;
+    let cleanedCount = 0;
+    for (const [uuid, ann] of this._byUuid) {
+      if (ann.note && dirtyNotePattern.test(ann.note.trim())) {
+        console.warn(`MarkVault: cleaning corrupted note for annotation ${uuid}: "${ann.note}"`);
+        ann.note = '';
+        this._dirtyFiles.add(ann.filePath);
+        cleanedCount++;
+      }
+    }
+    if (cleanedCount > 0) {
+      console.log(`MarkVault: cleaned ${cleanedCount} corrupted note fields`);
+      await this.flushAll();
     }
 
     this._initialized = true;
@@ -243,7 +289,7 @@ export class AnnotationStore {
     this._removeFromIndex(uuid);
 
     // 合并变更
-    const newAnn: Annotation = { ...oldAnn, ...changes };
+    const newAnn: Annotation = AnnotationStore._stripExtraFields({ ...oldAnn, ...changes });
     this._byUuid.set(uuid, newAnn);
 
     // 处理 filePath 变更（标注移动到另一个文件）
@@ -318,26 +364,46 @@ export class AnnotationStore {
 
     // 从 _byFile 中移除
     const fileSet = this._byFile.get(filePath);
-    if (fileSet) {
-      fileSet.delete(uuid);
-      if (fileSet.size === 0) {
-        // 文件没有标注了，清理
-        this._byFile.delete(filePath);
-        this._loadedFiles.delete(filePath);
-        const key = FileEncoder.encodeFilePath(filePath);
-        delete this._indexData.entries[key];
-        this._indexDirty = true;
+    const hadFileEntry = fileSet !== undefined;
+    const wasInFileSet = fileSet?.delete(uuid) ?? false;
 
-        // 删除分片文件
-        const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
-        try {
-          await this.adapter.remove(shardPath);
-        } catch {
-          // 文件可能不存在，忽略
-        }
-      } else {
-        this._updateIndexEntry(filePath);
-        this._markDirty(filePath);
+    if (fileSet && fileSet.size === 0) {
+      // 文件没有标注了，清理所有关联资源
+      this._byFile.delete(filePath);
+      this._loadedFiles.delete(filePath);
+      const key = FileEncoder.encodeFilePath(filePath);
+      delete this._indexData.entries[key];
+
+      // 🔧 审计修复：清除脏数据和防抖计时器，防止残留 flush 重建分片
+      this._dirtyFiles.delete(filePath);
+      const timer = this._debounceTimers.get(filePath);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        this._debounceTimers.delete(filePath);
+      }
+
+      // 删除分片文件
+      const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
+      try {
+        await this.adapter.remove(shardPath);
+      } catch {
+        // 文件可能不存在，忽略
+      }
+
+      // 🔧 P0 修复：立即写回 _index.json，防止重启后残留孤儿条目
+      await this._writeIndexFile();
+
+      console.log(`MarkVault: deleted last annotation for file "${filePath}" — shard removed, index updated`);
+    } else {
+      // 🔧 P1 修复：即使 fileSet 不存在或不包含 uuid（内存索引不一致），
+      // 也要更新索引并标记 dirty，确保分片文件能正确反映删除
+      this._updateIndexEntry(filePath);
+      this._markDirty(filePath);
+
+      if (!hadFileEntry) {
+        console.warn(`MarkVault: deleteAnnotation — fileSet missing for ${filePath}, recovered index entry`);
+      } else if (!wasInFileSet) {
+        console.warn(`MarkVault: deleteAnnotation — uuid ${uuid} not in fileSet for ${filePath}, recovered index entry`);
       }
     }
   }
@@ -446,15 +512,17 @@ export class AnnotationStore {
     const byColor: Record<string, number> = {};
     let withNotes = 0;
     let withTags = 0;
+    let withFields = 0;
 
     for (const a of annotations) {
       byType[a.type] = (byType[a.type] || 0) + 1;
       byColor[a.color] = (byColor[a.color] || 0) + 1;
       if (a.note && a.note.trim()) withNotes++;
       if (a.tags.length > 0) withTags++;
+      if (a.fields && Object.keys(a.fields).length > 0) withFields++;
     }
 
-    return { total: annotations.length, byType, byColor, withNotes, withTags };
+    return { total: annotations.length, byType, byColor, withNotes, withTags, withFields };
   }
 
   /**
@@ -664,7 +732,41 @@ export class AnnotationStore {
     await this.ensureFileLoaded(filePath);
 
     const uuidSet = this._byFile.get(filePath);
-    if (!uuidSet) return;
+
+    // 🔧 P1 修复：即使 uuidSet 不存在，也要尝试清理磁盘分片和索引条目
+    if (!uuidSet || uuidSet.size === 0) {
+      this._byFile.delete(filePath);
+      this._loadedFiles.delete(filePath);
+      this._dirtyFiles.delete(filePath);
+      const timer = this._debounceTimers.get(filePath);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        this._debounceTimers.delete(filePath);
+      }
+      const key = FileEncoder.encodeFilePath(filePath);
+      if (this._indexData.entries[key]) {
+        delete this._indexData.entries[key];
+        const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
+        try {
+          await this.adapter.remove(shardPath);
+        } catch (err) {
+          // 文件可能不存在，忽略；其他错误记录日志
+          console.warn(`MarkVault: failed to remove shard ${shardPath}`, err);
+        }
+        await this._writeIndexFile();
+      }
+      return;
+    }
+
+    // 🔧 审计修复：先删除分片文件，再清理内存索引
+    // 这样即使后续内存清理失败，重启后 ensureFileLoaded 读取失败时也能恢复
+    const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
+    try {
+      await this.adapter.remove(shardPath);
+    } catch (err) {
+      // 文件可能不存在，忽略；其他错误记录日志
+      console.warn(`MarkVault: failed to remove shard ${shardPath}`, err);
+    }
 
     // 逐个移除索引和标注
     for (const uuid of uuidSet) {
@@ -676,19 +778,6 @@ export class AnnotationStore {
     this._byFile.delete(filePath);
     this._loadedFiles.delete(filePath);
 
-    // 从 _indexData 中移除
-    const key = FileEncoder.encodeFilePath(filePath);
-    delete this._indexData.entries[key];
-    this._indexDirty = true;
-
-    // 删除分片文件
-    const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
-    try {
-      await this.adapter.remove(shardPath);
-    } catch {
-      // 文件可能不存在，忽略
-    }
-
     // 从 dirty 集合中移除（文件已删除，无需写回）
     this._dirtyFiles.delete(filePath);
 
@@ -698,6 +787,104 @@ export class AnnotationStore {
       clearTimeout(timer);
       this._debounceTimers.delete(filePath);
     }
+
+    // 从 _indexData 中移除
+    const key = FileEncoder.encodeFilePath(filePath);
+    delete this._indexData.entries[key];
+
+    // 🔧 P0 修复：立即写回 _index.json，防止重启后残留孤儿条目
+    await this._writeIndexFile();
+  }
+
+  /**
+   * 文件重命名时同步更新所有相关标注的 filePath。
+   * 将旧分片 JSON 文件重命名为新路径 + 更新索引。
+   *
+   * 执行顺序（磁盘优先，避免崩溃丢数据）：
+   * 1. 写入新分片 JSON → 2. 删除旧分片 → 3. 更新内存索引 → 4. 写回 _index.json
+   */
+  async renameAnnotationsForFile(oldPath: string, newPath: string): Promise<void> {
+    this._assertInitialized();
+
+    if (oldPath === newPath) return;
+
+    // 1. 确保旧文件数据已加载
+    await this.ensureFileLoaded(oldPath);
+
+    const uuidSet = this._byFile.get(oldPath);
+    if (!uuidSet || uuidSet.size === 0) {
+      // 旧文件没有标注，也要清理残留的空索引条目
+      this._byFile.delete(oldPath);
+      this._loadedFiles.delete(oldPath);
+      const oldKey = FileEncoder.encodeFilePath(oldPath);
+      delete this._indexData.entries[oldKey];
+      await this._writeIndexFile();
+      return;
+    }
+
+    // 🔧 审计修复：先清理旧的防抖计时器，防止回调中的闭包引用 oldPath
+    const oldTimer = this._debounceTimers.get(oldPath);
+    if (oldTimer !== undefined) {
+      clearTimeout(oldTimer);
+      this._debounceTimers.delete(oldPath);
+    }
+
+    // 2. 收集并更新所有标注的 filePath（在内存中修改引用）
+    const updatedAnnotations: Annotation[] = [];
+    for (const uuid of uuidSet) {
+      const ann = this._byUuid.get(uuid);
+      if (ann) {
+        ann.filePath = newPath;
+        updatedAnnotations.push(ann);
+      }
+    }
+
+    // 3. 写入新分片 JSON（磁盘优先，确保数据不丢）
+    const newShardPath = FileEncoder.getShardPath(this._baseDir, newPath);
+    await this.adapter.write(
+      newShardPath,
+      JSON.stringify({
+        filePath: newPath,
+        annotations: updatedAnnotations,
+      }, null, 2),
+    );
+
+    // 4. 删除旧分片
+    const oldShardPath = FileEncoder.getShardPath(this._baseDir, oldPath);
+    try {
+      await this.adapter.remove(oldShardPath);
+    } catch {
+      // 文件可能不存在，忽略
+    }
+
+    // 5. 更新 _byFile 映射
+    this._byFile.set(newPath, uuidSet);
+    this._byFile.delete(oldPath);
+
+    // 6. 更新 _loadedFiles
+    this._loadedFiles.delete(oldPath);
+    this._loadedFiles.add(newPath);
+
+    // 7. 更新 _indexData
+    const oldKey = FileEncoder.encodeFilePath(oldPath);
+    const newKey = FileEncoder.encodeFilePath(newPath);
+    const entry = this._indexData.entries[oldKey];
+    if (entry) {
+      entry.filePath = newPath;
+      this._indexData.entries[newKey] = entry;
+      delete this._indexData.entries[oldKey];
+    }
+
+    // 8. 更新 dirty 集合（如果旧路径在 flush 队列中）
+    if (this._dirtyFiles.has(oldPath)) {
+      this._dirtyFiles.delete(oldPath);
+      this._dirtyFiles.add(newPath);
+    }
+
+    // 9. 立即写回索引（确保后续 onFileOpen 能找到新路径）
+    await this._writeIndexFile();
+
+    console.log(`MarkVault: renamed annotations from "${oldPath}" → "${newPath}" (${uuidSet.size} annotations)`);
   }
 
   /**
@@ -749,6 +936,26 @@ export class AnnotationStore {
     this._addToIndex(ann);
 
     this._markDirty(ann.filePath);
+  }
+
+  /**
+   * 获取所有已加载标注中出现过的字段键名列表
+   * 遍历 _byField 索引的 key 集合
+   * @returns 去重排序后的字段键名数组
+   */
+  getFieldKeys(): string[] {
+    return Array.from(this._byField.keys()).sort();
+  }
+
+  /**
+   * 获取指定字段键的所有已出现值列表
+   * @param key 字段键名
+   * @returns 去重排序后的字段值数组
+   */
+  getFieldValues(key: string): string[] {
+    const fieldMap = this._byField.get(key);
+    if (!fieldMap) return [];
+    return Array.from(fieldMap.keys()).sort();
   }
 
   // ═══════════════════════════════════════════════════════
@@ -1072,7 +1279,12 @@ export class AnnotationStore {
     if (annotation.targetLine !== undefined) clean.targetLine = annotation.targetLine;
     if (annotation.anchorLine !== undefined) clean.anchorLine = annotation.anchorLine;
     if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges;
-    if (annotation.fields !== undefined) clean.fields = annotation.fields;
+    if (annotation.fields !== undefined) {
+      // 空对象 → 不持久化，与 undefined 语义一致
+      if (Object.keys(annotation.fields).length > 0) {
+        clean.fields = annotation.fields;
+      }
+    }
     return clean;
   }
 

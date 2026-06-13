@@ -1,12 +1,13 @@
-import { Editor, MarkdownView, Menu, Notice } from 'obsidian';
+import { Editor, MarkdownView, Menu, Notice, TFile } from 'obsidian';
 import type MarkVaultPlugin from '../../main';
 import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
-import { addAnnotation, getAnnotationByUuid } from '../../db/annotation-repo';
-import { buildMarkTag, buildBlockAnchor, buildSpanAnchor } from '../../core/annotation-parser';
+import { addAnnotation, getAnnotationByUuid, updateAnnotation } from '../../db/annotation-repo';
+import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from '../../core/md-context';
+import { encodeFields, applyTemplate } from '../../utils/fields';
 import { AnnotationModal } from './annotation-modal';
 
 /**
@@ -77,6 +78,106 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
             await createAnnotationWithNote(plugin, editor, view);
           });
       });
+
+      // 🆕 Phase 3: Annotate with field（仅当有默认模板时显示）
+      if (plugin.settings.defaultTemplateId) {
+        const defaultTemplate = plugin.settings.fieldTemplates.find(t => t.id === plugin.settings.defaultTemplateId);
+        if (defaultTemplate) {
+          menu.addSeparator();
+
+          menu.addItem((item) => {
+            item.setTitle('🏷️ Annotate with field')
+              .setIcon('tag')
+              .onClick(async () => {
+                // 先创建标注，再打开 Modal 让用户编辑 fields
+                const annotation = await createAnnotation(plugin, editor, view, 'highlight', plugin.settings.defaultHighlightColor);
+                if (annotation) {
+                  // 自动应用默认模板的 fields
+                  annotation.fields = applyTemplate(defaultTemplate, {});
+                  await updateAnnotation(annotation.uuid, { fields: annotation.fields });
+
+                  // 更新 inline 标注的 Markdown（写入 data-fields）
+                  if (annotation.kind === 'inline' || !annotation.kind) {
+                    const file = view.file;
+                    if (file instanceof TFile) {
+                      const content = await plugin.app.vault.read(file);
+                      const encodedFields = encodeFields(annotation.fields);
+                      const newContent = updateMarkTag(content, annotation.uuid, { fields: encodedFields });
+                      if (newContent !== content) {
+                        plugin.modifyGuard.acquire(file.path);
+                        try {
+                          await plugin.app.vault.modify(file, newContent);
+                        } finally {
+                          plugin.modifyGuard.release(file.path);
+                        }
+                      }
+                    }
+                  }
+
+                  // 打开编辑 Modal
+                  plugin.markAnnotationActive(annotation.uuid, annotation.filePath);
+                  const modal = new AnnotationModal(
+                    plugin.app,
+                    plugin,
+                    annotation,
+                    async (updated) => {
+                      plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
+                      await plugin.refreshSidebar();
+                    },
+                    async (uuid) => {
+                      plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
+                      await plugin.refreshSidebar();
+                    },
+                  );
+                  const originalOnClose = modal.onClose.bind(modal);
+                  modal.onClose = () => {
+                    plugin.unmarkAnnotationActive(annotation.uuid, annotation.filePath);
+                    originalOnClose();
+                  };
+                  modal.open();
+                }
+              });
+          });
+
+          // 展示默认模板的每个字段每个值的快捷菜单项
+          for (const fieldDef of defaultTemplate.fields) {
+            for (const val of fieldDef.values) {
+              menu.addItem((item) => {
+                item.setTitle(`   ${fieldDef.key}: ${val}`)
+                  .onClick(async () => {
+                    const annotation = await createAnnotation(plugin, editor, view, 'highlight', plugin.settings.defaultHighlightColor);
+                    if (annotation) {
+                      const fields = applyTemplate(defaultTemplate, {});
+                      fields[fieldDef.key] = val;
+                      annotation.fields = fields;
+                      await updateAnnotation(annotation.uuid, { fields });
+
+                      // 更新 Markdown
+                      if (annotation.kind === 'inline' || !annotation.kind) {
+                        const file = view.file;
+                        if (file instanceof TFile) {
+                          const content = await plugin.app.vault.read(file);
+                          const encodedFields = encodeFields(fields);
+                          const newContent = updateMarkTag(content, annotation.uuid, { fields: encodedFields });
+                          if (newContent !== content) {
+                            plugin.modifyGuard.acquire(file.path);
+                            try {
+                              await plugin.app.vault.modify(file, newContent);
+                            } finally {
+                              plugin.modifyGuard.release(file.path);
+                            }
+                          }
+                        }
+                      }
+
+                      await plugin.refreshSidebar();
+                    }
+                  });
+              });
+            }
+          }
+        }
+      }
 
       menu.addSeparator();
 
@@ -254,6 +355,7 @@ async function createSimpleAnnotation(
     console.log(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
 
     await addAnnotation(annotation);
+    plugin.markFileSynced(filePath);
     await plugin.refreshSidebar();
   } finally {
     plugin.modifyGuard.release(filePath);
@@ -365,6 +467,7 @@ async function createSpanAnnotation(
 
     // 更新 span 缓存供 CM6 装饰使用
     plugin.updateSpanCache(filePath);
+    plugin.markFileSynced(filePath);
 
     await plugin.refreshSidebar();
   } finally {
@@ -456,6 +559,7 @@ async function createBlockAnnotation(
     console.log(`MarkVault: created block annotation ${uuid} for ${blockInfo.type} at line ${anchorLine}`);
 
     await addAnnotation(annotation);
+    plugin.markFileSynced(filePath);
     await plugin.refreshSidebar();
   } finally {
     plugin.modifyGuard.release(filePath);

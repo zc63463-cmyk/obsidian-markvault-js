@@ -1,6 +1,6 @@
 import { Plugin, MarkdownView, TFile, MarkdownRenderer, Component } from 'obsidian';
-import type { MarkVaultSettings } from './types/annotation';
-import { DEFAULT_SETTINGS } from './types/annotation';
+import type { MarkVaultSettings, AnnotationType, PresetColorId, Annotation } from './types/annotation';
+import { DEFAULT_SETTINGS, PRESET_COLORS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
@@ -9,8 +9,10 @@ import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { AnnotationModal } from './ui/editor/annotation-modal';
 import { initAnnotationStore, annotationStore } from './db/annotation-store';
+import { addAnnotation } from './db/annotation-repo';
+import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
-import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor, buildSpanAnchor } from './core/annotation-parser';
+import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, removeAnyAnchor, updateAnyAnchor, buildSpanAnchor, buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
 import { updateSpanCacheForFile, clearSpanCache, type SpanAnnotationData } from './core/highlight-applier';
 import { ModifyGuard } from './utils/modify-guard';
 
@@ -24,7 +26,7 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 防重入保护：当插件自身在修改文件时（创建标注、保存批注），
   // 阻止 onFileOpen() 重新触发 syncFromMarkdown()，避免竞态条件覆盖数据
   // per-file Map + 自动过期，比全局布尔值 + setTimeout 更安全
-  public modifyGuard = new ModifyGuard(800);
+  public modifyGuard = new ModifyGuard(3000);
 
   // 🆕 防重入扩展：记录正在编辑的标注 uuid 集合
   // 当用户在 Modal 中编辑标注时，即使 modifyGuard 已释放，
@@ -34,21 +36,41 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 同步维护的活跃文件路径集合，避免 onFileOpen 中异步查询 DB
   private _activeAnnotationFilePaths = new Set<string>();
 
+  // 🆕 uuid → filePath 反向映射，用于精确维护 _activeAnnotationFilePaths
+  private _activeAnnotationUuidToFilePath = new Map<string, string>();
+
+  // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
+  // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
+  private _syncCooldown: Map<string, number> = new Map();
+
   /** 注册一个标注为"正在编辑"状态，防止被 sync 覆盖 */
   public markAnnotationActive(uuid: string, filePath?: string) {
     this._activeAnnotationUuids.add(uuid);
-    if (filePath) this._activeAnnotationFilePaths.add(filePath);
+    if (filePath) {
+      this._activeAnnotationUuidToFilePath.set(uuid, filePath);
+      this._activeAnnotationFilePaths.add(filePath);
+    }
   }
 
   /** 取消标注的"正在编辑"状态 */
   public unmarkAnnotationActive(uuid: string, filePath?: string) {
     this._activeAnnotationUuids.delete(uuid);
-    // 只有当该文件下没有其他活跃标注时，才移除文件路径
-    if (filePath) {
+
+    // 精确维护文件路径集合：只有当该文件下没有其他活跃标注时才移除
+    const storedPath = this._activeAnnotationUuidToFilePath.get(uuid);
+    this._activeAnnotationUuidToFilePath.delete(uuid);
+
+    const targetPath = storedPath ?? filePath;
+    if (targetPath) {
       let hasOtherActive = false;
-      // 由于我们无法同步查询 DB，保留文件路径直到 Set 为空
-      if (this._activeAnnotationUuids.size === 0) {
-        this._activeAnnotationFilePaths.clear();
+      for (const fp of this._activeAnnotationUuidToFilePath.values()) {
+        if (fp === targetPath) {
+          hasOtherActive = true;
+          break;
+        }
+      }
+      if (!hasOtherActive) {
+        this._activeAnnotationFilePaths.delete(targetPath);
       }
     }
   }
@@ -61,6 +83,11 @@ export default class MarkVaultPlugin extends Plugin {
   /** 检查某个文件是否有正在编辑的标注（同步，无需查询 DB） */
   public isFileEditing(filePath: string): boolean {
     return this._activeAnnotationFilePaths.has(filePath);
+  }
+
+  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync（5s 冷却） */
+  public markFileSynced(filePath: string): void {
+    this._syncCooldown.set(filePath, Date.now());
   }
 
   /**
@@ -197,19 +224,68 @@ export default class MarkVaultPlugin extends Plugin {
       console.error('MarkVault: failed to register file-open handler', err);
     }
 
-    // 🆕 当前文件变化时同步（用于切换标签页、重命名等）
+    // 🆕 文件删除时清理关联标注
     try {
       this.registerEvent(
-        this.app.workspace.on('active-leaf-change', async () => {
-          const activeFile = this.app.workspace.getActiveFile();
-          if (activeFile instanceof TFile && activeFile.extension === 'md') {
-            if (activeFile.path !== this.activeFilePath) {
-              this.activeFilePath = activeFile.path;
-              await this.onFileOpen(activeFile);
+        this.app.vault.on('delete', async (file) => {
+          if (file instanceof TFile && file.extension === 'md') {
+            console.log(`MarkVault: file deleted — cleaning up annotations for "${file.path}"`);
+            try {
+              await annotationStore.deleteAnnotationsForFile(file.path);
+              await this.refreshSidebar();
+              console.log(`MarkVault: annotations cleaned up for deleted file "${file.path}"`);
+            } catch (err) {
+              console.error('MarkVault: failed to clean up annotations for deleted file', file.path, err);
             }
           }
         }),
       );
+    } catch (err) {
+      console.error('MarkVault: failed to register delete handler', err);
+    }
+
+    // 🆕 文件重命名时同步更新标注路径
+    try {
+      this.registerEvent(
+        this.app.vault.on('rename', async (file, oldPath) => {
+          if (file instanceof TFile && file.extension === 'md') {
+            console.log(`MarkVault: file renamed "${oldPath}" → "${file.path}"`);
+            try {
+              await annotationStore.renameAnnotationsForFile(oldPath, file.path);
+              // 如果当前活跃文件就是被重命名的文件，更新 activeFilePath
+              if (this.activeFilePath === oldPath) {
+                this.activeFilePath = file.path;
+              }
+              // 🔧 审计修复：更新 _activeAnnotationFilePaths，防止 Modal 编辑保护失效
+              if (this._activeAnnotationFilePaths.has(oldPath)) {
+                this._activeAnnotationFilePaths.delete(oldPath);
+                this._activeAnnotationFilePaths.add(file.path);
+              }
+              // 🔧 审计修复：更新 _syncCooldown 中的冷却条目
+              const cooldownTime = this._syncCooldown.get(oldPath);
+              if (cooldownTime !== undefined) {
+                this._syncCooldown.delete(oldPath);
+                this._syncCooldown.set(file.path, cooldownTime);
+              }
+              await this.refreshSidebar();
+              console.log(`MarkVault: annotations migrated for renamed file`);
+            } catch (err) {
+              console.error('MarkVault: failed to migrate annotations for renamed file', oldPath, '→', file.path, err);
+            }
+          }
+        }),
+      );
+    } catch (err) {
+      console.error('MarkVault: failed to register rename handler', err);
+    }
+
+    // 🆕 当前文件变化时同步（用于切换标签页、重命名等）
+    // ⚠️ 已禁用：active-leaf-change 在 vault.modify 后会被频繁触发，
+    // 导致重复 onFileOpen → 重复全量 sync → UI 长时间无响应。
+    // file-open 事件本身已覆盖文件打开场景，无需额外监听。
+    try {
+      // NO-OP: active-leaf-change handler removed for performance
+      // (kept as comment to document the decision)
     } catch (err) {
       console.error('MarkVault: failed to register active-leaf-change handler', err);
     }
@@ -341,6 +417,13 @@ export default class MarkVaultPlugin extends Plugin {
       console.error('MarkVault: failed to register global click delegate', err);
     }
 
+    // ── 阅读模式：选中文本浮动工具条 ──
+    try {
+      this.setupReadingModeToolbar();
+    } catch (err) {
+      console.error('MarkVault: failed to register reading mode toolbar', err);
+    }
+
     console.log('MarkVault: plugin loaded successfully');
   }
 
@@ -402,34 +485,35 @@ export default class MarkVaultPlugin extends Plugin {
   async onFileOpen(file: TFile) {
     // 防重入：如果当前文件正在被插件自身修改，跳过此次同步
     if (this.modifyGuard.isLocked(file.path)) {
-      console.log(`MarkVault: onFileOpen skipped — internal modify in progress for ${file.path}`);
       return;
     }
 
     // 防重入：如果有标注正在被编辑（Modal 打开中），也跳过同步
-    // 避免 syncFromMarkdown 在用户编辑 Modal 期间覆盖 DB 数据
-    // 🔧 P1 修复：使用同步的 _activeAnnotationFilePaths 替代异步 DB 查询
     if (this._activeAnnotationFilePaths.has(file.path)) {
-      console.log(`MarkVault: onFileOpen skipped — annotation being edited for ${file.path}`);
+      return;
+    }
+
+    // 冷却期检查：文件最近被同步过，避免短时间内重复 sync
+    const lastSync = this._syncCooldown.get(file.path);
+    if (lastSync && (Date.now() - lastSync) < 5000) {
       return;
     }
 
     if (!this.settings.enableAutoSync) {
-      console.log('MarkVault: auto-sync disabled, skipping file-open');
       return;
     }
 
+    // 🔧 P1 修复：冷却期在 sync 开始前设置，防止并发 onFileOpen
+    this._syncCooldown.set(file.path, Date.now());
+
     try {
-      // Phase 2: 确保文件的标注分片已加载到内存
       await annotationStore.ensureFileLoaded(file.path);
 
       let content = await this.app.vault.read(file);
-      console.log(`MarkVault: onFileOpen — ${file.path} (${content.length} chars)`);
 
-      // 0. 自动升级旧格式标注（Highlightr / 纯 <mark>）为 MarkVault 格式
+      // 0. 自动升级旧格式标注
       const upgradedContent = await upgradeMarkdownAnnotations(content, file.path);
       if (upgradedContent !== null && upgradedContent !== content) {
-        // 🔧 P1 修复：升级操作触发 vault.modify，需要防重入
         this.modifyGuard.acquire(file.path);
         try {
           await this.app.vault.modify(file, upgradedContent);
@@ -437,33 +521,18 @@ export default class MarkVaultPlugin extends Plugin {
           this.modifyGuard.release(file.path);
         }
         content = upgradedContent;
-        console.log(`MarkVault: upgraded old-format annotations in ${file.path}`);
       }
 
-      // 1. 从 Markdown 解析标注，同步到 AnnotationStore
+      // 1. syncFromMarkdown
       const syncResult = await syncFromMarkdown(content, file.path);
-      console.log(`MarkVault: synced ${file.path} — added: ${syncResult.added}, removed: ${syncResult.removed}, updated: ${syncResult.updated}, upgraded: ${syncResult.upgraded}`);
-
-      // 1b. 验证：查询 DB 中当前文件的标注数
-      const dbAnnotations = await annotationStore.getAnnotationsForFile(file.path);
-      console.log(`MarkVault: DB now has ${dbAnnotations.length} annotations for ${file.path}`);
-
-      // 1c. 检查是否有标注的 note 在 sync 过程中被意外覆盖
-      const emptyNotes = dbAnnotations.filter(a => !a.note && a.createdAt > 0);
-      if (emptyNotes.length > 0) {
-        console.log(`MarkVault: ${emptyNotes.length} annotations have empty notes`);
-      }
 
       // 2. 偏移恢复
       const recovered = await recoverAndSyncOffsets(content, file.path);
-      if (recovered > 0) {
-        console.log(`MarkVault: recovered ${recovered} annotations offsets in ${file.path}`);
-      }
 
-      // 2b. 更新 span 标注缓存（供 CM6 装饰器使用）
+      // 3. span 缓存
       await this.updateSpanCache(file.path);
 
-      // 3. 刷新侧边栏（延迟确保侧边栏已初始化）
+      // 4. 刷新侧边栏
       setTimeout(async () => {
         await this.refreshSidebar();
       }, 100);
@@ -519,36 +588,38 @@ export default class MarkVaultPlugin extends Plugin {
    * 同时处理 %%markvault-span:uuid:type:color:note%% 格式的 span 锚点
    */
   private processBlockAnchors(el: HTMLElement): void {
-    // Obsidian 将 %%...%% 注释渲染为 <span class="comment"> 或特定类
-    // 遍历所有文本节点查找 markvault 锚点
+    // Obsidian 将 %%...%% 注释渲染为：
+    //   - COMMENT_NODE（不可见，理想情况）
+    //   - ELEMENT_NODE（可见，需要手动隐藏）
+    // 遍历所有节点查找 markvault 锚点
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT | NodeFilter.SHOW_ELEMENT);
     const anchorNodes: { uuid: string; type: string; color: string; note: string; node: Node; anchorKind: 'block' | 'span' }[] = [];
 
     let currentNode: Node | null;
     while ((currentNode = walker.nextNode())) {
       if (currentNode.nodeType === Node.COMMENT_NODE) {
-        // HTML 注释节点
+        // HTML 注释节点 — 天然不可见，无需隐藏
         const text = currentNode.textContent || '';
         // Block 格式：markvault:uuid:type:color:note
-        const blockMatch = text.match(/^markvault:([^:]+):([^:]+):([^:]+):([\s\S]*)$/);
+        const blockMatch = text.match(/^markvault:([^:]+):([^:]+):([^:]+):?([\s\S]*)$/);
         if (blockMatch) {
           anchorNodes.push({
             uuid: blockMatch[1],
             type: blockMatch[2],
             color: blockMatch[3],
-            note: blockMatch[4].replace(/\\c/g, ':'),
+            note: blockMatch[4] ? blockMatch[4].replace(/\\c/g, ':') : '',
             node: currentNode,
             anchorKind: 'block',
           });
         }
         // Span 格式：markvault-span:uuid:type:color:note
-        const spanMatch = text.match(/^markvault-span:([^:]+):([^:]+):([^:]+):([\s\S]*)$/);
+        const spanMatch = text.match(/^markvault-span:([^:]+):([^:]+):([^:]+):?([\s\S]*)$/);
         if (spanMatch) {
           anchorNodes.push({
             uuid: spanMatch[1],
             type: spanMatch[2],
             color: spanMatch[3],
-            note: spanMatch[4].replace(/\\c/g, ':'),
+            note: spanMatch[4] ? spanMatch[4].replace(/\\c/g, ':') : '',
             node: currentNode,
             anchorKind: 'span',
           });
@@ -559,29 +630,30 @@ export default class MarkVaultPlugin extends Plugin {
         if (htmlEl.className && typeof htmlEl.className === 'string' && htmlEl.className.includes('cm-')) {
           continue; // 跳过 CM6 元素
         }
-        // Obsidian 有时将 %% 注释渲染为特定标记
+        // Obsidian 有时将 %% 注释渲染为可见的 element
+        // 需要检测并隐藏，否则 UUID 会暴露给用户
         const text = htmlEl.textContent || '';
         // Block 格式
-        const blockMatch = text.match(/^%%markvault:([^:]+):([^:]+):([^:]+):([\s\S]*)%%$/);
+        const blockMatch = text.match(/^%%markvault:([^:]+):([^:]+):([^:]+):?([\s\S]*)%%$/);
         if (blockMatch) {
           anchorNodes.push({
             uuid: blockMatch[1],
             type: blockMatch[2],
             color: blockMatch[3],
-            note: blockMatch[4].replace(/\\c/g, ':'),
+            note: blockMatch[4] ? blockMatch[4].replace(/\\c/g, ':') : '',
             node: currentNode,
             anchorKind: 'block',
           });
           continue;
         }
         // Span 格式
-        const spanMatch = text.match(/^%%markvault-span:([^:]+):([^:]+):([^:]+):([\s\S]*)%%$/);
+        const spanMatch = text.match(/^%%markvault-span:([^:]+):([^:]+):([^:]+):?([\s\S]*)%%$/);
         if (spanMatch) {
           anchorNodes.push({
             uuid: spanMatch[1],
             type: spanMatch[2],
             color: spanMatch[3],
-            note: spanMatch[4].replace(/\\c/g, ':'),
+            note: spanMatch[4] ? spanMatch[4].replace(/\\c/g, ':') : '',
             node: currentNode,
             anchorKind: 'span',
           });
@@ -591,9 +663,19 @@ export default class MarkVaultPlugin extends Plugin {
 
     // 给锚点下方的元素添加装饰
     for (const anchor of anchorNodes) {
-      const nextSibling = anchor.node.nextSibling;
-      if (nextSibling && nextSibling.nodeType === Node.ELEMENT_NODE) {
-        const targetEl = nextSibling as HTMLElement;
+      // 🔧 修复 Bug 1: 隐藏锚点节点本身，防止 UUID 暴露
+      if (anchor.node.nodeType === Node.ELEMENT_NODE) {
+        const anchorEl = anchor.node as HTMLElement;
+        anchorEl.style.display = 'none';
+        anchorEl.addClass('markvault-anchor-hidden');
+      }
+
+      // 🔧 修复 Bug 2: 改进下一个兄弟元素查找
+      // Obsidian DOM 中锚点和目标元素之间可能有空白文本节点，
+      // 也可能锚点在 <p> 内而目标在下一个 <p> 中
+      const targetEl = this.findNextContentElement(anchor.node);
+
+      if (targetEl) {
         targetEl.addClass('markvault-block-mark');
         targetEl.addClass(`markvault-block-${anchor.type}`);
         targetEl.addClass(`markvault-block-${anchor.color}`);
@@ -615,6 +697,62 @@ export default class MarkVaultPlugin extends Plugin {
         }
       }
     }
+  }
+
+  /**
+   * 🔧 修复 Bug 2: 从锚点节点查找下一个可装饰的内容元素
+   * Obsidian 阅读模式的 DOM 结构中：
+   * - 锚点节点和目标元素之间可能有空白文本节点
+   * - 锚点可能在 <p> 内，目标在下一个兄弟 <p> 中
+   * - 需要向上查找到合适的容器层级再找下一个兄弟
+   */
+  private findNextContentElement(anchorNode: Node): HTMLElement | null {
+    // 策略1: 直接向后遍历 nextSibling，跳过空白文本节点
+    let sibling: Node | null = anchorNode.nextSibling;
+    while (sibling) {
+      if (sibling.nodeType === Node.ELEMENT_NODE) {
+        const el = sibling as HTMLElement;
+        // 跳过空元素
+        if (el.textContent?.trim()) {
+          return el;
+        }
+      }
+      // 跳过纯空白文本节点
+      if (sibling.nodeType === Node.TEXT_NODE && sibling.textContent?.trim()) {
+        // 文本节点后面可能跟着元素，继续查找
+      }
+      sibling = sibling.nextSibling;
+    }
+
+    // 策略2: 向上查找到段落级容器（<p>, <div> 等），找下一个兄弟元素
+    let parent: Node | null = anchorNode.parentNode;
+    while (parent && parent !== document.body) {
+      if (parent.nodeType === Node.ELEMENT_NODE) {
+        const parentEl = parent as HTMLElement;
+        // 到达段落级元素时停止向上
+        const blockTags = ['P', 'DIV', 'LI', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION'];
+        if (blockTags.includes(parentEl.tagName) || parentEl.hasClass('markdown-preview-sizer') || parentEl.hasClass('markdown-reading-view')) {
+          // 找下一个兄弟元素
+          let nextEl: Element | null = parentEl.nextElementSibling;
+          while (nextEl) {
+            // 跳过隐藏的锚点元素
+            if ((nextEl as HTMLElement).style.display === 'none' || nextEl.hasClass('markvault-anchor-hidden')) {
+              nextEl = nextEl.nextElementSibling;
+              continue;
+            }
+            // 找到有内容的元素
+            if (nextEl.textContent?.trim()) {
+              return nextEl as HTMLElement;
+            }
+            nextEl = nextEl.nextElementSibling;
+          }
+          break;
+        }
+      }
+      parent = parent.parentNode;
+    }
+
+    return null;
   }
 
   async rebuildDatabase() {
@@ -684,56 +822,11 @@ export default class MarkVaultPlugin extends Plugin {
           await this.refreshSidebar();
         },
         async (deletedUuid) => {
-          // 删除回调：同时从 Markdown 移除
+          // 🔧 审计修复：Modal 已处理 MD 移除，回调只做清理
           this.unmarkAnnotationActive(uuid, annotation.filePath);
-          try {
-            const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
-            if (file instanceof TFile) {
-              const content = await this.app.vault.read(file);
-
-              // 根据标注类型选择不同的删除方式
-              if (annotation.kind === 'block') {
-                // 块级标注：移除 %%markvault:...%% 锚点
-                const newContent = removeBlockAnchor(content, deletedUuid);
-                if (newContent !== content) {
-                  this.modifyGuard.acquire(annotation.filePath);
-                  try {
-                    await this.app.vault.modify(file, newContent);
-                  } finally {
-                    this.modifyGuard.release(annotation.filePath);
-                  }
-                }
-              } else if (annotation.kind === 'span') {
-                // Span 标注：移除 %%markvault-span:...%% 锚点
-                const newContent = removeSpanAnchor(content, deletedUuid);
-                if (newContent !== content) {
-                  this.modifyGuard.acquire(annotation.filePath);
-                  try {
-                    await this.app.vault.modify(file, newContent);
-                  } finally {
-                    this.modifyGuard.release(annotation.filePath);
-                  }
-                }
-              } else {
-                // 行内标注：移除 <mark> 标签
-                const result = removeMarkTag(content, deletedUuid);
-                if (result) {
-                  this.modifyGuard.acquire(annotation.filePath);
-                  try {
-                    await this.app.vault.modify(file, result.content);
-                  } finally {
-                    this.modifyGuard.release(annotation.filePath);
-                  }
-                }
-              }
-
-              // 更新 span 缓存
-              await this.updateSpanCache(annotation.filePath);
-            }
-          } catch (err) {
-            this.modifyGuard.releaseNow(annotation.filePath);
-            console.error('MarkVault: failed to remove annotation from markdown', err);
-          }
+          // 标记文件已同步（Modal 中 modifyGuard 已释放）
+          this.markFileSynced(annotation.filePath);
+          await this.updateSpanCache(annotation.filePath);
           await this.refreshSidebar();
         },
       );
@@ -750,5 +843,312 @@ export default class MarkVaultPlugin extends Plugin {
     } catch (err) {
       console.error('MarkVault: failed to open annotation modal', err);
     }
+  }
+
+  // ─── 阅读模式浮动工具条 ──────────────────────
+
+  private _readingToolbar: HTMLElement | null = null;
+  private _readingToolbarTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  /** 注册阅读模式选中文本事件 */
+  private setupReadingModeToolbar() {
+    this.registerDomEvent(document, 'mouseup', (e: MouseEvent) => {
+      // 忽略在工具栏自身上的点击
+      if (this._readingToolbar && this._readingToolbar.contains(e.target as Node)) return;
+
+      // 延迟一帧，等 selection 更新
+      if (this._readingToolbarTimeout) clearTimeout(this._readingToolbarTimeout);
+      this._readingToolbarTimeout = setTimeout(() => this.handleReadingSelection(e), 50);
+    });
+
+    // 滚动或窗口大小变化时隐藏工具栏
+    this.registerDomEvent(document, 'selectionchange', () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        this.hideReadingToolbar();
+      }
+    });
+  }
+
+  /** 处理阅读模式文本选择 */
+  private handleReadingSelection(e: MouseEvent) {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+      this.hideReadingToolbar();
+      return;
+    }
+
+    // 检查是否在 CM6 编辑器中（编辑模式有自己的右键菜单）
+    const target = e.target as HTMLElement;
+    if (target.closest('.cm-editor') || target.closest('.cm-content')) return;
+    if (target.closest('.markdown-source-view')) return;
+
+    // 必须选中了文本
+    const range = sel.getRangeAt(0);
+    const text = sel.toString().trim();
+    if (text.length === 0) return;
+
+    // 检查是否在预览区域（阅读模式）
+    if (!target.closest('.markdown-preview-view') && !target.closest('.markdown-reading-view')) {
+      this.hideReadingToolbar();
+      return;
+    }
+
+    this.showReadingToolbar(range, text);
+  }
+
+  /** 显示浮动工具条 */
+  private showReadingToolbar(range: Range, selectedText: string) {
+    this.hideReadingToolbar();
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'markvault-reading-toolbar';
+    toolbar.setAttribute('data-markvault', 'reading-toolbar');
+
+    toolbar.style.position = 'absolute';
+    toolbar.style.zIndex = '9999';
+
+    // 当前选中的标注类型
+    let currentType: AnnotationType = 'highlight';
+    let currentKind: Annotation['kind'] = 'inline';
+
+    // ── 左侧：类型选择按钮 ──
+    const typeGroup = document.createElement('div');
+    typeGroup.className = 'markvault-reading-type-group';
+
+    const types: Array<{ type: AnnotationType; label: string; icon: string; kind?: Annotation['kind'] }> = [
+      { type: 'highlight', label: 'Highlight', icon: '🎨' },
+      { type: 'bold', label: 'Bold', icon: 'B' },
+      { type: 'underline', label: 'Underline', icon: 'U̲' },
+      { type: 'highlight', label: 'Block', icon: '⬜', kind: 'block' },
+    ];
+
+    const typeBtns: HTMLElement[] = [];
+    for (const t of types) {
+      const btn = document.createElement('button');
+      btn.className = 'markvault-reading-type-btn';
+      btn.textContent = t.icon;
+      btn.title = t.label;
+      if (t.type === 'highlight' && !t.kind) btn.classList.add('active');
+
+      btn.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        currentType = t.type;
+        currentKind = t.kind || 'inline';
+        // 切换 active 状态
+        typeBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      });
+      typeGroup.appendChild(btn);
+      typeBtns.push(btn);
+    }
+
+    toolbar.appendChild(typeGroup);
+
+    // 分隔线
+    const sep = document.createElement('span');
+    sep.className = 'markvault-reading-toolbar-sep';
+    toolbar.appendChild(sep);
+
+    // ── 右侧：颜色圆点 ──
+    const colorGroup = document.createElement('div');
+    colorGroup.className = 'markvault-reading-color-group';
+
+    for (const c of PRESET_COLORS) {
+      const btn = document.createElement('button');
+      btn.className = 'markvault-reading-color-btn';
+      btn.style.backgroundColor = c.hex;
+      btn.title = `${c.label} (${currentType})`;
+      btn.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.createReadingAnnotation(selectedText, c.id, currentType, currentKind);
+        this.hideReadingToolbar();
+      });
+      colorGroup.appendChild(btn);
+    }
+
+    toolbar.appendChild(colorGroup);
+
+    document.body.appendChild(toolbar);
+
+    // 定位：选中文本上方
+    const rect = range.getBoundingClientRect();
+    const toolbarHeight = 36; // 预估高度
+    let left = rect.left + rect.width / 2;
+    let top = rect.top - toolbarHeight - 6 + window.scrollY;
+
+    // 如果上方空间不足，放下方
+    if (rect.top < toolbarHeight + 10) {
+      top = rect.bottom + 6 + window.scrollY;
+    }
+
+    toolbar.style.left = `${left}px`;
+    toolbar.style.top = `${top}px`;
+    toolbar.style.transform = this._readingToolbar ? 'translate(-50%, 0)' : 'translate(-50%, 0)';
+
+    this._readingToolbar = toolbar;
+
+    // 动画进入
+    requestAnimationFrame(() => {
+      toolbar.style.opacity = '1';
+      toolbar.style.transform = 'translate(-50%, 0) scale(1)';
+    });
+  }
+
+  /** 隐藏工具条 */
+  private hideReadingToolbar() {
+    if (this._readingToolbar) {
+      const t = this._readingToolbar;
+      t.style.opacity = '0';
+      t.style.transform = 'translate(-50%, 0) scale(0.8)';
+      setTimeout(() => {
+        if (t.parentElement) {
+          t.remove();
+        }
+      }, 150);
+      this._readingToolbar = null;
+    }
+  }
+
+  /** 在阅读模式下创建标注 */
+  private async createReadingAnnotation(selectedText: string, color: string, type: AnnotationType = 'highlight', kind: Annotation['kind'] = 'inline') {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || !view.file) {
+      console.error('MarkVault: no active MarkdownView in reading mode');
+      return;
+    }
+
+    const filePath = view.file.path;
+    const uuid = generateId();
+
+    try {
+      const content = await this.app.vault.read(view.file);
+
+      // 在源文件中查找选中文本
+      const idx = content.indexOf(selectedText);
+      if (idx === -1) {
+        console.error('MarkVault: selected text not found in source file');
+        return;
+      }
+
+      if (kind === 'block') {
+        // ── 块标注：在选中文本所在块的边界前插入锚点 ──
+        // 向前搜索块边界（空行、标题、callout 起始）
+        const beforeText = content.substring(0, idx);
+        const blockStart = this.findBlockBoundary(beforeText);
+
+        const anchor = buildBlockAnchor({
+          uuid,
+          type,
+          color,
+          note: '',
+        });
+
+        // 在块边界插入锚点
+        const newContent = content.substring(0, blockStart) + anchor + '\n' + content.substring(blockStart);
+        this.modifyGuard.acquire(filePath);
+        try {
+          await this.app.vault.modify(view.file, newContent);
+        } finally {
+          this.modifyGuard.release(filePath);
+        }
+
+        const annotation: Annotation = {
+          uuid,
+          filePath,
+          type,
+          color,
+          text: selectedText,
+          note: '',
+          tags: [],
+          startOffset: blockStart,
+          endOffset: blockStart + anchor.length,
+          startLine: 0,
+          contextBefore: content.substring(Math.max(0, blockStart - 80), blockStart),
+          contextAfter: content.substring(blockStart, Math.min(content.length, blockStart + 80)),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          kind: 'block',
+        };
+
+        await addAnnotation(annotation);
+        console.log(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
+        this.markFileSynced(filePath);
+        await this.refreshSidebar();
+      } else {
+        // ── 行内标注：包裹 <mark> 标签 ──
+        const startOffset = idx;
+        const endOffset = idx + selectedText.length;
+
+        const annotation: Annotation = {
+          uuid,
+          filePath,
+          type,
+          color,
+          text: selectedText,
+          note: '',
+          tags: [],
+          startOffset,
+          endOffset,
+          startLine: 0,
+          contextBefore: content.substring(Math.max(0, idx - 40), idx),
+          contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          kind: 'inline',
+        };
+
+        const markTag = buildMarkTag(annotation);
+
+        const newContent = content.substring(0, idx) + markTag + content.substring(endOffset);
+        this.modifyGuard.acquire(filePath);
+        try {
+          await this.app.vault.modify(view.file, newContent);
+        } finally {
+          this.modifyGuard.release(filePath);
+        }
+
+        annotation.endOffset = startOffset + markTag.length;
+        await addAnnotation(annotation);
+
+        console.log(`MarkVault: created reading-mode inline annotation ${uuid} in ${filePath}`);
+        this.markFileSynced(filePath);
+        await this.refreshSidebar();
+      }
+    } catch (err) {
+      console.error('MarkVault: failed to create reading-mode annotation', err);
+    } finally {
+      this.modifyGuard.release(filePath);
+      this.markFileSynced(filePath);
+      window.getSelection()?.removeAllRanges();
+    }
+  }
+
+  /** 向前查找块边界位置（空行、标题行、callout行 之后） */
+  private findBlockBoundary(beforeText: string): number {
+    let pos = beforeText.length;
+    // 跳过 trailing 空白
+    while (pos > 0 && (beforeText[pos - 1] === '\n' || beforeText[pos - 1] === '\r')) pos--;
+
+    // 回退到上一个双换行（块边界）
+    const doubleNewline = beforeText.lastIndexOf('\n\n', pos - 1);
+    if (doubleNewline !== -1) return doubleNewline + 1;
+
+    // 如果没有双换行，找最近的标题或 callout 行
+    const lines = beforeText.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (line.startsWith('#') || line.startsWith('> [!')){
+        // 从这行开始
+        let offset = 0;
+        for (let j = 0; j < i; j++) offset += lines[j].length + 1;
+        return offset;
+      }
+    }
+
+    // 都没有 → 文件开头
+    return 0;
   }
 }

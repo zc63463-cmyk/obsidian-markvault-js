@@ -1,8 +1,9 @@
 import { App, Modal, TextAreaComponent, TextComponent, Setting, TFile, MarkdownRenderer, Component } from 'obsidian';
 import type { Annotation, AnnotationType, PresetColorId } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation } from '../../db/annotation-repo';
+import { updateAnnotation, deleteAnnotation, addAnnotation } from '../../db/annotation-repo';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
+import { encodeFields, applyTemplate } from '../../utils/fields';
 import type MarkVaultPlugin from '../../main';
 
 /**
@@ -16,6 +17,7 @@ export class AnnotationModal extends Modal {
   private tagsValue: string;
   private selectedColor: string;
   private selectedType: AnnotationType;
+  private fieldsValue: Record<string, string>;
   private onSave: (annotation: Annotation) => void;
   private onDelete: (uuid: string) => void;
   private component_: Component;
@@ -34,6 +36,7 @@ export class AnnotationModal extends Modal {
     this.tagsValue = annotation.tags.join(', ');
     this.selectedColor = annotation.color;
     this.selectedType = annotation.type;
+    this.fieldsValue = annotation.fields ? { ...annotation.fields } : {};
     this.onSave = onSave;
     this.onDelete = onDelete;
     this.component_ = new Component();
@@ -137,6 +140,50 @@ export class AnnotationModal extends Modal {
         text.inputEl.addClass('markvault-modal-tags-input');
       });
 
+    // ── Fields 编辑区 ──
+    const fieldsSection = contentEl.createDiv({ cls: 'markvault-modal-fields' });
+    fieldsSection.createEl('h3', { text: 'Fields', cls: 'markvault-modal-fields-title' });
+
+    // 字段行容器
+    const fieldsListEl = fieldsSection.createDiv({ cls: 'markvault-modal-fields-list' });
+    this.renderFieldRows(fieldsListEl);
+
+    // Add Field 按钮
+    const addFieldBtn = fieldsSection.createEl('button', {
+      text: '+ Add Field',
+      cls: 'markvault-modal-add-field-btn',
+    });
+    addFieldBtn.addEventListener('click', () => {
+      const keys = Object.keys(this.fieldsValue);
+      const newKey = `field${keys.length + 1}`;
+      this.fieldsValue[newKey] = '';
+      this.renderFieldRows(fieldsListEl);
+    });
+
+    // Apply Template 下拉菜单
+    const templates = this.plugin.settings.fieldTemplates;
+    if (templates && templates.length > 0) {
+      const templateContainer = fieldsSection.createDiv({ cls: 'markvault-modal-template-section' });
+      templateContainer.createSpan({ text: 'Apply template: ', cls: 'markvault-modal-template-label' });
+
+      const templateSelect = templateContainer.createEl('select', { cls: 'markvault-modal-template-select' });
+      templateSelect.createEl('option', { text: 'Choose template...', value: '' });
+      for (const tpl of templates) {
+        templateSelect.createEl('option', { text: tpl.name, value: tpl.id });
+      }
+
+      templateSelect.addEventListener('change', () => {
+        const tplId = templateSelect.value;
+        if (!tplId) return;
+        const tpl = templates.find(t => t.id === tplId);
+        if (tpl) {
+          this.fieldsValue = applyTemplate(tpl, this.fieldsValue);
+          this.renderFieldRows(fieldsListEl);
+          templateSelect.value = ''; // 重置选择
+        }
+      });
+    }
+
     // 操作按钮
     const buttonBar = contentEl.createDiv({ cls: 'markvault-modal-buttons' });
 
@@ -224,6 +271,62 @@ export class AnnotationModal extends Modal {
     }
   }
 
+  /** 渲染 Fields 编辑行 */
+  private renderFieldRows(container: HTMLElement) {
+    container.empty();
+    const entries = Object.entries(this.fieldsValue);
+
+    for (const [key, value] of entries) {
+      const row = container.createDiv({ cls: 'markvault-modal-field-row' });
+
+      const keyInput = row.createEl('input', {
+        type: 'text',
+        value: key,
+        cls: 'markvault-modal-field-key',
+        attr: { placeholder: 'Key' },
+      });
+
+      const valueInput = row.createEl('input', {
+        type: 'text',
+        value: value,
+        cls: 'markvault-modal-field-value',
+        attr: { placeholder: 'Value' },
+      });
+
+      const deleteBtn = row.createEl('button', {
+        text: '✕',
+        cls: 'markvault-modal-field-delete',
+      });
+
+      // 事件处理：实时更新 fieldsValue
+      keyInput.addEventListener('input', () => {
+        const oldKey = key;
+        const newKey = keyInput.value;
+        if (oldKey !== newKey) {
+          delete this.fieldsValue[oldKey];
+          this.fieldsValue[newKey] = valueInput.value;
+        }
+      });
+
+      valueInput.addEventListener('input', () => {
+        this.fieldsValue[keyInput.value] = valueInput.value;
+        // 软限制：超长字段值警告
+        if (valueInput.value.length > 1000) {
+          valueInput.style.borderColor = 'var(--text-error, #e74c3c)';
+          valueInput.title = '字段值过长，可能影响 Markdown 文件可读性';
+        } else {
+          valueInput.style.borderColor = '';
+          valueInput.title = '';
+        }
+      });
+
+      deleteBtn.addEventListener('click', () => {
+        delete this.fieldsValue[keyInput.value];
+        this.renderFieldRows(container);
+      });
+    }
+  }
+
   private async save() {
     const tags = this.tagsValue
       .split(',')
@@ -243,7 +346,25 @@ export class AnnotationModal extends Modal {
       updates.type = this.selectedType;
     }
 
+    // 🆕 Phase 3: 收集 fields（过滤空键）
+    const filteredFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this.fieldsValue)) {
+      if (k.trim()) {
+        filteredFields[k.trim()] = v;
+      }
+    }
+    if (Object.keys(filteredFields).length > 0 || this.annotation.fields) {
+      updates.fields = filteredFields;
+    }
+
     console.log(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
+
+    // 🔧 P0 修复：捕获原始值用于 MD 失败时回滚
+    const originalNote = this.annotation.note;
+    const originalTags = [...this.annotation.tags];
+    const originalColor = this.annotation.color;
+    const originalType = this.annotation.type;
+    const originalFields = this.annotation.fields ? { ...this.annotation.fields } : undefined;
 
     // ① 更新 AnnotationStore（先写 Store，再写 Markdown）
     await updateAnnotation(this.annotation.uuid, updates);
@@ -277,6 +398,7 @@ export class AnnotationModal extends Modal {
           tags,
           color: updates.color,
           type: updates.type,
+          fields: Object.keys(filteredFields).length > 0 ? encodeFields(filteredFields) : '',
         });
       }
 
@@ -286,6 +408,23 @@ export class AnnotationModal extends Modal {
         try {
           await this.app.vault.modify(file, newContent);
           console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
+        } catch (mdErr) {
+          // 🔧 P0 修复：MD 写入失败，回滚 DB
+          console.error(`MarkVault modal: MD update failed, rolling back DB for ${this.annotation.uuid}`, mdErr);
+          await updateAnnotation(this.annotation.uuid, {
+            note: originalNote,
+            tags: originalTags,
+            color: originalColor,
+            type: originalType,
+            fields: originalFields,
+          });
+          // 恢复内存中的 annotation 引用
+          this.annotation.note = originalNote;
+          this.annotation.tags = originalTags;
+          this.annotation.color = originalColor;
+          this.annotation.type = originalType;
+          this.annotation.fields = originalFields;
+          throw mdErr; // 重新抛出，让外部感知
         } finally {
           this.plugin.modifyGuard.release(this.annotation.filePath);
         }
@@ -299,29 +438,40 @@ export class AnnotationModal extends Modal {
     this.annotation.tags = tags;
     if (updates.color) this.annotation.color = updates.color;
     if (updates.type) this.annotation.type = updates.type;
+    if (updates.fields !== undefined) this.annotation.fields = updates.fields;
+
+    // 🔧 P1 修复：标记文件已同步，避免 onFileOpen 触发无意义的全量 sync
+    this.plugin.markFileSynced(this.annotation.filePath);
+    // 🔧 P1 修复：更新 span 缓存，确保 CM6 装饰立即反映最新修改
+    try {
+      await this.plugin.updateSpanCache(this.annotation.filePath);
+    } catch (err) {
+      console.error('MarkVault modal: updateSpanCache error', err);
+    }
+
     this.onSave(this.annotation);
   }
 
   private async remove() {
-    // 从 AnnotationStore 删除
+    // 🔧 P0 修复：保存原始数据用于 MD 失败时回滚（深拷贝确保不丢失可选字段）
+    const backup: Annotation = JSON.parse(JSON.stringify(this.annotation));
+
+    // ① 从 AnnotationStore 删除
     await deleteAnnotation(this.annotation.uuid);
 
-    // 从 Markdown 移除标注
+    // ② 从 Markdown 移除标注
     const file = this.app.vault.getAbstractFileByPath(this.annotation.filePath);
     if (file instanceof TFile) {
       const content = await this.app.vault.read(file);
       let newContent: string | null = null;
 
       if (this.annotation.kind === 'span') {
-        // Span 标注：移除 %%markvault-span:...%% 锚点
         const result = removeSpanAnchor(content, this.annotation.uuid);
         if (result !== content) newContent = result;
       } else if (this.annotation.kind === 'block') {
-        // 块级标注：移除 %%markvault:...%% 锚点
         const result = removeBlockAnchor(content, this.annotation.uuid);
         if (result !== content) newContent = result;
       } else {
-        // 行内标注：移除 <mark> 标签
         const result = removeMarkTag(content, this.annotation.uuid);
         if (result) newContent = result.content;
       }
@@ -330,12 +480,29 @@ export class AnnotationModal extends Modal {
         this.plugin.modifyGuard.acquire(this.annotation.filePath);
         try {
           await this.app.vault.modify(file, newContent);
+          console.log(`MarkVault modal: removed annotation ${this.annotation.uuid} from markdown`);
+        } catch (mdErr) {
+          // 🔧 P0 修复：MD 写入失败，回滚 DB（重新添加标注）
+          console.error(`MarkVault modal: MD removal failed, rolling back DB for ${this.annotation.uuid}`, mdErr);
+          await addAnnotation(backup);
+          throw mdErr; // 传播错误，阻止 onDelete 回调
         } finally {
           this.plugin.modifyGuard.release(this.annotation.filePath);
         }
       }
     }
 
+    // 🔧 P1 修复：标记文件已同步
+    this.plugin.markFileSynced(this.annotation.filePath);
+    // 🔧 P1 修复：更新 span 缓存
+    try {
+      await this.plugin.updateSpanCache(this.annotation.filePath);
+    } catch (err) {
+      console.error('MarkVault modal: remove updateSpanCache error', err);
+    }
+
     this.onDelete(this.annotation.uuid);
+    // 🔧 UX 修复：删除成功后关闭 Modal
+    this.close();
   }
 }

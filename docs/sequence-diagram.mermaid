@@ -1,75 +1,75 @@
 sequenceDiagram
-    participant Main as MarkVaultPlugin
+    participant User
+    participant Modal as AnnotationModal
+    participant FieldsUtil as utils/fields.ts
     participant Store as AnnotationStore
-    participant Adapter as vault.adapter
-    participant Migration as MigrationHelper
+    participant Parser as annotation-parser.ts
     participant Repo as annotation-repo.ts
 
-    Main->>Main: onload()
-    Main->>Store: new AnnotationStore(app.vault)
-    Main->>Store: initialize()
-    Store->>Adapter: read(_meta.json)
-    alt _meta.json 不存在
-        Store->>Adapter: mkdir(annotations/)
-        Store->>Adapter: write(_meta.json, {schemaVersion:1, ...})
-        Store->>Adapter: write(_index.json, {version:1, entries:{}})
-    else _meta.json 存在
-        Store->>Adapter: read(_index.json)
-        Store->>Store: 构建空 _byFile Map（不加载分片）
+    Note over User,Repo: 流程 A: Modal 保存 Fields
+
+    User->>Modal: 点击 "Save"
+    Modal->>Modal: 收集 fieldsValues (Map<string,string>)
+    Modal->>FieldsUtil: encodeFields(fieldsValues)
+    FieldsUtil-->>Modal: "category=定义&importance=高"
+
+    Modal->>Repo: updateAnnotation(uuid, { fields: fieldsValues, ... })
+
+    alt annotation.kind === 'inline'
+        Modal->>Parser: updateMarkTag(content, uuid, { fields: encodedFieldsStr })
+        Note over Parser: 更新 mark 的 data-fields 属性
+    else annotation.kind === 'block' || 'span'
+        Note over Modal: 块级/span 标注不修改 Markdown 锚点<br/>fields 仅存储在 Store
     end
-    Store->>Migration: needsMigration()
-    Migration->>Migration: 检测 IndexedDB 是否有 markvault-db
-    alt 需要迁移
-        Main->>Migration: migrateFromIndexedDB(store)
-        Migration->>Migration: 读取所有 IndexedDB 标注
-        Migration->>Store: addAnnotation() 批量写入
-        Migration->>Migration: 删除 IndexedDB 数据库
+
+    Parser-->>Modal: newContent
+    Modal->>Modal: vault.modify(file, newContent) [with modifyGuard]
+    Modal->>Modal: onSave(annotation)
+
+    Note over User,Repo: 流程 B: 侧边栏字段过滤
+
+    User->>Modal: (侧边栏) 展开 "By Field" 区域
+    Modal->>Repo: getFieldKeys()
+    Repo->>Store: getFieldKeys()
+    Store-->>Repo: ["category", "importance", "understanding"]
+    Repo-->>Modal: fieldKeys[]
+
+    Modal->>Modal: 渲染 Combo-box 列表
+
+    User->>Modal: 选择 key="category"
+    Modal->>Repo: getFieldValues("category")
+    Repo->>Store: getFieldValues("category")
+    Store-->>Repo: ["定义", "原理", "应用"]
+    Repo-->>Modal: values[]
+
+    Modal->>Modal: 渲染值下拉列表
+
+    User->>Modal: 选择 value="定义"
+    Modal->>Modal: filter.fieldFilters = { category: "定义" }
+    Modal->>Repo: queryAnnotations(filter)
+    Repo->>Store: queryAnnotations({ fieldFilters: { category: "定义" } })
+    Store-->>Repo: 匹配的 Annotation[]
+    Repo-->>Modal: annotations[]
+    Modal->>Modal: 渲染标注卡片列表
+
+    Note over User,Repo: 流程 C: 导出功能
+
+    User->>Modal: (侧边栏) 点击 "Export" 按钮
+    Modal->>Modal: 显示导出选项（格式 + 范围）
+
+    alt 导出范围 = "当前过滤结果"
+        Modal->>Modal: 使用当前 filter 查询结果
+    else 导出范围 = "选中标注"
+        Modal->>Modal: 使用 selectedUuids 查询
     end
-    Main->>Repo: setStore(store)
-    Main->>Main: 继续注册 CM6 扩展、事件等
 
-    Note over Main,Store: ─── 文件打开（懒加载） ───
-
-    Main->>Main: onFileOpen(file)
-    Main->>Repo: syncFromMarkdown(content, filePath)
-    Repo->>Store: getAnnotationsForFile(filePath)
-    Store->>Store: ensureFileLoaded(filePath)
-    alt 文件未加载
-        Store->>Adapter: read({encoded}.json)
-        Store->>Store: 解析 JSON → Annotation[]
-        Store->>Store: 构建内存索引
-        Store->>Store: _loadedFiles.add(filePath)
+    alt 格式 = JSON
+        Modal->>Modal: JSON.stringify(annotations, null, 2)
+    else 格式 = Markdown
+        Modal->>Modal: 按文件分组构建 Markdown
+        Note over Modal: 每个标注: > 原文 + 批注 + 字段
     end
-    Store-->>Repo: annotations[]
-    Repo->>Repo: 与 MD 解析结果做增量同步
-    Repo->>Store: addAnnotation() / updateAnnotation()
-    Store->>Store: 更新内存索引 + _markDirty()
-    Store->>Store: _scheduleFlush(filePath)
 
-    Note over Main,Store: ─── 创建标注 ───
-
-    participant Menu as context-menu.ts
-    participant Timer as debounce timer
-
-    Menu->>Repo: addAnnotation(annotation)
-    Repo->>Store: addAnnotation(annotation)
-    Store->>Store: _byUuid.set(uuid, ann)
-    Store->>Store: _byFile.get(fp).add(uuid)
-    Store->>Store: 更新所有倒排索引
-    Store->>Store: _markDirty(filePath)
-    Store->>Store: _scheduleFlush(filePath)
-    Note over Store,Timer: 设置 2s 防抖计时器
-    Timer-->>Store: 2s 后触发
-    Store->>Adapter: write({encoded}.json, JSON.stringify(shard))
-
-    Note over Main,Store: ─── 插件卸载 ───
-
-    Main->>Main: onunload()
-    Main->>Store: flushAll()
-    Store->>Store: 清除所有防抖计时器
-    loop 每个 dirty 文件
-        Store->>Adapter: write({encoded}.json)
-    end
-    Store->>Adapter: write(_index.json)
-    Store->>Adapter: write(_meta.json)
-    Store-->>Main: done
+    Modal->>Modal: new Blob + URL.createObjectURL
+    Modal->>Modal: 动态 a 点击下载
+    Modal->>Modal: URL.revokeObjectURL

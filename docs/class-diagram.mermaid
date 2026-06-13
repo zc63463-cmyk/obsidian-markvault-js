@@ -1,104 +1,168 @@
 classDiagram
-    class AnnotationStore {
-        -_byUuid: Map~string, Annotation~
-        -_byFile: Map~string, Set~string~~
-        -_byKind: Map~string, Set~string~~
-        -_byColor: Map~string, Set~string~~
-        -_byTag: Map~string, Set~string~~
-        -_byField: Map~string, Map~string, Set~string~~~
-        -_dirtyFiles: Set~string~
-        -_loadedFiles: Set~string~
-        -_debounceTimers: Map~string, ReturnType~setTimeout~~
-        -_adapter: DataManager
-        -_baseDir: string
-        -_flushDebounceMs: number
-        -_meta: StoreMeta
-        -_initialized: boolean
-        +initialize(): Promise~void~
-        +shutdown(): Promise~void~
-        +getAnnotationByUuid(uuid: string): Annotation | undefined
-        +getAnnotationsForFile(filePath: string): Annotation[]
-        +getAllAnnotations(): Annotation[]
-        +addAnnotation(annotation: Annotation): Promise~void~
-        +updateAnnotation(uuid: string, changes: Partial~Annotation~): Promise~void~
-        +deleteAnnotation(uuid: string): Promise~void~
-        +queryAnnotations(filter?: AnnotationFilter): Annotation[]
-        +getAnnotationStats(filePath?: string): AnnotationStats
-        +batchUpdateOffsets(updates: Array~BatchUpdateItem~): Promise~void~
-        +adjustOffsetsAfterEdit(filePath: string, fromLine: number, fromCh: number, toLine: number, toCh: number, oldContent: string, newContent: string): Promise~void~
-        +addTagToAnnotation(uuid: string, tag: string): Promise~void~
-        +removeTagFromAnnotation(uuid: string, tag: string): Promise~void~
-        +ensureFileLoaded(filePath: string): Promise~void~
-        +flushFile(filePath: string): Promise~void~
-        +flushAll(): Promise~void~
-        +rebuildIndex(): Promise~void~
-        +deleteAnnotationsForFile(filePath: string): Promise~void~
-        -_addToIndex(annotation: Annotation): void
-        -_removeFromIndex(uuid: string): void
-        -_updateIndex(oldAnn: Annotation, newAnn: Annotation): void
-        -_markDirty(filePath: string): void
-        -_scheduleFlush(filePath: string): void
-        -_writeFileShard(filePath: string): Promise~void~
-        -_readFileShard(filePath: string): Promise~Annotation[]~
-        -_readIndexFile(): Promise~IndexData~
-        -_writeIndexFile(): Promise~void~
-        -_readMetaFile(): Promise~StoreMeta~
-        -_writeMetaFile(): Promise~void~
-    }
-
-    class StoreMeta {
-        +schemaVersion: number
-        +lastSyncAt: number
-        +createdAt: number
-    }
-
-    class IndexData {
-        +version: number
-        +entries: Map~string, IndexEntry~
-    }
-
-    class IndexEntry {
-        +filePath: string
-        +count: number
-        +lastModified: number
-    }
-
-    class FileEncoder {
-        +encodeFilePath(filePath: string): string$
-        +decodeFilePath(encoded: string): string$
-        +getShardPath(baseDir: string, filePath: string): string$
-    }
-
-    class MigrationHelper {
-        +needsMigration(): Promise~boolean~
-        +migrateFromIndexedDB(store: AnnotationStore): Promise~MigrationResult~
-    }
-
     class Annotation {
-        +uuid: string
-        +filePath: string
-        +kind: string
-        +type: AnnotationType
-        +color: string
-        +text: string
-        +note: string
-        +tags: string[]
-        +fields: Record~string, string~
-        +groupUuid: string
-        +startOffset: number
-        +endOffset: number
-        +startLine: number
-        +endLine: number
-        +spanRanges: SpanRange[]
-        +contextBefore: string
-        +contextAfter: string
-        +createdAt: number
-        +updatedAt: number
+        +string uuid
+        +string filePath
+        +AnnotationType type
+        +string color
+        +string text
+        +string note
+        +string[] tags
+        +number startOffset
+        +number endOffset
+        +number startLine
+        +string contextBefore
+        +string contextAfter
+        +number createdAt
+        +number updatedAt
+        +string kind
+        +string groupUuid
+        +string blockType
+        +number targetLine
+        +number anchorLine
+        +SpanRange[] spanRanges
+        +Record~string,string~ fields
     }
 
-    AnnotationStore --> StoreMeta : _meta
-    AnnotationStore --> IndexData : _indexData
-    AnnotationStore --> FileEncoder : uses
-    AnnotationStore --> MigrationHelper : uses during init
-    AnnotationStore --> Annotation : manages in _byUuid
-    IndexData --> IndexEntry : entries
+    class MarkAttributes {
+        +string uuid
+        +AnnotationType type
+        +string color
+        +string note
+        +string tags
+        +string groupUuid
+        +string fields
+    }
+
+    class AnnotationFilter {
+        +AnnotationType type
+        +string color
+        +boolean hasNote
+        +string searchQuery
+        +Record~string,string~ fieldFilters
+        +string sortBy
+    }
+
+    class FieldTemplate {
+        +string id
+        +string name
+        +FieldDef[] fields
+    }
+
+    class FieldDef {
+        +string key
+        +string[] values
+        +boolean allowCustom
+    }
+
+    class MarkVaultSettings {
+        +presetColors
+        +PresetColorId defaultHighlightColor
+        +AnnotationType defaultAnnotationType
+        +boolean showContextMenu
+        +string sidebarDefaultSort
+        +number contextWindowSize
+        +boolean enableAutoSync
+        +FieldTemplate[] fieldTemplates
+        +string defaultTemplateId
+    }
+
+    class AnnotationStore {
+        -Map~string,Annotation~ _byUuid
+        -Map~string,Set~string~~ _byFile
+        -Map~string,Set~string~~ _byKind
+        -Map~string,Set~string~~ _byType
+        -Map~string,Set~string~~ _byColor
+        -Map~string,Set~string~~ _byTag
+        -Map~string,Map~string,Set~string~~~ _byField
+        -Set~string~ _dirtyFiles
+        -Set~string~ _loadedFiles
+        +init(vault) void
+        +initialize() Promise~void~
+        +getAnnotationByUuid(uuid) Annotation
+        +getAnnotationsForFile(filePath) Annotation[]
+        +getAllAnnotations() Annotation[]
+        +addAnnotation(annotation) Promise~void~
+        +updateAnnotation(uuid, changes) Promise~void~
+        +deleteAnnotation(uuid) Promise~void~
+        +queryAnnotations(filter) Annotation[]
+        +getAnnotationStats(filePath) AnnotationStats
+        +batchUpdateOffsets(updates) Promise~void~
+        +ensureFileLoaded(filePath) Promise~void~
+        +flushFile(filePath) Promise~void~
+        +flushAll() Promise~void~
+        +rebuildIndex() Promise~void~
+        +getFieldKeys() string[]
+        +getFieldValues(key) string[]
+    }
+
+    class FieldsUtil {
+        +encodeFields(fields) string$
+        +decodeFields(raw) Record~string,string~$
+        +applyTemplate(template, existingFields) Record~string,string~$
+    }
+
+    class AnnotationParser {
+        +parseAnnotationsFromMarkdown(content, filePath) Annotation[]$
+        +parseAllAnnotationsFromMarkdown(content, filePath) Annotation[]$
+        +buildMarkTag(annotation, groupUuid) string$
+        +removeMarkTag(content, uuid) object$
+        +updateMarkTag(content, uuid, updates) string$
+        +buildBlockAnchor(annotation) string$
+        +buildSpanAnchor(annotation) string$
+        +parseBlockAnchors(content) ParsedBlockAnchor[]$
+        +removeBlockAnchor(content, uuid) string$
+        +removeSpanAnchor(content, uuid) string$
+        +updateBlockAnchor(content, uuid, updates) string$
+        +updateSpanAnchor(content, uuid, updates) string$
+    }
+
+    class AnnotationModal {
+        -Annotation annotation
+        -MarkVaultPlugin plugin
+        -string noteValue
+        -string tagsValue
+        -string selectedColor
+        -AnnotationType selectedType
+        -Record~string,string~ fieldsValue
+        +onOpen() void
+        +onClose() void
+        +save() Promise~void~
+        -renderFieldsEditor(container) void
+        -renderTemplateDropdown(container) void
+    }
+
+    class AnnotationSidebar {
+        -AnnotationFilter filter
+        -string currentFilePath
+        -SidebarTab activeTab
+        -Set~string~ selectedUuids
+        -boolean batchMode
+        +renderContent() Promise~void~
+        -renderFilterBar(container) void
+        -renderFieldFilterSection(container) void
+        -renderAnnotationCard(container, annotation, showFilePath) void
+        -renderFieldsOnCard(card, fields) void
+        -renderBatchBar(container) void
+        -renderExportMenu(anchor) void
+        -exportAsJSON(annotations) void
+        -exportAsMarkdown(annotations) void
+    }
+
+    class MarkVaultSettingTab {
+        +display() void
+        -renderFieldTemplatesSection(container) void
+        -renderTemplateEditor(container, template) void
+        -renderFieldEditor(container, fieldDef) void
+    }
+
+    Annotation "1" --> "0..1" FieldTemplate : uses template
+    AnnotationStore "1" --> "*" Annotation : stores
+    AnnotationStore "1" --> "1" MarkVaultSettings : references
+    AnnotationModal "1" --> "1" Annotation : edits
+    AnnotationModal "1" --> "*" FieldTemplate : applies
+    AnnotationSidebar "1" --> "*" Annotation : displays
+    AnnotationSidebar "1" --> "1" AnnotationFilter : filters by
+    MarkVaultSettingTab "1" --> "*" FieldTemplate : manages
+    FieldsUtil "1" --> "1" FieldTemplate : uses
+    AnnotationParser "1" --> "1" MarkAttributes : builds/parses
+    MarkAttributes "1" --> "0..1" FieldsUtil : encodes/decodes fields

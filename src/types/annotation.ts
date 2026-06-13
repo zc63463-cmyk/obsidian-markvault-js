@@ -57,6 +57,7 @@ export interface MarkAttributes {
   note?: string;
   tags?: string;
   groupUuid?: string;  // 拆分标注组 ID
+  fields?: string;     // URL 编码的 fields 字符串，如 "category=定义&importance=高"
 }
 
 /** 块级标注锚点属性 */
@@ -65,6 +66,20 @@ export interface BlockAnchorAttributes {
   type: AnnotationType;
   color: string;
   note: string;
+}
+
+/** 字段定义（模板中的单个字段） */
+export interface FieldDef {
+  key: string;           // 字段键名，如 "category"
+  values: string[];      // 预设值列表，如 ["定义", "原理", "应用"]
+  allowCustom?: boolean; // 是否允许自由输入（默认 true）
+}
+
+/** 字段模板 */
+export interface FieldTemplate {
+  id: string;           // 模板唯一 ID（如 "academic", "reading"）
+  name: string;         // 模板名称，如 "学术标注"
+  fields: FieldDef[];   // 字段定义列表
 }
 
 /** 侧边栏过滤条件 */
@@ -111,6 +126,7 @@ export interface AnnotationStats {
   byColor: Record<string, number>;
   withNotes: number;
   withTags: number;
+  withFields: number;
 }
 
 /** 批量更新偏移项 */
@@ -130,6 +146,8 @@ export interface MarkVaultSettings {
   sidebarDefaultSort: 'position' | 'createdAt' | 'updatedAt';
   contextWindowSize: number;
   enableAutoSync: boolean;
+  fieldTemplates: FieldTemplate[];         // 字段模板列表
+  defaultTemplateId: string;              // 默认模板 ID（空字符串表示无默认模板）
 }
 
 export const DEFAULT_SETTINGS: MarkVaultSettings = {
@@ -140,4 +158,24 @@ export const DEFAULT_SETTINGS: MarkVaultSettings = {
   sidebarDefaultSort: 'position',
   contextWindowSize: 50,
   enableAutoSync: true,
+  fieldTemplates: [
+    {
+      id: 'academic',
+      name: '学术标注',
+      fields: [
+        { key: 'category', values: ['定义', '定理', '证明', '推论', '应用'], allowCustom: true },
+        { key: 'importance', values: ['高', '中', '低'], allowCustom: false },
+        { key: 'understanding', values: ['已掌握', '部分理解', '未理解'], allowCustom: false },
+      ],
+    },
+    {
+      id: 'reading',
+      name: '阅读笔记',
+      fields: [
+        { key: 'type', values: ['核心论点', '支撑论据', '反驳', '疑问', '灵感'], allowCustom: true },
+        { key: 'action', values: ['待复查', '待实践', '待讨论'], allowCustom: true },
+      ],
+    },
+  ],
+  defaultTemplateId: '',
 };
