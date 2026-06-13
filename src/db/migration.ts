@@ -96,7 +96,18 @@ export async function migrateFromIndexedDB(): Promise<number> {
 
     return allAnnotations.length;
   } catch (err) {
-    console.error('MarkVault migration: failed to migrate from IndexedDB', err);
+    // Dexie 已从依赖中移除，动态导入失败属于预期行为（Phase 2 新安装无需迁移）
+    // 如果是模块解析失败，降级为 info 日志，避免每次启动都报红
+    const isModuleError = err instanceof Error && (
+      err.message.includes('Failed to resolve module specifier') ||
+      err.message.includes("Cannot find module 'dexie'") ||
+      err.message.includes("Cannot find package 'dexie'")
+    );
+    if (isModuleError) {
+      console.log('MarkVault migration: Dexie not available, skipping IndexedDB migration (expected for Phase 2)');
+    } else {
+      console.error('MarkVault migration: failed to migrate from IndexedDB', err);
+    }
     return 0;
   }
 }
