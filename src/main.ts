@@ -13,7 +13,7 @@ import { addAnnotation } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
 import { removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor, buildSpanAnchor, buildMarkTag, buildBlockAnchor } from './core/annotation-parser';
-import { updateSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
+import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
 import { ModifyGuard } from './utils/modify-guard';
 
 export default class MarkVaultPlugin extends Plugin {
@@ -46,6 +46,14 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
   private _syncCooldown: Map<string, number> = new Map();
+
+  // 🆕 AnnotationStore 是否初始化成功
+  private _storeReady = false;
+
+  /** 检查 AnnotationStore 是否已就绪 */
+  public isStoreReady(): boolean {
+    return this._storeReady;
+  }
 
   /** 注册一个标注为"正在编辑"状态，防止被 sync 覆盖 */
   public markAnnotationActive(uuid: string, filePath?: string) {
@@ -155,13 +163,15 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       initAnnotationStore(this.app.vault);
       await annotationStore.initialize();
+      this._storeReady = true;
       const migratedCount = await migrateFromIndexedDB();
       if (migratedCount > 0) {
         console.log(`MarkVault: migrated ${migratedCount} annotations from IndexedDB`);
       }
     } catch (err) {
       console.error('MarkVault: failed to initialize AnnotationStore', err);
-      // 不阻止插件其余部分加载
+      this._storeReady = false;
+      new Notice('MarkVault: failed to initialize annotation database. Some features are disabled.', 8000);
     }
 
     // ── CM6 扩展注册 ──────────────────────────────
@@ -276,6 +286,7 @@ export default class MarkVaultPlugin extends Plugin {
               }
 
               const deletedCount = await annotationStore.deleteAnnotationsForFile(file.path);
+              clearSpanCacheForFile(file.path);
               await this.refreshSidebar();
 
               if (deletedCount > 0) {
@@ -494,6 +505,8 @@ export default class MarkVaultPlugin extends Plugin {
   async onunload() {
     console.log('MarkVault: unloading plugin');
     try {
+      this.hideReadingToolbar();
+      this.modifyGuard.releaseAll();
       await annotationStore.shutdown();
     } catch (err) {
       console.error('MarkVault: failed to shutdown AnnotationStore', err);
@@ -804,29 +817,44 @@ export default class MarkVaultPlugin extends Plugin {
   }
 
   async rebuildDatabase() {
+    if (!this._storeReady) {
+      new Notice('MarkVault: annotation database not initialized', 5000);
+      return;
+    }
+
     console.log('MarkVault: rebuilding database...');
+    let total = 0;
+    let skipped = 0;
+
     try {
       const markdownFiles = this.app.vault.getMarkdownFiles();
-      let total = 0;
 
       for (const file of markdownFiles) {
         try {
           const content = await this.app.vault.read(file);
           const result = await syncFromMarkdown(content, file.path);
           total += result.added;
-        } catch {
-          // skip files that can't be read
+        } catch (err) {
+          skipped++;
+          console.warn(`MarkVault: rebuild skipped ${file.path}`, err);
         }
       }
 
-      console.log(`MarkVault: rebuilt database, ${total} annotations added`);
+      console.log(`MarkVault: rebuilt database, ${total} annotations added, ${skipped} files skipped`);
+      new Notice(`MarkVault: rebuilt database — ${total} added, ${skipped} skipped`, 4000);
       await this.refreshSidebar();
     } catch (err) {
       console.error('MarkVault: rebuild database error', err);
+      new Notice('MarkVault: failed to rebuild database', 5000);
     }
   }
 
   async exportAnnotations() {
+    if (!this._storeReady) {
+      new Notice('MarkVault: annotation database not initialized', 5000);
+      return;
+    }
+
     try {
       const annotations = await annotationStore.getAllAnnotations();
       const json = JSON.stringify(annotations, null, 2);

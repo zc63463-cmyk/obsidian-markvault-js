@@ -97,6 +97,11 @@ export function getSpanCacheForFile(filePath: string): SpanAnnotationData[] {
   return spanCache.get(filePath) || [];
 }
 
+/** 清除指定文件的 span 标注缓存 */
+export function clearSpanCacheForFile(filePath: string): void {
+  spanCache.delete(filePath);
+}
+
 /** 清除所有 span 缓存 */
 export function clearSpanCache(): void {
   spanCache.clear();

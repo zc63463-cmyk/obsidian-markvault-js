@@ -4,7 +4,7 @@ import { PRESET_COLORS } from '../../types/annotation';
 import { updateAnnotation, deleteAnnotation, addAnnotation } from '../../db/annotation-repo';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { encodeFields, applyTemplate } from '../../utils/fields';
-import type MarkVaultPlugin from '../../main';
+import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 
 /**
  * 批注编辑 Modal
@@ -12,7 +12,7 @@ import type MarkVaultPlugin from '../../main';
  */
 export class AnnotationModal extends Modal {
   private annotation: Annotation;
-  private plugin: MarkVaultPlugin;
+  private plugin: MarkVaultPluginInterface;
   private noteValue: string;
   private tagsValue: string;
   private selectedColor: string;
@@ -24,7 +24,7 @@ export class AnnotationModal extends Modal {
 
   constructor(
     app: App,
-    plugin: MarkVaultPlugin,
+    plugin: MarkVaultPluginInterface,
     annotation: Annotation,
     onSave: (annotation: Annotation) => void,
     onDelete: (uuid: string) => void,

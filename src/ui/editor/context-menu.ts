@@ -673,6 +673,10 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
     name: 'Clean orphan annotations',
     icon: 'trash-2',
     callback: async () => {
+      if (!plugin.isStoreReady()) {
+        new Notice('MarkVault: annotation database not initialized', 5000);
+        return;
+      }
       const cleaned = await cleanOrphanAnnotations(plugin.app);
       await plugin.refreshSidebar();
       new Notice(`MarkVault: cleaned ${cleaned} orphan annotations`, 4000);

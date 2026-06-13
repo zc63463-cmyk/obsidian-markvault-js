@@ -1731,7 +1731,7 @@ export class AnnotationSidebar extends ItemView {
 
     const modal = new AnnotationModal(
       this.app,
-      plugin as any,
+      plugin,
       fresh,
       async () => {
         // 保存回调

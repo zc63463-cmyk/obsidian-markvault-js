@@ -13,8 +13,8 @@
  *   guard.releaseNow(filePath);           // 立即清除保护
  */
 export class ModifyGuard {
-  /** filePath → timeoutId */
-  private _locks: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** filePath → timeoutId；null 表示已加锁但无自动释放 */
+  private _locks: Map<string, ReturnType<typeof setTimeout> | null> = new Map();
 
   /** 默认自动释放延迟（毫秒） */
   private _defaultDelay: number;
@@ -29,10 +29,10 @@ export class ModifyGuard {
    */
   acquire(filePath: string): void {
     const existing = this._locks.get(filePath);
-    if (existing !== undefined) {
+    if (existing !== undefined && existing !== null) {
       clearTimeout(existing);
     }
-    this._locks.set(filePath, -1 as any); // 占位，表示已加锁但无自动释放
+    this._locks.set(filePath, null); // null 表示已加锁但无自动释放
   }
 
   /**
@@ -42,7 +42,7 @@ export class ModifyGuard {
    */
   release(filePath: string, delay?: number): void {
     const existing = this._locks.get(filePath);
-    if (existing !== undefined) {
+    if (existing !== undefined && existing !== null) {
       clearTimeout(existing);
     }
 
@@ -58,7 +58,7 @@ export class ModifyGuard {
    */
   releaseNow(filePath: string): void {
     const existing = this._locks.get(filePath);
-    if (existing !== undefined) {
+    if (existing !== undefined && existing !== null) {
       clearTimeout(existing);
     }
     this._locks.delete(filePath);
@@ -84,9 +84,7 @@ export class ModifyGuard {
    */
   releaseAll(): void {
     for (const timer of this._locks.values()) {
-      if (typeof timer === 'number') {
-        clearTimeout(timer);
-      } else if (timer !== undefined && timer !== (null as any)) {
+      if (timer !== null) {
         clearTimeout(timer);
       }
     }

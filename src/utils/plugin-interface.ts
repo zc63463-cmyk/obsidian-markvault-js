@@ -1,5 +1,6 @@
 import type { ModifyGuard } from './modify-guard';
 import type { AnnotationModal } from '../ui/editor/annotation-modal';
+import type { MarkVaultSettings } from '../types/annotation';
 
 /**
  * 侧边栏需要的 Plugin 接口
@@ -29,4 +30,10 @@ export interface MarkVaultPluginInterface {
 
   /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync */
   markFileSynced(filePath: string): void;
+
+  /** 插件设置 */
+  settings: MarkVaultSettings;
+
+  /** AnnotationStore 是否已就绪 */
+  isStoreReady(): boolean;
 }
