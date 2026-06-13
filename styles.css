@@ -1169,6 +1169,25 @@
 .markvault-block-underline.markvault-block-pink   { border-bottom: 2px dashed #F472B6; }
 .markvault-block-underline.markvault-block-purple { border-bottom: 2px dashed #C084FC; }
 
+/* Span 标注在阅读模式下的文本片段高亮 */
+.markvault-span-fragment.markvault-highlight.markvault-yellow { background-color: #FACC1566; border-radius: 2px; padding: 1px 0; }
+.markvault-span-fragment.markvault-highlight.markvault-green  { background-color: #4ADE8066; border-radius: 2px; padding: 1px 0; }
+.markvault-span-fragment.markvault-highlight.markvault-blue   { background-color: #60A5FA66; border-radius: 2px; padding: 1px 0; }
+.markvault-span-fragment.markvault-highlight.markvault-pink   { background-color: #F472B666; border-radius: 2px; padding: 1px 0; }
+.markvault-span-fragment.markvault-highlight.markvault-purple { background-color: #C084FC66; border-radius: 2px; padding: 1px 0; }
+
+.markvault-span-fragment.markvault-bold.markvault-yellow { font-weight: bold; border-bottom: 2px solid #FACC15; padding: 1px 0; }
+.markvault-span-fragment.markvault-bold.markvault-green  { font-weight: bold; border-bottom: 2px solid #4ADE80; padding: 1px 0; }
+.markvault-span-fragment.markvault-bold.markvault-blue   { font-weight: bold; border-bottom: 2px solid #60A5FA; padding: 1px 0; }
+.markvault-span-fragment.markvault-bold.markvault-pink   { font-weight: bold; border-bottom: 2px solid #F472B6; padding: 1px 0; }
+.markvault-span-fragment.markvault-bold.markvault-purple { font-weight: bold; border-bottom: 2px solid #C084FC; padding: 1px 0; }
+
+.markvault-span-fragment.markvault-underline.markvault-yellow { text-decoration: underline; text-decoration-color: #FACC15; text-underline-offset: 2px; }
+.markvault-span-fragment.markvault-underline.markvault-green  { text-decoration: underline; text-decoration-color: #4ADE80; text-underline-offset: 2px; }
+.markvault-span-fragment.markvault-underline.markvault-blue   { text-decoration: underline; text-decoration-color: #60A5FA; text-underline-offset: 2px; }
+.markvault-span-fragment.markvault-underline.markvault-pink   { text-decoration: underline; text-decoration-color: #F472B6; text-underline-offset: 2px; }
+.markvault-span-fragment.markvault-underline.markvault-purple { text-decoration: underline; text-decoration-color: #C084FC; text-underline-offset: 2px; }
+
 /* 块级标注的批注指示器 */
 .markvault-block-note-indicator {
   position: absolute;

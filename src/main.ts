@@ -391,7 +391,7 @@ export default class MarkVaultPlugin extends Plugin {
     // 阅读模式渲染：只负责视觉样式，不绑定点击事件
     // 点击事件统一由全局 capture-phase handler 处理（更可靠，不会被 DOM 重建影响）
     try {
-      this.registerMarkdownPostProcessor((el, _ctx) => {
+      this.registerMarkdownPostProcessor(async (el, ctx) => {
         try {
           // 1. 处理 <mark> 标注
           const marks = el.findAll('mark[data-uuid]');
@@ -438,7 +438,7 @@ export default class MarkVaultPlugin extends Plugin {
           // 检测 %%markvault:uuid:type:color:note%% 注释锚点
           // Obsidian 会将 %%...%% 注释渲染为特殊的 comment 节点
           // 我们需要在渲染后的 DOM 中找到这些锚点，给下方的块添加装饰
-          this.processBlockAnchors(el);
+          await this.processBlockAnchors(el, ctx.sourcePath);
         } catch (err) {
           console.error('MarkVault: post processor error', err);
         }
@@ -841,7 +841,7 @@ export default class MarkVaultPlugin extends Plugin {
    * 我们需要找到这些节点，给下一个兄弟元素添加装饰样式
    * 同时处理 %%markvault-span:uuid:type:color:note%% 格式的 span 锚点
    */
-  private processBlockAnchors(el: HTMLElement): void {
+  private async processBlockAnchors(el: HTMLElement, sourcePath: string): Promise<void> {
     // Obsidian 将 %%...%% 注释渲染为：
     //   - COMMENT_NODE（不可见，理想情况）
     //   - ELEMENT_NODE（可见，需要手动隐藏）
@@ -939,6 +939,10 @@ export default class MarkVaultPlugin extends Plugin {
         // span 标注的视觉标记
         if (anchor.anchorKind === 'span') {
           targetEl.addClass('markvault-span-mark');
+          // 异步高亮 span 范围内的文本片段
+          this.highlightSpanFragments(targetEl, anchor.uuid, anchor.type, anchor.color, sourcePath).catch((err) => {
+            console.error('MarkVault: failed to highlight span fragments', err);
+          });
         }
 
         if (anchor.note) {
@@ -949,6 +953,107 @@ export default class MarkVaultPlugin extends Plugin {
           targetEl.style.position = 'relative';
           targetEl.appendChild(indicator);
         }
+      }
+    }
+  }
+
+  /**
+   * 在阅读模式下高亮 span 标注的文本片段
+   * span 标注不修改原文，只通过 spanRanges 记录纯文本片段位置。
+   * 这里根据 spanRanges 从源文件提取文本，然后在渲染后的 DOM 中包裹对应文本。
+   */
+  private async highlightSpanFragments(
+    targetEl: HTMLElement,
+    uuid: string,
+    type: string,
+    color: string,
+    sourcePath: string,
+  ): Promise<void> {
+    const annotation = await annotationStore.getAnnotationByUuid(uuid);
+    if (!annotation || annotation.kind !== 'span' || !annotation.spanRanges || annotation.spanRanges.length === 0) {
+      return;
+    }
+
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile)) return;
+
+    const content = await this.app.vault.cachedRead(file);
+    const fragments: string[] = [];
+
+    for (const range of annotation.spanRanges) {
+      const slice = content.substring(range.from, range.to);
+      const scan = scanMarkdownContexts(slice);
+      for (const seg of scan.segments) {
+        if (seg.type === 'text' && seg.content.trim().length > 0) {
+          fragments.push(seg.content.trim());
+        }
+      }
+    }
+
+    if (fragments.length === 0) return;
+    this.wrapTextFragments(targetEl, fragments, type, color);
+  }
+
+  /**
+   * 在容器内查找并包裹指定的文本片段
+   */
+  private wrapTextFragments(
+    container: HTMLElement,
+    fragments: string[],
+    type: string,
+    color: string,
+  ): void {
+    const preset = DEFAULT_SETTINGS.presetColors.find((c) => c.id === color);
+    const hex = preset ? preset.hex : color;
+
+    for (const raw of fragments) {
+      const frag = raw.trim();
+      if (!frag) continue;
+
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      const textNodes: Text[] = [];
+      let node: Node | null;
+      while ((node = walker.nextNode()) !== null) {
+        textNodes.push(node as Text);
+      }
+
+      for (const textNode of textNodes) {
+        const parent = textNode.parentElement;
+        if (parent?.hasClass('markvault-span-fragment')) continue;
+
+        const text = textNode.textContent || '';
+        const idx = text.indexOf(frag);
+        if (idx === -1) continue;
+
+        const before = text.substring(0, idx);
+        const after = text.substring(idx + frag.length);
+
+        const span = document.createElement('span');
+        span.className = `markvault-span-fragment markvault-${type} markvault-${color}`;
+        span.textContent = frag;
+
+        switch (type) {
+          case 'bold':
+            span.style.fontWeight = 'bold';
+            span.style.borderBottom = `2px solid ${hex}`;
+            break;
+          case 'underline':
+            span.style.textDecoration = 'underline';
+            span.style.textDecorationColor = hex;
+            span.style.textUnderlineOffset = '2px';
+            break;
+          case 'highlight':
+            span.style.backgroundColor = `${hex}66`;
+            span.style.borderRadius = '2px';
+            break;
+        }
+
+        const containerNode = textNode.parentNode!;
+        if (before) containerNode.insertBefore(document.createTextNode(before), textNode);
+        containerNode.insertBefore(span, textNode);
+        if (after) containerNode.insertBefore(document.createTextNode(after), textNode);
+        containerNode.removeChild(textNode);
+        break;
       }
     }
   }
