@@ -1161,6 +1161,11 @@ export default class MarkVaultPlugin extends Plugin {
         const newContent = content.substring(0, blockStart) + anchor + '\n' + content.substring(blockStart);
         await this.app.vault.modify(view.file, newContent);
 
+        // 强制阅读模式重新渲染，确保 post-processor 立即生效
+        if (view.previewMode) {
+          view.previewMode.rerender(true);
+        }
+
         const annotation: Annotation = {
           uuid,
           filePath,
@@ -1211,6 +1216,11 @@ export default class MarkVaultPlugin extends Plugin {
 
         const newContent = content.substring(0, idx) + markTag + content.substring(endOffset);
         await this.app.vault.modify(view.file, newContent);
+
+        // 强制阅读模式重新渲染，确保 post-processor 立即生效
+        if (view.previewMode) {
+          view.previewMode.rerender(true);
+        }
 
         annotation.endOffset = startOffset + markTag.length;
         await addAnnotation(annotation);
