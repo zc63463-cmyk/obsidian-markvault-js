@@ -23,9 +23,11 @@ export async function migrateFromIndexedDB(): Promise<number> {
 
   try {
     // 动态导入 Dexie，直接打开旧数据库
+    // @ts-ignore — dexie 已从 Phase 2 移除
     const Dexie = (await import('dexie')).default;
 
-    let dexieDb: InstanceType<typeof Dexie> | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let dexieDb: any = null;
 
     try {
       dexieDb = new Dexie('MarkVaultDB');
@@ -39,7 +41,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
       return 0;
     }
 
-    const table = dexieDb.table<Annotation & { id?: number }>('annotations');
+    const table = dexieDb.table('annotations');
     const count = await table.count();
 
     if (count === 0) {

@@ -2,13 +2,19 @@ import type { Vault, DataAdapter } from 'obsidian';
 import type {
   Annotation,
   AnnotationFilter,
+  AnnotationFlag,
+  AnnotationRelation,
   AnnotationStats,
   BatchUpdateItem,
   IndexData,
   IndexEntry,
+  MasteryLevel,
+  RelationType,
+  ReviewPriority,
   StoreMeta,
 } from '../types/annotation';
 import { FileEncoder } from './file-encoder';
+import { applyUnifiedFilter } from '../search/filter-engine';
 
 /**
  * AnnotationStore — 分片 JSON + 内存索引 标注存储
@@ -41,6 +47,22 @@ export class AnnotationStore {
 
   /** fieldKey → (fieldValue → Set<uuid>)，按自定义字段索引 */
   private _byField: Map<string, Map<string, Set<string>>> = new Map();
+
+  // v4.0: Phase 4 元数据索引
+  /** sourceUuid → Set<targetUuid:relationType>，出边索引（本标注指向其他标注） */
+  private _byRelationOut: Map<string, Set<string>> = new Map();
+
+  /** targetUuid → Set<sourceUuid:relationType>，入边索引（其他标注指向本标注） */
+  private _byRelationIn: Map<string, Set<string>> = new Map();
+
+  /** group → Set<uuid>，按分组索引 */
+  private _byGroup: Map<string, Set<string>> = new Map();
+
+  /** mastery → Set<uuid>，按掌握度索引 */
+  private _byMastery: Map<string, Set<string>> = new Map();
+
+  /** reviewPriority → Set<uuid>，按复习优先级索引 */
+  private _byReviewPriority: Map<string, Set<string>> = new Map();
 
   // ─── 其他内部状态 ───────────────────────────────────────
   /** 需要写回的文件集合 */
@@ -120,6 +142,11 @@ export class AnnotationStore {
     this._byColor.clear();
     this._byTag.clear();
     this._byField.clear();
+    this._byRelationOut.clear();
+    this._byRelationIn.clear();
+    this._byGroup.clear();
+    this._byMastery.clear();
+    this._byReviewPriority.clear();
     this._loadedFiles.clear();
     this._dirtyFiles.clear();
     for (const timer of this._debounceTimers.values()) {
@@ -172,6 +199,34 @@ export class AnnotationStore {
     }
     if (loadedCount > 0) {
       console.log(`MarkVault: preloaded ${loadedCount} annotation files (${this._byUuid.size} total annotations)`);
+    }
+
+    // 数据完整性摘要：统计 loaded 但标注数为 0 的文件（可能因损坏被降级恢复）
+    const recoveredFromBak: string[] = [];
+    const lostShards: string[] = [];
+    for (const filePath of filePaths) {
+      const uuidSet = this._byFile.get(filePath);
+      if (!uuidSet || uuidSet.size === 0) {
+        const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
+        if (await this.adapter.exists(shardPath + '.bak')) {
+          recoveredFromBak.push(filePath);
+        } else if (await this.adapter.exists(shardPath)) {
+          lostShards.push(filePath);
+        }
+      }
+    }
+    if (recoveredFromBak.length > 0) {
+      console.warn(
+        `MarkVault: recovered ${recoveredFromBak.length} shard(s) from .bak backup. ` +
+        `Affected files: ${recoveredFromBak.join(', ')}`
+      );
+    }
+    if (lostShards.length > 0) {
+      console.error(
+        `MarkVault: ${lostShards.length} shard(s) are corrupted and could not be recovered. ` +
+        `Annotations for these files will be restored from markdown on next sync. ` +
+        `Affected files: ${lostShards.join(', ')}`
+      );
     }
 
     // 🔧 审计修复：清理 _indexData 中的孤儿条目
@@ -233,6 +288,11 @@ export class AnnotationStore {
    */
   getAnnotationByUuid(uuid: string): Annotation | undefined {
     return this._byUuid.get(uuid);
+  }
+
+  /** 获取标注总数（O(1)，用于 SearchEngine 索引一致性检测） */
+  getAnnotationCount(): number {
+    return this._byUuid.size;
   }
 
   /**
@@ -460,6 +520,39 @@ export class AnnotationStore {
       }
     }
 
+    // v4.0: 按掌握度过滤
+    if (filter.mastery && filter.mastery !== 'all') {
+      const masterySet = this._byMastery.get(filter.mastery);
+      if (!masterySet) return [];
+      if (candidateUuids) {
+        candidateUuids = intersection(candidateUuids, masterySet);
+      } else {
+        candidateUuids = new Set(masterySet);
+      }
+    }
+
+    // v4.0: 按复习优先级过滤
+    if (filter.reviewPriority && filter.reviewPriority !== 'all') {
+      const prioritySet = this._byReviewPriority.get(filter.reviewPriority);
+      if (!prioritySet) return [];
+      if (candidateUuids) {
+        candidateUuids = intersection(candidateUuids, prioritySet);
+      } else {
+        candidateUuids = new Set(prioritySet);
+      }
+    }
+
+    // v4.0: 按分组过滤
+    if (filter.group && filter.group !== 'all') {
+      const groupSet = this._byGroup.get(filter.group);
+      if (!groupSet) return [];
+      if (candidateUuids) {
+        candidateUuids = intersection(candidateUuids, groupSet);
+      } else {
+        candidateUuids = new Set(groupSet);
+      }
+    }
+
     // 如果没有任何索引过滤，使用全部标注
     let results: Annotation[];
     if (candidateUuids) {
@@ -472,39 +565,8 @@ export class AnnotationStore {
       results = this.getAllAnnotations();
     }
 
-    // 有批注过滤
-    if (filter.hasNote) {
-      results = results.filter(a => a.note && a.note.trim().length > 0);
-    }
-
-    // 搜索查询
-    if (filter.searchQuery && filter.searchQuery.trim()) {
-      const q = filter.searchQuery.toLowerCase();
-      results = results.filter(a =>
-        a.text.toLowerCase().includes(q) ||
-        a.note.toLowerCase().includes(q) ||
-        a.tags.some(t => t.toLowerCase().includes(q)) ||
-        (a.fields && Object.entries(a.fields).some(([k, v]) =>
-          k.toLowerCase().includes(q) || v.toLowerCase().includes(q)
-        ))
-      );
-    }
-
-    // 排序
-    const sortBy = filter.sortBy || 'position';
-    switch (sortBy) {
-      case 'position':
-        results.sort((a, b) => a.startOffset - b.startOffset);
-        break;
-      case 'createdAt':
-        results.sort((a, b) => b.createdAt - a.createdAt);
-        break;
-      case 'updatedAt':
-        results.sort((a, b) => b.updatedAt - a.updatedAt);
-        break;
-    }
-
-    return results;
+    // 统一后过滤 + 排序（委托给 filter-engine）
+    return applyUnifiedFilter(results, filter, filter.searchQuery);
   }
 
   /**
@@ -521,6 +583,12 @@ export class AnnotationStore {
     let withNotes = 0;
     let withTags = 0;
     let withFields = 0;
+    let withRelations = 0;
+    let withGroups = 0;
+    let withFlags = 0;
+    let needsCorrection = 0;
+    const byMastery: Record<string, number> = {};
+    const byReviewPriority: Record<string, number> = {};
 
     for (const a of annotations) {
       byType[a.type] = (byType[a.type] || 0) + 1;
@@ -528,9 +596,20 @@ export class AnnotationStore {
       if (a.note && a.note.trim()) withNotes++;
       if (a.tags.length > 0) withTags++;
       if (a.fields && Object.keys(a.fields).length > 0) withFields++;
+      if (a.relations && a.relations.length > 0) withRelations++;
+      if (a.groups && a.groups.length > 0) withGroups++;
+      if (a.flags) {
+        withFlags++;
+        if (a.flags.mastery) byMastery[a.flags.mastery] = (byMastery[a.flags.mastery] || 0) + 1;
+        if (a.flags.reviewPriority) byReviewPriority[a.flags.reviewPriority] = (byReviewPriority[a.flags.reviewPriority] || 0) + 1;
+        if (a.flags.needsCorrection) needsCorrection++;
+      }
     }
 
-    return { total: annotations.length, byType, byColor, withNotes, withTags, withFields };
+    return {
+      total: annotations.length, byType, byColor, withNotes, withTags, withFields,
+      withRelations, withGroups, withFlags, byMastery, byReviewPriority, needsCorrection,
+    };
   }
 
   /**
@@ -682,6 +761,11 @@ export class AnnotationStore {
     this._byColor.clear();
     this._byTag.clear();
     this._byField.clear();
+    this._byRelationOut.clear();
+    this._byRelationIn.clear();
+    this._byGroup.clear();
+    this._byMastery.clear();
+    this._byReviewPriority.clear();
     this._loadedFiles.clear();
     this._dirtyFiles.clear();
 
@@ -972,6 +1056,203 @@ export class AnnotationStore {
   }
 
   // ═══════════════════════════════════════════════════════
+  // v4.0: Phase 4 Relation API
+  // ═══════════════════════════════════════════════════════
+
+  /**
+   * 添加标注间关联。
+   * 只在源标注的 relations 中添加出边，入边索引自动维护。
+   */
+  async addRelation(sourceUuid: string, relation: AnnotationRelation): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(sourceUuid);
+    if (!ann) {
+      throw new Error(`Annotation not found: ${sourceUuid}`);
+    }
+
+    // 检查目标标注是否存在
+    if (!this._byUuid.has(relation.targetUuid)) {
+      throw new Error(`Target annotation not found: ${relation.targetUuid}`);
+    }
+
+    // 检查重复关联
+    if (ann.relations?.some(r => r.targetUuid === relation.targetUuid && r.type === relation.type)) {
+      return; // 已存在，幂等
+    }
+
+    // 移除旧索引
+    this._removeFromIndex(sourceUuid);
+
+    // 添加关联
+    if (!ann.relations) {
+      ann.relations = [];
+    }
+    ann.relations.push(relation);
+
+    // 重建索引
+    this._addToIndex(ann);
+
+    this._markDirty(ann.filePath);
+  }
+
+  /**
+   * 移除标注间关联。
+   */
+  async removeRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(sourceUuid);
+    if (!ann || !ann.relations) return;
+
+    const idx = ann.relations.findIndex(r => r.targetUuid === targetUuid && r.type === type);
+    if (idx === -1) return;
+
+    // 移除旧索引
+    this._removeFromIndex(sourceUuid);
+
+    // 移除关联
+    ann.relations.splice(idx, 1);
+    if (ann.relations.length === 0) {
+      delete ann.relations;
+    }
+
+    // 重建索引
+    this._addToIndex(ann);
+
+    this._markDirty(ann.filePath);
+  }
+
+  /**
+   * 获取标注的所有关联（出边 + 入边）。
+   */
+  getRelations(uuid: string): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
+    const result: { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } = {
+      outgoing: [],
+      incoming: [],
+    };
+
+    // 出边
+    const ann = this._byUuid.get(uuid);
+    if (ann?.relations) {
+      result.outgoing = [...ann.relations];
+    }
+
+    // 入边
+    const inSet = this._byRelationIn.get(uuid);
+    if (inSet) {
+      for (const entry of inSet) {
+        const colonIdx = entry.indexOf(':');
+        const sourceUuid = entry.substring(0, colonIdx);
+        const relType = entry.substring(colonIdx + 1) as RelationType;
+        const sourceAnn = this._byUuid.get(sourceUuid);
+        if (sourceAnn?.relations) {
+          const rel = sourceAnn.relations.find(r => r.targetUuid === uuid && r.type === relType);
+          if (rel) {
+            result.incoming.push({ sourceUuid, relation: rel });
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // v4.0: Phase 4 Flag API
+  // ═══════════════════════════════════════════════════════
+
+  /**
+   * 更新标注的学习状态标记。
+   * 合并更新，只修改传入的字段。
+   */
+  async updateFlags(uuid: string, flagChanges: Partial<AnnotationFlag>): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(uuid);
+    if (!ann) {
+      throw new Error(`Annotation not found: ${uuid}`);
+    }
+
+    // 移除旧索引
+    this._removeFromIndex(uuid);
+
+    // 合并更新
+    ann.flags = { ...ann.flags, ...flagChanges };
+
+    // 重建索引
+    this._addToIndex(ann);
+
+    this._markDirty(ann.filePath);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // v4.0: Phase 4 Group API
+  // ═══════════════════════════════════════════════════════
+
+  /**
+   * 给标注添加分组。
+   */
+  async addGroupToAnnotation(uuid: string, group: string): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(uuid);
+    if (!ann) {
+      throw new Error(`Annotation not found: ${uuid}`);
+    }
+
+    if (ann.groups?.includes(group)) return; // 已存在
+
+    // 移除旧索引
+    this._removeFromIndex(uuid);
+
+    // 添加分组
+    if (!ann.groups) {
+      ann.groups = [];
+    }
+    ann.groups.push(group);
+
+    // 重建索引
+    this._addToIndex(ann);
+
+    this._markDirty(ann.filePath);
+  }
+
+  /**
+   * 从标注移除分组。
+   */
+  async removeGroupFromAnnotation(uuid: string, group: string): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(uuid);
+    if (!ann?.groups) return;
+
+    const idx = ann.groups.indexOf(group);
+    if (idx === -1) return;
+
+    // 移除旧索引
+    this._removeFromIndex(uuid);
+
+    // 移除分组
+    ann.groups.splice(idx, 1);
+    if (ann.groups.length === 0) {
+      delete ann.groups;
+    }
+
+    // 重建索引
+    this._addToIndex(ann);
+
+    this._markDirty(ann.filePath);
+  }
+
+  /**
+   * 获取所有已加载标注中出现过的分组列表。
+   */
+  getGroupNames(): string[] {
+    return Array.from(this._byGroup.keys()).sort();
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 私有方法
   // ═══════════════════════════════════════════════════════
 
@@ -1039,6 +1320,57 @@ export class AnnotationStore {
         }
         valueSet.add(uuid);
       }
+    }
+
+    // v4.0: _byRelationOut（出边索引）
+    if (annotation.relations) {
+      const outSet = new Set<string>();
+      for (const rel of annotation.relations) {
+        outSet.add(`${rel.targetUuid}:${rel.type}`);
+      }
+      this._byRelationOut.set(uuid, outSet);
+
+      // 同时维护入边索引
+      for (const rel of annotation.relations) {
+        let inSet = this._byRelationIn.get(rel.targetUuid);
+        if (!inSet) {
+          inSet = new Set();
+          this._byRelationIn.set(rel.targetUuid, inSet);
+        }
+        inSet.add(`${uuid}:${rel.type}`);
+      }
+    }
+
+    // v4.0: _byGroup
+    if (annotation.groups) {
+      for (const group of annotation.groups) {
+        let groupSet = this._byGroup.get(group);
+        if (!groupSet) {
+          groupSet = new Set();
+          this._byGroup.set(group, groupSet);
+        }
+        groupSet.add(uuid);
+      }
+    }
+
+    // v4.0: _byMastery
+    if (annotation.flags?.mastery) {
+      let masterySet = this._byMastery.get(annotation.flags.mastery);
+      if (!masterySet) {
+        masterySet = new Set();
+        this._byMastery.set(annotation.flags.mastery, masterySet);
+      }
+      masterySet.add(uuid);
+    }
+
+    // v4.0: _byReviewPriority
+    if (annotation.flags?.reviewPriority) {
+      let prioritySet = this._byReviewPriority.get(annotation.flags.reviewPriority);
+      if (!prioritySet) {
+        prioritySet = new Set();
+        this._byReviewPriority.set(annotation.flags.reviewPriority, prioritySet);
+      }
+      prioritySet.add(uuid);
     }
   }
 
@@ -1115,6 +1447,83 @@ export class AnnotationStore {
         }
       }
     }
+
+    // v4.0: _byRelationOut（出边索引移除）
+    const outSet = this._byRelationOut.get(uuid);
+    if (outSet) {
+      // 同时清理入边索引
+      for (const entry of outSet) {
+        const [targetUuid] = entry.split(':');
+        const inSet = this._byRelationIn.get(targetUuid);
+        if (inSet) {
+          // 移除所有以 uuid 为源的入边条目
+          for (const inEntry of inSet) {
+            if (inEntry.startsWith(`${uuid}:`)) {
+              inSet.delete(inEntry);
+            }
+          }
+          if (inSet.size === 0) {
+            this._byRelationIn.delete(targetUuid);
+          }
+        }
+      }
+      this._byRelationOut.delete(uuid);
+    }
+
+    // v4.0: _byRelationIn（入边索引清理 — 本标注被其他标注指向的条目）
+    const inSet2 = this._byRelationIn.get(uuid);
+    if (inSet2) {
+      for (const entry of inSet2) {
+        const [sourceUuid] = entry.split(':');
+        const sourceOutSet = this._byRelationOut.get(sourceUuid);
+        if (sourceOutSet) {
+          for (const outEntry of sourceOutSet) {
+            if (outEntry.startsWith(`${uuid}:`)) {
+              sourceOutSet.delete(outEntry);
+            }
+          }
+          if (sourceOutSet.size === 0) {
+            this._byRelationOut.delete(sourceUuid);
+          }
+        }
+      }
+      this._byRelationIn.delete(uuid);
+    }
+
+    // v4.0: _byGroup
+    if (ann.groups) {
+      for (const group of ann.groups) {
+        const groupSet = this._byGroup.get(group);
+        if (groupSet) {
+          groupSet.delete(uuid);
+          if (groupSet.size === 0) {
+            this._byGroup.delete(group);
+          }
+        }
+      }
+    }
+
+    // v4.0: _byMastery
+    if (ann.flags?.mastery) {
+      const masterySet = this._byMastery.get(ann.flags.mastery);
+      if (masterySet) {
+        masterySet.delete(uuid);
+        if (masterySet.size === 0) {
+          this._byMastery.delete(ann.flags.mastery);
+        }
+      }
+    }
+
+    // v4.0: _byReviewPriority
+    if (ann.flags?.reviewPriority) {
+      const prioritySet = this._byReviewPriority.get(ann.flags.reviewPriority);
+      if (prioritySet) {
+        prioritySet.delete(uuid);
+        if (prioritySet.size === 0) {
+          this._byReviewPriority.delete(ann.flags.reviewPriority);
+        }
+      }
+    }
   }
 
   /**
@@ -1155,10 +1564,15 @@ export class AnnotationStore {
   }
 
   /**
-   * 写入分片 JSON。
+   * 写入分片 JSON（原子写入 + 备份 + 完整性校验）。
    *
-   * 从 _byUuid 和 _byFile 收集该文件的所有标注，
-   * 移除 `id` 字段（Dexie 遗留），格式化写入。
+   * 写入流程：
+   * 1. 保留旧文件为 .bak（如存在）
+   * 2. 写入 .tmp 文件
+   * 3. 写入目标文件
+   * 4. 清理 .tmp 文件
+   *
+   * Obsidian DataAdapter 不支持 rename，用 write+remove 近似原子写入。
    */
   private async _writeFileShard(filePath: string): Promise<void> {
     const uuidSet = this._byFile.get(filePath);
@@ -1168,14 +1582,19 @@ export class AnnotationStore {
     for (const uuid of uuidSet) {
       const ann = this._byUuid.get(uuid);
       if (ann) {
-        // 深拷贝标注（id 字段已在 Phase 2 移除，无需额外清理）
         annotations.push({ ...ann });
       }
     }
 
+    // 计算完整性校验码
+    const payload = { filePath, annotations };
+    const jsonStr = JSON.stringify(payload);
+    const checksum = this._computeChecksum(jsonStr);
+
     const data = {
       filePath,
       annotations,
+      _checksum: checksum,
     };
 
     const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
@@ -1186,11 +1605,38 @@ export class AnnotationStore {
       await this.adapter.mkdir(dir);
     }
 
-    await this.adapter.write(shardPath, JSON.stringify(data, null, 2));
+    const content = JSON.stringify(data);
+    const tmpPath = shardPath + '.tmp';
+
+    try {
+      // 1. 保留 .bak 备份（上次成功版本）
+      if (await this.adapter.exists(shardPath)) {
+        const oldContent = await this.adapter.read(shardPath);
+        await this.adapter.write(shardPath + '.bak', oldContent);
+      }
+
+      // 2. 写入临时文件
+      await this.adapter.write(tmpPath, content);
+
+      // 3. 写入目标文件
+      await this.adapter.write(shardPath, content);
+
+      // 4. 清理临时文件
+      await this.adapter.remove(tmpPath);
+    } catch (err) {
+      // 写入失败时清理 .tmp，保留 .bak 供恢复
+      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   /**
-   * 读取分片 JSON，返回标注数组。
+   * 读取分片 JSON，返回标注数组（含完整性校验 + 多级自动恢复）。
+   *
+   * 恢复链（不拒绝加载，逐级降级）：
+   * 1. checksum 通过 → 正常读取
+   * 2. checksum 失败 → 自动 fallback 到 .bak
+   * 3. .bak 也损坏 → 返回空数组，由上层 initialize() 统计后触发 MD resync
    */
   private async _readFileShard(filePath: string): Promise<Annotation[]> {
     const shardPath = FileEncoder.getShardPath(this._baseDir, filePath);
@@ -1202,14 +1648,67 @@ export class AnnotationStore {
     try {
       const content = await this.adapter.read(shardPath);
       const data = JSON.parse(content);
-      // 兼容两种格式：{ filePath, annotations } 或直接数组
+
+      // 完整性校验：验证 _checksum（写入时计算）
+      if (data._checksum && data.annotations) {
+        const payload = { filePath: data.filePath, annotations: data.annotations };
+        const expected = this._computeChecksum(JSON.stringify(payload));
+        if (data._checksum !== expected) {
+          console.warn(
+            `MarkVault: checksum mismatch for "${filePath}" — attempting .bak recovery`
+          );
+          // 第2级：从 .bak 恢复
+          const recovered = await this._recoverFromBak(shardPath);
+          if (recovered !== null) {
+            // 用恢复的数据覆写损坏的主文件
+            await this._atomicWrite(shardPath, JSON.stringify(data));
+            return recovered;
+          }
+          // .bak 也坏了，记录并返回空
+          console.error(
+            `MarkVault: both shard and .bak corrupted for "${filePath}" — ` +
+            `annotations will be recovered from markdown on next sync`
+          );
+          return [];
+        }
+      }
+
+      // 兼容两种格式：{ filePath, annotations } 或直接数组（旧版无 checksum）
       if (Array.isArray(data)) {
         return data;
       }
       return data.annotations || [];
     } catch {
+      // JSON 解析失败也尝试 .bak 恢复
+      const recovered = await this._recoverFromBak(shardPath);
+      if (recovered !== null) return recovered;
       return [];
     }
+  }
+
+  /** 从 .bak 文件恢复标注数据，失败返回 null */
+  private async _recoverFromBak(shardPath: string): Promise<Annotation[] | null> {
+    const bakPath = shardPath + '.bak';
+    if (!(await this.adapter.exists(bakPath))) return null;
+    try {
+      const bakContent = await this.adapter.read(bakPath);
+      const bakData = JSON.parse(bakContent);
+      if (Array.isArray(bakData)) return bakData;
+      return bakData.annotations || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 通用原子写入（tmp → target → clean tmp）。
+   * 用于 _readFileShard 恢复损坏文件后覆写。
+   */
+  private async _atomicWrite(filePath: string, content: string): Promise<void> {
+    const tmpPath = filePath + '.tmp';
+    await this.adapter.write(tmpPath, content);
+    await this.adapter.write(filePath, content);
+    try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
   }
 
   /**
@@ -1222,11 +1721,20 @@ export class AnnotationStore {
   }
 
   /**
-   * 写入 _index.json。
+   * 写入 _index.json（原子写入）。
    */
   private async _writeIndexFile(): Promise<void> {
     const indexPath = `${this._baseDir}/_index.json`;
-    await this.adapter.write(indexPath, JSON.stringify(this._indexData, null, 2));
+    const content = JSON.stringify(this._indexData);
+    const tmpPath = indexPath + '.tmp';
+    try {
+      await this.adapter.write(tmpPath, content);
+      await this.adapter.write(indexPath, content);
+      await this.adapter.remove(tmpPath);
+    } catch (err) {
+      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   /**
@@ -1239,11 +1747,20 @@ export class AnnotationStore {
   }
 
   /**
-   * 写入 _meta.json。
+   * 写入 _meta.json（原子写入）。
    */
   private async _writeMetaFile(): Promise<void> {
     const metaPath = `${this._baseDir}/_meta.json`;
-    await this.adapter.write(metaPath, JSON.stringify(this._meta, null, 2));
+    const content = JSON.stringify(this._meta);
+    const tmpPath = metaPath + '.tmp';
+    try {
+      await this.adapter.write(tmpPath, content);
+      await this.adapter.write(metaPath, content);
+      await this.adapter.remove(tmpPath);
+    } catch (err) {
+      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   /**
@@ -1262,6 +1779,22 @@ export class AnnotationStore {
     };
 
     this._indexData.entries[key] = entry;
+  }
+
+  /**
+   * 计算 JSON 内容的简单完整性校验码（CRC-32 风格）。
+   *
+   * 在 Obsidian 插件环境中 fs/crypto 不可用，使用纯 JS 多项式 hash。
+   * 非加密级别，仅用于检测写入/磁盘静默损坏。
+   */
+  private _computeChecksum(data: string): string {
+    let hash = 0;
+    for (let i = 0; i < data.length; i++) {
+      const ch = data.charCodeAt(i);
+      hash = ((hash << 5) - hash + ch) | 0; // JS 标准 string hash
+    }
+    // 转为 16 进制字符串，确保长度一致
+    return (hash >>> 0).toString(16).padStart(8, '0');
   }
 
   /**
@@ -1300,6 +1833,25 @@ export class AnnotationStore {
     }
     if (annotation.format !== undefined) clean.format = annotation.format;
     if (annotation.targetHash !== undefined) clean.targetHash = annotation.targetHash;
+
+    // v4.0: Phase 4 元数据字段
+    if (annotation.relations !== undefined && annotation.relations.length > 0) {
+      clean.relations = annotation.relations;
+    }
+    if (annotation.flags !== undefined) {
+      // 只保留有实际值的 flag 字段
+      const f = annotation.flags;
+      const hasValue = f.mastery !== undefined || f.reviewPriority !== undefined
+        || f.confidence !== undefined || f.needsCorrection !== undefined
+        || f.lastReviewedAt !== undefined || f.reviewCount !== undefined;
+      if (hasValue) {
+        clean.flags = { ...f };
+      }
+    }
+    if (annotation.groups !== undefined && annotation.groups.length > 0) {
+      clean.groups = annotation.groups;
+    }
+
     return clean;
   }
 

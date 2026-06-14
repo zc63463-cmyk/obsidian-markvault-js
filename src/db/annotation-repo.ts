@@ -7,7 +7,7 @@
 
 import type { App, TFile } from 'obsidian';
 import { annotationStore, type AnnotationStore } from './annotation-store';
-import type { Annotation, AnnotationFilter, AnnotationStats, BatchUpdateItem } from '../types/annotation';
+import type { Annotation, AnnotationFilter, AnnotationFlag, AnnotationRelation, AnnotationStats, BatchUpdateItem, RelationType } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown } from '../core/annotation-parser';
 
 // ─── CRUD ──────────────────────────────────────────────
@@ -118,6 +118,47 @@ export function getFieldKeys(): string[] {
 /** 获取指定字段键的所有已出现值列表 */
 export function getFieldValues(key: string): string[] {
   return annotationStore.getFieldValues(key);
+}
+
+// ─── v4.0: Relation 操作 ──────────────────────────────
+
+/** 添加标注间关联 */
+export async function addRelation(sourceUuid: string, relation: AnnotationRelation): Promise<void> {
+  await annotationStore.addRelation(sourceUuid, relation);
+}
+
+/** 移除标注间关联 */
+export async function removeRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+  await annotationStore.removeRelation(sourceUuid, targetUuid, type);
+}
+
+/** 获取标注的所有关联（出边 + 入边） */
+export function getRelations(uuid: string): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
+  return annotationStore.getRelations(uuid);
+}
+
+// ─── v4.0: Flag 操作 ──────────────────────────────────
+
+/** 更新标注的学习状态标记 */
+export async function updateFlags(uuid: string, flagChanges: Partial<AnnotationFlag>): Promise<void> {
+  await annotationStore.updateFlags(uuid, flagChanges);
+}
+
+// ─── v4.0: Group 操作 ──────────────────────────────────
+
+/** 给标注添加分组 */
+export async function addGroupToAnnotation(uuid: string, group: string): Promise<void> {
+  await annotationStore.addGroupToAnnotation(uuid, group);
+}
+
+/** 从标注移除分组 */
+export async function removeGroupFromAnnotation(uuid: string, group: string): Promise<void> {
+  await annotationStore.removeGroupFromAnnotation(uuid, group);
+}
+
+/** 获取所有分组名列表 */
+export function getGroupNames(): string[] {
+  return annotationStore.getGroupNames();
 }
 
 // ─── 孤儿标注清理 ─────────────────────────────────────

@@ -75,7 +75,19 @@ export class ReadingModeClickDelegate {
         }
       }
 
-      // 5. 检查 region 标注
+      // 5. 检查 region 标注（新架构 markvault-region-block-mark）
+      if (!foundMark) {
+        el = target;
+        while (el && el !== document.body) {
+          if (el.hasClass?.('markvault-region-block-mark') && el.hasAttribute('data-uuid')) {
+            foundMark = el;
+            break;
+          }
+          el = el.parentElement;
+        }
+      }
+
+      // 6. 检查 region 标注（旧架构 markvault-region，向后兼容）
       if (!foundMark) {
         el = target;
         while (el && el !== document.body) {

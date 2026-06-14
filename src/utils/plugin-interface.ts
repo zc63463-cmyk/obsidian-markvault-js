@@ -1,6 +1,7 @@
 import type { ModifyGuard } from './modify-guard';
 import type { AnnotationModal } from '../ui/editor/annotation-modal';
 import type { Annotation, MarkVaultSettings } from '../types/annotation';
+import type { AnnotationSearchEngine } from '../search/search-engine';
 
 /**
  * 侧边栏需要的 Plugin 接口
@@ -52,4 +53,7 @@ export interface MarkVaultPluginInterface {
 
   /** AnnotationStore 是否已就绪 */
   isStoreReady(): boolean;
+
+  /** 获取搜索引擎实例（供 RelationPicker 等使用） */
+  getSearchEngine(): AnnotationSearchEngine;
 }

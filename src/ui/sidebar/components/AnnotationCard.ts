@@ -1,6 +1,6 @@
 import { App, Component, Menu, TFile, MarkdownRenderer, MarkdownView } from 'obsidian';
 import type { Annotation } from '../../../types/annotation';
-import { PRESET_COLORS } from '../../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
 import { updateSpanAnchor, updateBlockAnchor, updateMarkTag } from '../../../core/annotation-parser';
 import { updateNativeAnnotation } from '../../../core/native-annotation';
@@ -172,6 +172,59 @@ export class AnnotationCard {
             moreEl.textContent = `${entries.length - 3} more...`;
           }
         });
+      }
+    }
+
+    // v4.0: 元数据徽章区域（Relations / Flags / Groups）
+    const metaEl = card.createDiv({ cls: 'markvault-card-meta' });
+
+    // 关系徽章
+    if (annotation.relations && annotation.relations.length > 0) {
+      const relBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-relation' });
+      relBadge.textContent = `🔗 ${annotation.relations.length}`;
+      relBadge.title = `${annotation.relations.length} relation(s)`;
+    }
+
+    // 掌握度徽章
+    if (annotation.flags?.mastery) {
+      const masteryEmoji: Record<string, string> = {
+        unknown: '❓',
+        learning: '📖',
+        familiar: '✅',
+        mastered: '🎯',
+      };
+      const masteryBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-mastery' });
+      masteryBadge.textContent = masteryEmoji[annotation.flags.mastery] || '❓';
+      masteryBadge.title = `Mastery: ${MASTERY_LABELS[annotation.flags.mastery]}`;
+    }
+
+    // 纠偏标记
+    if (annotation.flags?.needsCorrection) {
+      const correctionBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-correction' });
+      correctionBadge.textContent = '⚠️';
+      correctionBadge.title = 'Needs correction';
+    }
+
+    // 信心指数
+    if (annotation.flags?.confidence) {
+      const confBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-confidence' });
+      confBadge.textContent = `${annotation.flags.confidence}/5`;
+      confBadge.title = `Confidence: ${annotation.flags.confidence}/5`;
+    }
+
+    // 复习优先级
+    if (annotation.flags?.reviewPriority) {
+      const priorityEmoji: Record<string, string> = { low: '🟢', medium: '🟡', high: '🟠', urgent: '🔴' };
+      const priorityBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-priority' });
+      priorityBadge.textContent = priorityEmoji[annotation.flags.reviewPriority] || '';
+      priorityBadge.title = `Priority: ${REVIEW_PRIORITY_LABELS[annotation.flags.reviewPriority]}`;
+    }
+
+    // 分组标签
+    if (annotation.groups && annotation.groups.length > 0) {
+      const groupsEl = metaEl.createDiv({ cls: 'markvault-card-groups' });
+      for (const group of annotation.groups) {
+        groupsEl.createSpan({ cls: 'markvault-group-tag', text: group });
       }
     }
 

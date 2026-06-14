@@ -1,114 +1,68 @@
-# MarkVault Obsidian 插件 — 开发概览
+# MarkVault-JS Phase 4 实现报告
 
-## 项目位置
-`E:/Development/MyAwesomeApp/obsidian-markvault`
+## 完成日期：2026-06-14
 
-## 已完成
+## Phase 4: 知识元数据层 — 已完成 ✅
 
-### 构建状态
-- ✅ TypeScript 类型检查通过（源码零错误）
-- ✅ esbuild 生产构建成功（main.js 300KB）
+### 实现概述
 
-### 文件清单 (16 个源文件)
+Phase 4 为 MarkVault 标注系统引入三个全新维度：**Relation（标注间关联）**、**Flag（学习状态标记）**、**Group（标注分组）**，使标注从"视觉高亮"升级为"知识节点"。
 
-| 文件 | 功能 | 状态 |
-|------|------|------|
-| `src/main.ts` | 插件入口，注册 CM6 扩展/命令/事件/视图 | ✅ |
-| `src/types/annotation.ts` | Annotation interface + 5色 + 设置类型 | ✅ |
-| `src/db/database.ts` | Dexie 初始化 + schema (8个索引) | ✅ |
-| `src/db/annotation-repo.ts` | CRUD + 过滤查询 + 统计 + 偏移修正 | ✅ |
-| `src/core/offset-recovery.ts` | 4层偏移恢复引擎 (移植自 note-vault) | ✅ |
-| `src/core/offset-tracker.ts` | **CM6 增量偏移修正引擎** | ✅ 新增 |
-| `src/core/annotation-parser.ts` | Markdown <mark> 解析/生成/更新/删除 | ✅ |
-| `src/core/markdown-sync.ts` | Markdown ↔ IndexedDB 双写同步 | ✅ |
-| `src/core/highlight-applier.ts` | **CM6 Decoration 编辑模式高亮** + 阅读模式 DOM | ✅ 重写 |
-| `src/ui/sidebar/AnnotationSidebar.ts` | 侧边栏 (搜索/过滤/排序/跳转) | ✅ |
-| `src/ui/editor/context-menu.ts` | 右键菜单 + 命令面板 (8个命令) | ✅ |
-| `src/ui/editor/annotation-modal.ts` | 批注编辑 Modal | ✅ |
-| `src/ui/settings/settings-tab.ts` | 插件设置页 | ✅ |
-| `src/utils/id.ts` | UUID 生成 | ✅ |
-| `src/utils/context.ts` | 上下文截取 (50 chars window) | ✅ |
-| `src/utils/debounce.ts` | 防抖 | ✅ |
-| `styles.css` | 5色×3类型样式 + 侧边栏 + Modal | ✅ |
+### 修改文件清单
 
-### 核心架构
+| 文件 | 变更内容 |
+|------|---------|
+| `src/types/annotation.ts` | 新增 AnnotationRelation / AnnotationFlag / RelationType / MasteryLevel / ReviewPriority 类型 + 标签常量；扩展 Annotation 接口（relations/flags/groups）；扩展 AnnotationFilter（5个新维度）；扩展 AnnotationStats（6个新统计） |
+| `src/db/annotation-store.ts` | 新增 5 个索引（_byRelationOut/_byRelationIn/_byGroup/_byMastery/_byReviewPriority）；更新 _addToIndex/_removeFromIndex/_stripExtraFields/rebuildIndex/initialize/queryAnnotations/getAnnotationStats；新增 7 个 API |
+| `src/db/annotation-repo.ts` | 新增 7 个代理方法 |
+| `src/ui/editor/annotation-modal.ts` | 新增 Flags/Groups/Relations 编辑区；save 方法扩展 |
+| `src/ui/sidebar/components/AnnotationCard.ts` | 新增元数据徽章区 |
+| `src/ui/sidebar/components/FilterBar.ts` | 新增第四行元数据过滤 |
+| `tests/metadata-extension.test.ts` | 新增 20 项测试 |
+| `package.json` | test 命令加入 metadata-extension.test.ts |
+
+### 新增 API
 
 ```
-数据层:   IndexedDB (Dexie) ←→ Markdown <mark data-uuid>
-业务层:   偏移恢复(4层) + 增量偏移修正(CM6) + 双写同步
-表现层:   CM6 Decoration(编辑) + PostProcessor(阅读) + 侧边栏 + 右键菜单 + Modal
+AnnotationStore:
+  addRelation(sourceUuid, relation)     — 添加标注间关联
+  removeRelation(sourceUuid, targetUuid, type) — 移除关联
+  getRelations(uuid)                    — 获取出边+入边
+  updateFlags(uuid, flagChanges)        — 更新学习状态（合并更新）
+  addGroupToAnnotation(uuid, group)     — 添加分组
+  removeGroupFromAnnotation(uuid, group)— 移除分组
+  getGroupNames()                       — 获取所有分组名
 ```
 
-### CM6 Decoration 实现细节
-
-**编辑模式（Source / Live Preview）渲染策略：**
+### 测试结果
 
 ```
-原始 Markdown:  <mark data-uuid="abc" data-type="highlight" data-color="yellow">标注文本</mark>
+全量测试: 63/63 通过
+├── annotation-store.test.ts   17/17 ✅
+├── native-annotation.test.ts  10/10 ✅
+├── region-annotation.test.ts   7/7  ✅
+├── block-annotation.test.ts    9/9  ✅
+└── metadata-extension.test.ts 20/20 ✅
 
-CM6 渲染:
-  ┌──────────────┬──────────┬───────────┐
-  │  开标签隐藏   │ 内部文本  │ 闭标签隐藏 │
-  │  replace      │ mark     │ replace    │
-  │  Widget       │ deco     │ Widget     │
-  │  (display:    │ (bg-color│ (display:  │
-  │   none)       │  +style) │  none)     │
-  └──────────────┴──────────┴───────────┘
-
-用户看到:       [标注文本]  ← 带高亮背景色
+TypeScript 编译: 0 error
+Production build: 成功
+部署: 已部署到 E:\Notes\数据库系统概论
 ```
 
-**阅读模式渲染策略：**
-- `registerMarkdownPostProcessor` 拦截渲染后的 HTML
-- 找到 `mark[data-uuid]` 元素，添加 class + 内联样式
+### 架构决策
 
-### 增量偏移修正实现细节
+1. **Relation/Flag/Group 均仅存 Store**，不写入 Markdown
+   - 避免锚点膨胀和格式脆弱性
+   - 这些元数据是"私有学习数据"，不适合公开在 MD 中
+2. **双向索引**：_byRelationOut（出边）+ _byRelationIn（入边）
+   - 入边格式 `sourceUuid:relationType`，O(1) 查询
+3. **Flag 合并更新**：updateFlags 只修改传入的字段，不清除其他 flag
+4. **空字段不持久化**：_stripExtraFields 确保 relations=[]/flags={}/groups=[] 不写入分片
 
-**3种变更情况处理：**
+### 下一阶段: Phase 5 — LLM-ready 导出系统
 
-| 情况 | 条件 | 处理方式 |
-|------|------|---------|
-| 标注在变更之前 | `endOffset <= changeFrom` | 不处理 |
-| 标注在变更之后 | `startOffset >= changeTo` | startOffset += delta, endOffset += delta |
-| 变更与标注重叠 | 重叠 >50% | 删除标注；否则调整偏移 |
-
-**CM6 偏移追踪 Extension：**
-- 轻量 ViewPlugin，不渲染任何 decoration
-- 监听 `update.docChanged`，提取 `ChangeInfo[]`
-- 通过回调通知 main.ts，微任务队列异步修正 IndexedDB
-- 不阻塞 CM6 更新循环
-
-### 关键差异化 (vs Highlightr-Plus)
-
-| 能力 | Highlightr-Plus | MarkVault |
-|---|---|---|
-| 编辑模式高亮 | 旧式 DOM 操作 (setValue) | ✅ CM6 Decoration API |
-| 阅读模式高亮 | CSS class 注入 | ✅ MarkdownPostProcessor |
-| 偏移修正 | ❌ 不做 | ✅ CM6 增量 + 4层 batch |
-| 点击跳转 | ❌ | ✅ offsetToPos + scrollIntoView |
-| UUID 关联 | ❌ | ✅ data-uuid 双向桥梁 |
-| 跨笔记搜索 | ❌ | ✅ Dexie where() |
-| 标注被删检测 | ❌ | ✅ 重叠>50%自动删除 |
-
-## 待完善 (后续迭代)
-
-1. ✅ ~~CM6 Decoration — 编辑模式实时高亮~~ (已完成)
-2. ✅ ~~精确增量偏移修正 — CM6 Transaction delta 计算~~ (已完成)
-3. **实际 Obsidian 环境测试** — 安装到 vault 验证
-4. **标注悬浮提示优化** — 编辑模式下悬浮显示批注内容
-5. **批量操作** — 全选/批量删除/批量修改颜色
-6. **Obsidian 主题适配** — dark/light 主题颜色微调
-
-## 使用方式
-
-```bash
-# 开发
-cd E:/Development/MyAwesomeApp/obsidian-markvault
-npm run dev
-
-# 构建
-npm run build
-
-# 安装到 Obsidian vault
-cp main.js manifest.json styles.css <vault>/.obsidian/plugins/obsidian-markvault/
-```
+Phase 5 将构建 ExportEngine 模块，支持：
+- 4 种格式：JSON Schema / Markdown / CSV / LLM Prompt
+- Export Bundle：一键三文件
+- Prompt 模板系统
+- MarkVault Data Protocol v1.0

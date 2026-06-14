@@ -1,7 +1,9 @@
 import { App, Modal, TextAreaComponent, TextComponent, Setting, TFile, MarkdownRenderer, Component } from 'obsidian';
-import type { Annotation, AnnotationType, PresetColorId } from '../../types/annotation';
-import { PRESET_COLORS } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation, addAnnotation } from '../../db/annotation-repo';
+import type { Annotation, AnnotationType, AnnotationFlag, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
+import { PRESET_COLORS, RELATION_TYPE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../types/annotation';
+import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
+import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, removeRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames } from '../../db/annotation-repo';
+import { RelationPickerModal } from './relation-picker-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
 import { updateRegionAnnotation, removeRegionAnnotation } from '../../core/region-annotation';
@@ -20,6 +22,8 @@ export class AnnotationModal extends Modal {
   private selectedColor: string;
   private selectedType: AnnotationType;
   private fieldsValue: Record<string, string>;
+  private flagsValue: AnnotationFlag;
+  private groupsValue: string[];
   private onSave: (annotation: Annotation) => void;
   private onDelete: (uuid: string) => void;
   private component_: Component;
@@ -39,6 +43,8 @@ export class AnnotationModal extends Modal {
     this.selectedColor = annotation.color;
     this.selectedType = annotation.type;
     this.fieldsValue = annotation.fields ? { ...annotation.fields } : {};
+    this.flagsValue = annotation.flags ? { ...annotation.flags } : {};
+    this.groupsValue = annotation.groups ? [...annotation.groups] : [];
     this.onSave = onSave;
     this.onDelete = onDelete;
     this.component_ = new Component();
@@ -186,6 +192,152 @@ export class AnnotationModal extends Modal {
       });
     }
 
+    // ═══════════════════════════════════════════════════════
+    // v4.0: 学习状态标记 (Flags)
+    // ═══════════════════════════════════════════════════════
+    const flagsSection = contentEl.createDiv({ cls: 'markvault-modal-flags' });
+    flagsSection.createEl('h3', { text: 'Learning Status', cls: 'markvault-modal-section-title' });
+
+    // 掌握度
+    new Setting(flagsSection)
+      .setName('Mastery')
+      .setDesc('How well you understand this annotation')
+      .addDropdown((dropdown) => {
+        dropdown.addOption('', 'Not set');
+        for (const [value, label] of Object.entries(MASTERY_LABELS)) {
+          dropdown.addOption(value, label);
+        }
+        dropdown.setValue(this.flagsValue.mastery || '');
+        dropdown.onChange((value) => {
+          if (value) {
+            this.flagsValue.mastery = value as MasteryLevel;
+          } else {
+            delete this.flagsValue.mastery;
+          }
+        });
+      });
+
+    // 复习优先级
+    new Setting(flagsSection)
+      .setName('Review Priority')
+      .setDesc('How urgently you need to review this')
+      .addDropdown((dropdown) => {
+        dropdown.addOption('', 'Not set');
+        for (const [value, label] of Object.entries(REVIEW_PRIORITY_LABELS)) {
+          dropdown.addOption(value, label);
+        }
+        dropdown.setValue(this.flagsValue.reviewPriority || '');
+        dropdown.onChange((value) => {
+          if (value) {
+            this.flagsValue.reviewPriority = value as ReviewPriority;
+          } else {
+            delete this.flagsValue.reviewPriority;
+          }
+        });
+      });
+
+    // 信心指数
+    new Setting(flagsSection)
+      .setName('Confidence')
+      .setDesc('Your confidence level (1-5)')
+      .addDropdown((dropdown) => {
+        dropdown.addOption('', 'Not set');
+        for (let i = 1; i <= 5; i++) {
+          dropdown.addOption(String(i), `${i} - ${['Very Low', 'Low', 'Medium', 'High', 'Very High'][i - 1]}`);
+        }
+        dropdown.setValue(this.flagsValue.confidence ? String(this.flagsValue.confidence) : '');
+        dropdown.onChange((value) => {
+          if (value) {
+            this.flagsValue.confidence = Number(value) as 1 | 2 | 3 | 4 | 5;
+          } else {
+            delete this.flagsValue.confidence;
+          }
+        });
+      });
+
+    // 纠偏标记
+    new Setting(flagsSection)
+      .setName('Needs Correction')
+      .setDesc('Mark if your understanding may be wrong')
+      .addToggle((toggle) => {
+        toggle.setValue(this.flagsValue.needsCorrection || false);
+        toggle.onChange((value) => {
+          this.flagsValue.needsCorrection = value || undefined;
+        });
+      });
+
+    // ═══════════════════════════════════════════════════════
+    // v4.0: 标注分组 (Groups)
+    // ═══════════════════════════════════════════════════════
+    const groupsSection = contentEl.createDiv({ cls: 'markvault-modal-groups' });
+    groupsSection.createEl('h3', { text: 'Groups', cls: 'markvault-modal-section-title' });
+
+    const groupsListEl = groupsSection.createDiv({ cls: 'markvault-modal-groups-list' });
+    this.renderGroupTags(groupsListEl);
+
+    // Add Group 按钮
+    const addGroupBtn = groupsSection.createEl('button', {
+      text: '+ Add Group',
+      cls: 'markvault-modal-add-group-btn',
+    });
+    addGroupBtn.addEventListener('click', () => {
+      const existingGroups = getGroupNames();
+      const groupName = prompt('Enter group name:\n\nExisting groups: ' + existingGroups.join(', '));
+      if (groupName && groupName.trim() && !this.groupsValue.includes(groupName.trim())) {
+        this.groupsValue.push(groupName.trim());
+        this.renderGroupTags(groupsListEl);
+      }
+    });
+
+    // ═══════════════════════════════════════════════════════
+    // v4.0: 标注间关联 (Relations)
+    // ═══════════════════════════════════════════════════════
+    const relationsSection = contentEl.createDiv({ cls: 'markvault-modal-relations' });
+    relationsSection.createEl('h3', { text: 'Relations', cls: 'markvault-modal-section-title' });
+
+    const relationsListEl = relationsSection.createDiv({ cls: 'markvault-modal-relations-list' });
+    this.renderRelations(relationsListEl);
+
+    // Add Relation 按钮
+    const addRelBtn = relationsSection.createEl('button', {
+      text: '+ Add Relation',
+      cls: 'markvault-modal-add-relation-btn',
+    });
+    addRelBtn.addEventListener('click', () => {
+      const engine = this.plugin.getSearchEngine();
+      engine.markDirty(); // Ensure index is fresh
+
+      const picker = new RelationPickerModal(
+        this.app,
+        engine,
+        this.annotation.uuid,
+        this.annotation.filePath,
+        (result) => {
+          // 立即持久化关联
+          addRelation(this.annotation.uuid, {
+            targetUuid: result.targetUuid,
+            type: result.type,
+            createdAt: Date.now(),
+            note: result.note,
+          }).then(() => {
+            // 更新本地 annotation 的 relations
+            if (!this.annotation.relations) this.annotation.relations = [];
+            this.annotation.relations.push({
+              targetUuid: result.targetUuid,
+              type: result.type,
+              createdAt: Date.now(),
+              note: result.note,
+            });
+            this.renderRelations(relationsListEl);
+          }).catch((err) => {
+            console.error('MarkVault: failed to add relation', err);
+            alert('Failed to add relation: ' + err.message);
+          });
+        },
+      );
+      picker.open();
+    });
+
     // 操作按钮
     const buttonBar = contentEl.createDiv({ cls: 'markvault-modal-buttons' });
 
@@ -329,6 +481,74 @@ export class AnnotationModal extends Modal {
     }
   }
 
+  /** 渲染 Group 标签 */
+  private renderGroupTags(container: HTMLElement) {
+    container.empty();
+
+    for (const group of this.groupsValue) {
+      const tag = container.createDiv({ cls: 'markvault-modal-group-tag' });
+      tag.createSpan({ text: group, cls: 'markvault-modal-group-name' });
+      const removeBtn = tag.createEl('button', {
+        text: '✕',
+        cls: 'markvault-modal-group-remove',
+      });
+      removeBtn.addEventListener('click', () => {
+        this.groupsValue = this.groupsValue.filter(g => g !== group);
+        this.renderGroupTags(container);
+      });
+    }
+  }
+
+  /** 渲染 Relations 列表 */
+  private renderRelations(container: HTMLElement) {
+    container.empty();
+
+    const relations = this.annotation.relations || [];
+
+    if (relations.length === 0) {
+      container.createSpan({ text: 'No relations yet', cls: 'markvault-modal-relations-empty' });
+      return;
+    }
+
+    for (let i = 0; i < relations.length; i++) {
+      const rel = relations[i];
+      const row = container.createDiv({ cls: 'markvault-modal-relation-row' });
+
+      // 关系类型标签
+      const typeLabel = RELATION_TYPE_LABELS[rel.type] || rel.type;
+      row.createSpan({ text: `${typeLabel} →`, cls: 'markvault-modal-relation-type' });
+
+      // 目标 UUID（截断显示）
+      const shortUuid = rel.targetUuid.length > 8
+        ? rel.targetUuid.substring(0, 8) + '...'
+        : rel.targetUuid;
+      row.createSpan({ text: shortUuid, cls: 'markvault-modal-relation-target', attr: { title: rel.targetUuid } });
+
+      // 删除按钮
+      const removeBtn = row.createEl('button', {
+        text: '✕',
+        cls: 'markvault-modal-relation-remove',
+      });
+      removeBtn.addEventListener('click', async () => {
+        try {
+          await removeRelation(this.annotation.uuid, rel.targetUuid, rel.type);
+          // 更新本地 annotation
+          if (this.annotation.relations) {
+            this.annotation.relations = this.annotation.relations.filter(
+              r => !(r.targetUuid === rel.targetUuid && r.type === rel.type)
+            );
+            if (this.annotation.relations.length === 0) {
+              delete this.annotation.relations;
+            }
+          }
+          this.renderRelations(container);
+        } catch (err) {
+          console.error('MarkVault: failed to remove relation', err);
+        }
+      });
+    }
+  }
+
   private async save() {
     const tags = this.tagsValue
       .split(',')
@@ -359,6 +579,11 @@ export class AnnotationModal extends Modal {
       updates.fields = filteredFields;
     }
 
+    // v4.0: 收集 groups
+    if (this.groupsValue.length > 0 || this.annotation.groups) {
+      updates.groups = this.groupsValue;
+    }
+
     console.log(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
 
     // 🔧 P0 修复：捕获原始值用于 MD 失败时回滚
@@ -370,6 +595,12 @@ export class AnnotationModal extends Modal {
 
     // ① 更新 AnnotationStore（先写 Store，再写 Markdown）
     await updateAnnotation(this.annotation.uuid, updates);
+
+    // v4.0: 更新 Flags（独立 API，不在 updates 中，因为 merge 逻辑需要特殊处理）
+    const hasFlags = Object.keys(this.flagsValue).length > 0;
+    if (hasFlags) {
+      await updateFlags(this.annotation.uuid, this.flagsValue);
+    }
 
     // ② 更新 Markdown — 设置防重入标志，阻止 onFileOpen() 在此期间触发 syncFromMarkdown()
     const file = this.app.vault.getAbstractFileByPath(this.annotation.filePath);
@@ -455,6 +686,8 @@ export class AnnotationModal extends Modal {
     if (updates.color) this.annotation.color = updates.color;
     if (updates.type) this.annotation.type = updates.type;
     if (updates.fields !== undefined) this.annotation.fields = updates.fields;
+    if (updates.groups !== undefined) this.annotation.groups = updates.groups;
+    if (hasFlags) this.annotation.flags = { ...this.flagsValue };
 
     // 🔧 P1 修复：标记文件已同步，避免 onFileOpen 触发无意义的全量 sync
     this.plugin.markFileSynced(this.annotation.filePath);

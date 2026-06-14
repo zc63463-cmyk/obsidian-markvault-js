@@ -9,6 +9,7 @@ import {
   getAnnotationByUuid,
 } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
+import { applyUnifiedFilter, hasActiveFilters } from '../../search/filter-engine';
 import { AnnotationModal } from '../editor/annotation-modal';
 import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { removeNativeAnnotation } from '../../core/native-annotation';
@@ -344,14 +345,10 @@ export class AnnotationSidebar extends ItemView {
   private async loadAndRenderAnnotations(container: HTMLElement, filePath: string) {
     let annotations: Annotation[];
 
-    // 🔧 P0 修复：fieldFilters 存在时始终走 queryAnnotations，否则会被跳过
-    const hasActiveFilters = this.searchQuery?.trim()
-      || this.filter.type !== 'all'
-      || this.filter.color !== 'all'
-      || this.filter.hasNote
-      || (this.filter.fieldFilters && Object.keys(this.filter.fieldFilters).length > 0);
+    // 🔧 Phase 4.5: 统一委托给 filter-engine 判断
+    const hasActive = hasActiveFilters(this.filter) || !!this.searchQuery?.trim();
 
-    if (hasActiveFilters) {
+    if (hasActive) {
       annotations = await queryAnnotations({
         ...this.filter,
         searchQuery: this.searchQuery?.trim() || undefined,
@@ -379,61 +376,7 @@ export class AnnotationSidebar extends ItemView {
   // ─── 搜索过滤 ──────────────────────────────────────────
 
   private applySearchFilter(annotations: Annotation[]): Annotation[] {
-    let filtered = [...annotations];
-
-    // 类型过滤
-    if (this.filter.type && this.filter.type !== 'all') {
-      filtered = filtered.filter(a => a.type === this.filter.type);
-    }
-
-    // 颜色过滤
-    if (this.filter.color && this.filter.color !== 'all') {
-      filtered = filtered.filter(a => a.color === this.filter.color);
-    }
-
-    // 批注过滤
-    if (this.filter.hasNote) {
-      filtered = filtered.filter(a => a.note && a.note.trim().length > 0);
-    }
-
-    // 🔧 P0 修复：字段过滤 — applySearchFilter 中处理 all notes 视图
-    if (this.filter.fieldFilters && Object.keys(this.filter.fieldFilters).length > 0) {
-      for (const [key, value] of Object.entries(this.filter.fieldFilters)) {
-        filtered = filtered.filter(a =>
-          a.fields && a.fields[key] !== undefined && a.fields[key] === value,
-        );
-      }
-    }
-
-    // 搜索
-    if (this.searchQuery && this.searchQuery.trim()) {
-      const q = this.searchQuery.toLowerCase();
-      filtered = filtered.filter(a =>
-        a.text.toLowerCase().includes(q) ||
-        a.note.toLowerCase().includes(q) ||
-        a.tags.some(t => t.toLowerCase().includes(q)) ||
-        a.filePath.toLowerCase().includes(q) ||
-        (a.fields && Object.entries(a.fields).some(([k, v]) =>
-          k.toLowerCase().includes(q) || v.toLowerCase().includes(q)
-        )),
-      );
-    }
-
-    // 排序
-    const sortBy = this.filter.sortBy || 'position';
-    switch (sortBy) {
-      case 'position':
-        filtered.sort((a, b) => a.startOffset - b.startOffset);
-        break;
-      case 'createdAt':
-        filtered.sort((a, b) => b.createdAt - a.createdAt);
-        break;
-      case 'updatedAt':
-        filtered.sort((a, b) => b.updatedAt - a.updatedAt);
-        break;
-    }
-
-    return filtered;
+    return applyUnifiedFilter(annotations, this.filter, this.searchQuery);
   }
 
   // ─── 只刷新列表部分（不重建整个 UI） ────────────────────

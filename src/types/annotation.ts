@@ -48,6 +48,15 @@ export interface Annotation {
 
   // v3.0: 自然 Markdown 语法标注格式
   format?: 'mark' | 'native';  // 'native' = 隐身锚点 + 原生 Markdown 包裹
+
+  // v4.0: 标注间关联
+  relations?: AnnotationRelation[];     // 出边关联（本标注指向其他标注）
+
+  // v4.0: 学习状态标记
+  flags?: AnnotationFlag;
+
+  // v4.0: 标注分组（多对多自由标签）
+  groups?: string[];                     // 如 ["ch12", "exam_topics", "key_theorems"]
 }
 
 /** Span 标注的文本片段范围 */
@@ -55,6 +64,73 @@ export interface SpanRange {
   from: number;   // 文本片段起始偏移（文档绝对偏移）
   to: number;     // 文本片段结束偏移
 }
+
+// ═══════════════════════════════════════════════════════
+// v4.0: Phase 4 元数据扩展类型
+// ═══════════════════════════════════════════════════════
+
+/** 标注间关联类型 */
+export type RelationType =
+  | 'generalizes'    // A 是 B 的上位（泛化）
+  | 'specializes'    // A 是 B 的下位（特化）
+  | 'proves'         // A 证明 B
+  | 'refutes'        // A 反驳 B
+  | 'applies'        // A 应用于 B
+  | 'references'     // A 引用 B
+  | 'contrasts'      // A 与 B 对比
+  | 'supplements';   // A 补充 B
+
+/** RelationType 的显示标签 */
+export const RELATION_TYPE_LABELS: Record<RelationType, string> = {
+  generalizes: '泛化',
+  specializes: '特化',
+  proves: '证明',
+  refutes: '反驳',
+  applies: '应用',
+  references: '引用',
+  contrasts: '对比',
+  supplements: '补充',
+};
+
+/** 标注间关联 */
+export interface AnnotationRelation {
+  targetUuid: string;          // 目标标注 UUID
+  type: RelationType;          // 关系类型
+  createdAt: number;
+  note?: string;               // 关联说明（可选）
+}
+
+/** 掌握度级别 */
+export type MasteryLevel = 'unknown' | 'learning' | 'familiar' | 'mastered';
+
+/** 复习优先级 */
+export type ReviewPriority = 'low' | 'medium' | 'high' | 'urgent';
+
+/** 标注学习状态标记 — 仅存 Store，不写入 Markdown */
+export interface AnnotationFlag {
+  mastery?: MasteryLevel;                 // 掌握度
+  reviewPriority?: ReviewPriority;         // 复习优先级
+  confidence?: 1 | 2 | 3 | 4 | 5;         // 自评信心 1-5
+  needsCorrection?: boolean;              // 理解有误待纠偏
+  lastReviewedAt?: number;                // 最后复习时间戳
+  reviewCount?: number;                    // 复习次数
+}
+
+/** MasteryLevel 显示标签 */
+export const MASTERY_LABELS: Record<MasteryLevel, string> = {
+  unknown: '未知',
+  learning: '学习中',
+  familiar: '熟悉',
+  mastered: '已掌握',
+};
+
+/** ReviewPriority 显示标签 */
+export const REVIEW_PRIORITY_LABELS: Record<ReviewPriority, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  urgent: '紧急',
+};
 
 /** Markdown 中 <mark> 标签的属性接口 */
 export interface MarkAttributes {
@@ -97,6 +173,13 @@ export interface AnnotationFilter {
   searchQuery?: string;
   fieldFilters?: Record<string, string>;  // v3.0: 字段过滤
   sortBy?: 'position' | 'createdAt' | 'updatedAt';
+
+  // v4.0: 元数据扩展过滤
+  mastery?: MasteryLevel | 'all';          // 按掌握度过滤
+  reviewPriority?: ReviewPriority | 'all'; // 按复习优先级过滤
+  hasRelations?: boolean;                  // 是否有关联
+  group?: string | 'all';                  // 按分组过滤
+  needsCorrection?: boolean;               // 按纠偏标记过滤
 }
 
 /** 偏移恢复结果 */
@@ -134,6 +217,13 @@ export interface AnnotationStats {
   withNotes: number;
   withTags: number;
   withFields: number;
+  // v4.0: 元数据扩展统计
+  withRelations: number;
+  withGroups: number;
+  withFlags: number;
+  byMastery: Record<string, number>;
+  byReviewPriority: Record<string, number>;
+  needsCorrection: number;
 }
 
 /** 批量更新偏移项 */

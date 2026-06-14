@@ -1,7 +1,7 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
-import { PRESET_COLORS } from '../../../types/annotation';
-import { getFieldKeys, getFieldValues } from '../../../db/annotation-repo';
+import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
+import { getFieldKeys, getFieldValues, getGroupNames } from '../../../db/annotation-repo';
 
 /**
  * FilterBar —— 侧边栏过滤栏
@@ -144,6 +144,80 @@ export class FilterBar {
     addFieldFilterBtn.addEventListener('click', async () => {
       const keys = await getFieldKeys();
       this.showAddFieldFilterMenu(addFieldFilterBtn, keys);
+    });
+
+    // ── 第四行：v4.0 元数据过滤（Mastery / Priority / Group / Relations） ──
+    const metaRow = container.createDiv({ cls: 'markvault-filter-row markvault-filter-meta-row' });
+    metaRow.createSpan({ cls: 'markvault-filter-group-label', text: '📋' });
+
+    // Mastery 过滤
+    const masteryGroup = metaRow.createDiv({ cls: 'markvault-filter-group' });
+    const masteryBtn = masteryGroup.createEl('button', {
+      text: this.host.filter.mastery && this.host.filter.mastery !== 'all'
+        ? MASTERY_LABELS[this.host.filter.mastery] || this.host.filter.mastery
+        : 'Mastery',
+      cls: `markvault-filter-btn ${this.host.filter.mastery && this.host.filter.mastery !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by mastery level' },
+    });
+    masteryBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.host.filter.mastery || this.host.filter.mastery === 'all')
+          .onClick(async () => { this.host.filter.mastery = 'all'; await this.host.refreshListOnly(); });
+      });
+      for (const [value, label] of Object.entries(MASTERY_LABELS)) {
+        menu.addItem((item) => {
+          item.setTitle(label).setChecked(this.host.filter.mastery === value)
+            .onClick(async () => { this.host.filter.mastery = value as any; await this.host.refreshListOnly(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: masteryBtn.getBoundingClientRect().left, clientY: masteryBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Group 过滤
+    const groupBtn = metaRow.createEl('button', {
+      text: this.host.filter.group && this.host.filter.group !== 'all'
+        ? this.host.filter.group
+        : 'Group',
+      cls: `markvault-filter-btn ${this.host.filter.group && this.host.filter.group !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by group' },
+    });
+    groupBtn.addEventListener('click', () => {
+      const groups = getGroupNames();
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.host.filter.group || this.host.filter.group === 'all')
+          .onClick(async () => { this.host.filter.group = 'all'; await this.host.refreshListOnly(); });
+      });
+      for (const g of groups) {
+        menu.addItem((item) => {
+          item.setTitle(g).setChecked(this.host.filter.group === g)
+            .onClick(async () => { this.host.filter.group = g; await this.host.refreshListOnly(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Has Relations 过滤
+    const relBtn = metaRow.createEl('button', {
+      text: this.host.filter.hasRelations ? '🔗' : '🔗',
+      cls: `markvault-filter-btn ${this.host.filter.hasRelations ? 'active' : ''}`,
+      attr: { title: 'Filter by has relations' },
+    });
+    relBtn.addEventListener('click', async () => {
+      this.host.filter.hasRelations = this.host.filter.hasRelations ? undefined : true;
+      await this.host.refreshListOnly();
+    });
+
+    // Needs Correction 过滤
+    const corrBtn = metaRow.createEl('button', {
+      text: '⚠️',
+      cls: `markvault-filter-btn ${this.host.filter.needsCorrection ? 'active' : ''}`,
+      attr: { title: 'Filter by needs correction' },
+    });
+    corrBtn.addEventListener('click', async () => {
+      this.host.filter.needsCorrection = this.host.filter.needsCorrection ? undefined : true;
+      await this.host.refreshListOnly();
     });
   }
 
