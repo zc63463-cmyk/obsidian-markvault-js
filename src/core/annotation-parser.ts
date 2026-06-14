@@ -3,7 +3,7 @@ import type { AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
 import { encodeFields, decodeFields } from '../utils/fields';
 import { scanMarkdownContexts } from './md-context';
-import { computeBlockSignature, computeSpanSignature } from './block-fingerprint';
+import { computeBlockSignature, computeSpanSignature, detectBlockTypeAtLine } from './block-fingerprint';
 import { parseNativeAnnotations } from './native-annotation';
 import { parseRegionAnnotations } from './region-annotation';
 
@@ -445,6 +445,165 @@ export function buildSpanAnchor(annotation: {
   return `%%markvault-span:${annotation.uuid}:${annotation.type}:${annotation.color}:${escapeAnchorField(annotation.note || '')}%%`;
 }
 
+// ─── Track B-v2: Block 双锚点标注 ─────────────────────────
+
+/** Block 双锚点正则：%%markvault-block:<uuid>:<type>:<color>:<start|end>:<note>%% */
+export const BLOCK_DOUBLE_ANCHOR_REGEX = /%%markvault-block:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%/g;
+
+/** 双锚点 note 字段转义（冒号和百分号都是分隔符/终止符） */
+function escapeBlockAnchorField(s: string): string {
+  return s.replace(/%/g, '\\p').replace(/:/g, '\\c');
+}
+
+/** 双锚点 note 字段反转义 */
+function decodeBlockAnchorField(s: string): string {
+  return s.replace(/\\p/g, '%').replace(/\\c/g, ':');
+}
+
+/** 生成 Block 双锚点的 start 锚点 */
+export function buildBlockAnchorStart(annotation: {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  note: string;
+}): string {
+  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:start:${escapeBlockAnchorField(annotation.note || '')}%%`;
+}
+
+/** 生成 Block 双锚点的 end 锚点 */
+export function buildBlockAnchorEnd(annotation: {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  note: string;
+}): string {
+  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:end:${escapeBlockAnchorField(annotation.note || '')}%%`;
+}
+
+/** Block 双锚点解析结果 */
+export interface ParsedBlockDoubleAnchor {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  note: string;
+  /** start / end */
+  position: 'start' | 'end';
+  /** 锚点在全文中的字符偏移 */
+  anchorOffset: number;
+  /** 锚点字符串长度 */
+  anchorLength: number;
+  /** 锚点所在行号（0-based） */
+  anchorLine: number;
+}
+
+/**
+ * 解析 Block 双锚点标注
+ * 格式：%%markvault-block:<uuid>:<type>:<color>:start:<note>%% ... %%markvault-block:<uuid>:...:end:<note>%%
+ */
+export function parseBlockDoubleAnchors(content: string): ParsedBlockDoubleAnchor[] {
+  const results: ParsedBlockDoubleAnchor[] = [];
+  let match: RegExpExecArray | null;
+
+  BLOCK_DOUBLE_ANCHOR_REGEX.lastIndex = 0;
+  while ((match = BLOCK_DOUBLE_ANCHOR_REGEX.exec(content)) !== null) {
+    const anchorOffset = match.index;
+    const anchorLength = match[0].length;
+    const lineCount = content.substring(0, anchorOffset).split('\n').length;
+    results.push({
+      uuid: match[1],
+      type: match[2] as AnnotationType,
+      color: match[3],
+      note: decodeBlockAnchorField(match[5]),
+      position: match[4] as 'start' | 'end',
+      anchorOffset,
+      anchorLength,
+      anchorLine: lineCount - 1,
+    });
+  }
+
+  return results;
+}
+
+/** Block 双锚点范围定位结果 */
+export interface BlockDoubleAnchorRange {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  note: string;
+  startAnchorOffset: number;
+  startAnchorEnd: number;
+  endAnchorOffset: number;
+  endAnchorEnd: number;
+  contentStart: number;
+  contentEnd: number;
+  text: string;
+  startLine: number;
+  endLine: number;
+  targetLine: number;
+  anchorLine: number;
+}
+
+/**
+ * 在文档中查找指定 uuid 的 Block 双锚点范围
+ */
+export function findBlockDoubleAnchorRange(content: string, uuid: string): BlockDoubleAnchorRange | null {
+  const matches = parseBlockDoubleAnchors(content);
+  const startMatch = matches.find(m => m.uuid === uuid && m.position === 'start');
+  if (!startMatch) return null;
+
+  const endMatch = matches.find(m => m.uuid === uuid && m.position === 'end' && m.anchorOffset > startMatch.anchorOffset);
+  if (!endMatch) return null;
+
+  const lines = content.split('\n');
+  const targetLine = findBlockTargetLine(content, startMatch.anchorLine);
+  const endLine = findBlockContentEndLine(content, endMatch.anchorLine);
+
+  return {
+    uuid,
+    type: startMatch.type,
+    color: startMatch.color,
+    note: startMatch.note,
+    startAnchorOffset: startMatch.anchorOffset,
+    startAnchorEnd: startMatch.anchorOffset + startMatch.anchorLength,
+    endAnchorOffset: endMatch.anchorOffset,
+    endAnchorEnd: endMatch.anchorOffset + endMatch.anchorLength,
+    contentStart: startMatch.anchorOffset + startMatch.anchorLength,
+    contentEnd: endMatch.anchorOffset,
+    text: lines.slice(targetLine, endLine + 1).join('\n'),
+    startLine: targetLine,
+    endLine,
+    targetLine,
+    anchorLine: startMatch.anchorLine,
+  };
+}
+
+/**
+ * 给定 end 锚点所在行号，向前扫描找到目标块内容的真实结束行号。
+ * 跳过：空行、其它锚点行、代码/公式围栏分隔符。
+ */
+export function findBlockContentEndLine(content: string, endLine: number): number {
+  const lines = content.split('\n');
+  let actualEndLine = endLine - 1;
+
+  for (let i = endLine - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (
+      trimmed.startsWith('%%markvault') ||
+      trimmed === '$$' ||
+      trimmed === '$$$' ||
+      trimmed.startsWith('```') ||
+      trimmed === ''
+    ) {
+      actualEndLine = i - 1;
+      continue;
+    }
+    actualEndLine = i;
+    break;
+  }
+
+  return Math.max(0, actualEndLine);
+}
+
 /** 块级锚点解析结果 */
 export interface ParsedBlockAnchor {
   uuid: string;
@@ -506,8 +665,18 @@ export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
 
 /**
  * 从 Markdown 内容中移除指定 uuid 的块级锚点
+ * 优先尝试新的双锚点格式，找不到则回退到旧单锚点格式。
  */
 export function removeBlockAnchor(content: string, uuid: string): string {
+  const doubleRange = findBlockDoubleAnchorRange(content, uuid);
+  if (doubleRange) {
+    return (
+      content.substring(0, doubleRange.startAnchorOffset) +
+      content.substring(doubleRange.startAnchorEnd, doubleRange.endAnchorOffset) +
+      content.substring(doubleRange.endAnchorEnd)
+    );
+  }
+
   // 🔧 P1 修复：使用非贪婪匹配，避免 note 中包含 % 时截断
   const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:[\\s\\S]*?%%\\n?`, 'g');
   return content.replace(regex, '');
@@ -539,6 +708,7 @@ export function removeAnyAnchor(content: string, uuid: string, kind?: string): s
 
 /**
  * 更新 Markdown 内容中指定 uuid 的块级锚点属性
+ * 优先尝试新的双锚点格式，找不到则回退到旧单锚点格式。
  */
 export function updateBlockAnchor(
   content: string,
@@ -549,6 +719,22 @@ export function updateBlockAnchor(
     note: string;
   }>,
 ): string {
+  const range = findBlockDoubleAnchorRange(content, uuid);
+  if (range) {
+    const type = updates.type || range.type;
+    const color = updates.color || range.color;
+    const note = updates.note !== undefined ? updates.note : range.note;
+    const startAnchor = buildBlockAnchorStart({ uuid, type, color, note });
+    const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note });
+    return (
+      content.substring(0, range.startAnchorOffset) +
+      startAnchor +
+      content.substring(range.startAnchorEnd, range.endAnchorOffset) +
+      endAnchor +
+      content.substring(range.endAnchorEnd)
+    );
+  }
+
   // 🔧 修复：支持无 note 段的格式 %%markvault:uuid:type:color%%
   const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^%]*))?%%`);
 
@@ -609,6 +795,33 @@ export function updateAnyAnchor(
 }
 
 /**
+ * 给定锚点所在行号，向前扫描找到目标块的实际起始行号。
+ * 跳过：空行、其它锚点行、代码/公式围栏分隔符。
+ * 用于创建/渲染时动态定位目标块，避免依赖可能过期的 targetLine。
+ */
+export function findBlockTargetLine(content: string, anchorLine: number): number {
+  const lines = content.split('\n');
+  const targetLine = anchorLine + 1;
+  let actualTargetLine = targetLine;
+
+  for (let i = targetLine; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('%%markvault') || trimmed === '$$' || trimmed === '$$$' || trimmed.startsWith('```')) {
+      actualTargetLine = i + 1;
+      continue;
+    }
+    if (trimmed === '') {
+      actualTargetLine = i + 1;
+      continue;
+    }
+    actualTargetLine = i;
+    break;
+  }
+
+  return actualTargetLine;
+}
+
+/**
  * 从 Markdown 内容解析所有标注（包括行内 <mark> 和块级/span 锚点）
  * 统一入口，供 markdown-sync.ts 使用
  */
@@ -624,27 +837,8 @@ export function parseAllAnnotationsFromMarkdown(
   const blockAnnotations: Array<Annotation & { _source: 'markdown' }> = blockAnchors.map(anchor => {
     // 🔧 修复：跳过锚点行、公式分隔符、代码围栏，找到有意义的内容行
     const lines = content.split('\n');
-    const targetLine = anchor.anchorLine + 1; // 锚点下一行是目标块的起始
-    let blockContent = '';
-    let actualTargetLine = targetLine;
-
-    // 向前扫描，跳过非内容行
-    for (let i = targetLine; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      if (trimmed.startsWith('%%markvault') || trimmed === '$$' || trimmed === '$$$' || trimmed.startsWith('```')) {
-        actualTargetLine = i + 1;
-        continue;
-      }
-      // 跳过空行（但记录，因为后面可能需要空行分隔）
-      if (trimmed === '') {
-        actualTargetLine = i + 1;
-        continue;
-      }
-      // 找到第一个有意义的内容行
-      blockContent = trimmed;
-      actualTargetLine = i;
-      break;
-    }
+    const actualTargetLine = findBlockTargetLine(content, anchor.anchorLine);
+    const blockContent = lines[actualTargetLine]?.trim() || '';
 
     const isSpan = anchor.anchorKind === 'span';
 
@@ -693,10 +887,58 @@ export function parseAllAnnotationsFromMarkdown(
     };
   });
 
-  // 3. 区域标注（双锚点包围）
+  // 3. Block 双锚点标注
+  const doubleBlockAnchors = parseBlockDoubleAnchors(content);
+  const doubleByUuid = new Map<string, { start?: ParsedBlockDoubleAnchor; end?: ParsedBlockDoubleAnchor }>();
+  for (const anchor of doubleBlockAnchors) {
+    const entry = doubleByUuid.get(anchor.uuid) || {};
+    if (anchor.position === 'start') {
+      if (!entry.start) entry.start = anchor;
+    } else {
+      if (!entry.end) entry.end = anchor;
+    }
+    doubleByUuid.set(anchor.uuid, entry);
+  }
+
+  for (const [uuid, entry] of doubleByUuid.entries()) {
+    if (!entry.start || !entry.end) continue;
+
+    const lines = content.split('\n');
+    const targetLine = findBlockTargetLine(content, entry.start.anchorLine);
+    const endLine = findBlockContentEndLine(content, entry.end.anchorLine);
+    const blockType = detectBlockTypeAtLine(lines, targetLine);
+    const blockContent = lines.slice(targetLine, endLine + 1).join('\n');
+    const targetHash = computeBlockSignature(lines, targetLine, blockType) || computeSpanSignature(blockContent);
+
+    blockAnnotations.push({
+      uuid,
+      filePath,
+      type: entry.start.type,
+      color: entry.start.color,
+      text: blockContent,
+      note: entry.start.note,
+      tags: [],
+      startOffset: entry.start.anchorOffset,
+      endOffset: entry.end.anchorOffset + entry.end.anchorLength,
+      startLine: targetLine,
+      endLine,
+      contextBefore: '',
+      contextAfter: '',
+      createdAt: 0,
+      updatedAt: 0,
+      kind: 'block' as const,
+      blockType,
+      targetLine,
+      anchorLine: entry.start.anchorLine,
+      targetHash,
+      _source: 'markdown' as const,
+    });
+  }
+
+  // 4. 区域标注（双锚点包围）
   const regionAnnotations = parseRegionAnnotations(content, filePath);
 
-  // 4. 自然语法标注（隐身锚点 + 原生包裹）
+  // 5. 自然语法标注（隐身锚点 + 原生包裹）
   const nativeAnnotations = parseNativeAnnotations(content, filePath);
 
   return [...inlineAnnotations, ...blockAnnotations, ...regionAnnotations, ...nativeAnnotations];

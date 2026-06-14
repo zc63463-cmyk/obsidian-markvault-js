@@ -200,6 +200,30 @@
   cursor: pointer;
 }
 
+/* Region 编辑模式淡淡背景（只覆盖文本，不覆盖整行） */
+.markvault-region-edit-bg {
+  border-radius: 2px;
+}
+
+.markvault-region-edit-bg.markvault-region-yellow  { background-color: #FACC151A; }
+.markvault-region-edit-bg.markvault-region-green   { background-color: #4ADE801A; }
+.markvault-region-edit-bg.markvault-region-blue    { background-color: #60A5FA1A; }
+.markvault-region-edit-bg.markvault-region-pink    { background-color: #F472B61A; }
+.markvault-region-edit-bg.markvault-region-purple  { background-color: #C084FC1A; }
+
+/* Region 编辑模式块级内容标识（代码块/公式块左侧竖线） */
+.markvault-region-block-line {
+  border-left-width: 3px;
+  border-left-style: solid;
+  background-color: transparent !important;
+}
+
+.markvault-region-block-line.markvault-region-yellow  { border-left-color: #FACC15; }
+.markvault-region-block-line.markvault-region-green   { border-left-color: #4ADE80; }
+.markvault-region-block-line.markvault-region-blue    { border-left-color: #60A5FA; }
+.markvault-region-block-line.markvault-region-pink    { border-left-color: #F472B6; }
+.markvault-region-block-line.markvault-region-purple  { border-left-color: #C084FC; }
+
 /* Region 标注类型徽章（右上角小 pill） */
 .markvault-region-type-badge {
   position: absolute;
@@ -1303,7 +1327,14 @@
 .markvault-block-highlight.markvault-block-pink   { border-left: 3px solid #F472B6; }
 .markvault-block-highlight.markvault-block-purple { border-left: 3px solid #C084FC; }
 
-/* Highlight block：hover 时显示淡背景 */
+/* Highlight block：默认淡背景，与编辑模式视觉一致 */
+.markvault-block-mark.markvault-block-highlight.markvault-block-yellow { background-color: #FACC151A; }
+.markvault-block-mark.markvault-block-highlight.markvault-block-green  { background-color: #4ADE801A; }
+.markvault-block-mark.markvault-block-highlight.markvault-block-blue   { background-color: #60A5FA1A; }
+.markvault-block-mark.markvault-block-highlight.markvault-block-pink   { background-color: #F472B61A; }
+.markvault-block-mark.markvault-block-highlight.markvault-block-purple { background-color: #C084FC1A; }
+
+/* Highlight block：hover 时加深背景 */
 .markvault-block-mark.markvault-block-highlight.markvault-block-yellow:hover { background-color: #FACC1522; }
 .markvault-block-mark.markvault-block-highlight.markvault-block-green:hover  { background-color: #4ADE8022; }
 .markvault-block-mark.markvault-block-highlight.markvault-block-blue:hover   { background-color: #60A5FA22; }

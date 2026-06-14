@@ -2,7 +2,7 @@ import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext 
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
 import { DEFAULT_SETTINGS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
-import { registerContextMenu, registerCommands } from './ui/editor/context-menu';
+import { registerContextMenu, registerCommands, getBlockAnchorPrefixesForListItem, adjustRegionStartOffsetForListItem, adjustRegionEndOffsetForListItem } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
 import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from './core/markdown-sync';
 import {
@@ -12,8 +12,20 @@ import {
   findSpanLineBySignature,
   detectBlockTypeAtLine,
 } from './core/block-fingerprint';
-import { parseBlockAnchors, computeSpanRanges, findSpanEndLine } from './core/annotation-parser';
-import { scanMarkdownContexts } from './core/md-context';
+import {
+  parseBlockAnchors,
+  parseBlockDoubleAnchors,
+  findBlockDoubleAnchorRange,
+  findBlockTargetLine,
+  findBlockContentEndLine,
+  computeSpanRanges,
+  findSpanEndLine,
+  buildMarkTag,
+  buildBlockAnchorStart,
+  buildBlockAnchorEnd,
+  buildSpanAnchor,
+} from './core/annotation-parser';
+import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from './core/md-context';
 import { markdownToPlainWithMap } from './core/markdown-plain';
 import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, requestRegionLayerRedraw } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
@@ -23,7 +35,7 @@ import { initAnnotationStore, annotationStore } from './db/annotation-store';
 import { addAnnotation, getAnnotationByUuid } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
-import { buildMarkTag, buildBlockAnchor, buildSpanAnchor } from './core/annotation-parser';
+
 import { buildNativeAnnotation } from './core/native-annotation';
 import { buildRegionAnchor, parseRegionAnnotations, REGION_ANCHOR_REGEX } from './core/region-annotation';
 import { computeSignature } from './core/block-fingerprint';
@@ -32,7 +44,6 @@ import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData,
 import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeToolbar } from './ui/reading/ReadingModeToolbar';
 import { ReadingModeClickDelegate } from './ui/reading/ReadingModeClickDelegate';
-import { ReadingModeContextMenu } from './ui/reading/ReadingModeContextMenu';
 
 export default class MarkVaultPlugin extends Plugin {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
@@ -64,7 +75,6 @@ export default class MarkVaultPlugin extends Plugin {
   // 🆕 阅读模式相关模块
   private readingToolbar: ReadingModeToolbar | null = null;
   private readingClickDelegate: ReadingModeClickDelegate | null = null;
-  private readingContextMenu: ReadingModeContextMenu | null = null;
 
   // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
   // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
@@ -607,7 +617,7 @@ export default class MarkVaultPlugin extends Plugin {
           // 检测 %%markvault:uuid:type:color:note%% 注释锚点
           // Obsidian 会将 %%...%% 注释渲染为特殊的 comment 节点
           // 我们需要在渲染后的 DOM 中找到这些锚点，给下方的块添加装饰
-          await this.processBlockAnchors(el, ctx.sourcePath);
+          await this.processBlockAnchors(el, ctx);
 
           // 🆕 v3.x: 处理区域标注（双锚点包围）
           await this.processRegionAnnotations(el, ctx);
@@ -645,8 +655,7 @@ export default class MarkVaultPlugin extends Plugin {
       this.readingToolbar = new ReadingModeToolbar(this, readingHost);
       this.readingToolbar.setup();
 
-      this.readingContextMenu = new ReadingModeContextMenu(this, readingHost);
-      this.readingContextMenu.setup();
+      // 阅读模式右键竖排菜单已移除：功能与浮动工具条重复。
     } catch (err) {
       console.error('MarkVault: failed to register reading mode toolbar/context menu', err);
     }
@@ -658,7 +667,6 @@ export default class MarkVaultPlugin extends Plugin {
     console.log('MarkVault: unloading plugin');
     try {
       this.readingToolbar?.destroy();
-      this.readingContextMenu?.destroy?.();
       this.readingClickDelegate?.destroy();
       this.modifyGuard.releaseAll();
       await annotationStore.shutdown();
@@ -851,17 +859,49 @@ export default class MarkVaultPlugin extends Plugin {
         const lines = content.split('\n');
         const anchors = parseBlockAnchors(content);
         const anchorByUuid = new Map(anchors.map((a) => [a.uuid, a]));
+        const doubleRanges = new Map<string, ReturnType<typeof findBlockDoubleAnchorRange>>();
+        for (const ann of blockSpanAnnotations) {
+          if (ann.kind !== 'block') continue;
+          const range = findBlockDoubleAnchorRange(content, ann.uuid);
+          if (range) doubleRanges.set(ann.uuid, range);
+        }
 
         for (const ann of blockSpanAnnotations) {
           const anchor = anchorByUuid.get(ann.uuid);
-          if (!anchor) {
+          const doubleRange = doubleRanges.get(ann.uuid);
+
+          if (!anchor && !doubleRange) {
             // Markdown 中已找不到该锚点，无法自动恢复
             failed++;
             continue;
           }
 
           if (ann.kind === 'block') {
-            const preferredLine = ann.targetLine ?? anchor.anchorLine + 1;
+            // 优先使用新的双锚点范围进行精确恢复
+            if (doubleRange) {
+              const changed =
+                doubleRange.targetLine !== ann.targetLine ||
+                doubleRange.anchorLine !== ann.anchorLine ||
+                doubleRange.startLine !== ann.startLine ||
+                doubleRange.endLine !== ann.endLine ||
+                doubleRange.text !== ann.text;
+              if (changed) {
+                await annotationStore.updateAnnotation(ann.uuid, {
+                  targetLine: doubleRange.targetLine,
+                  anchorLine: doubleRange.anchorLine,
+                  startLine: doubleRange.startLine,
+                  endLine: doubleRange.endLine,
+                  text: doubleRange.text,
+                  blockType: ann.blockType || detectBlockTypeAtLine(lines, doubleRange.targetLine),
+                  targetHash: computeBlockSignature(lines, doubleRange.targetLine, ann.blockType) || computeSignature(doubleRange.text),
+                });
+                blocksRecovered++;
+              }
+              continue;
+            }
+
+            // 旧单锚点恢复逻辑
+            const preferredLine = ann.targetLine ?? anchor!.anchorLine + 1;
             const currentSig = computeBlockSignature(lines, preferredLine, ann.blockType);
 
             if (ann.targetHash && currentSig && currentSig !== ann.targetHash) {
@@ -874,7 +914,7 @@ export default class MarkVaultPlugin extends Plugin {
               if (foundLine !== null) {
                 await annotationStore.updateAnnotation(ann.uuid, {
                   targetLine: foundLine,
-                  anchorLine: anchor.anchorLine,
+                  anchorLine: anchor!.anchorLine,
                   blockType: ann.blockType || detectBlockTypeAtLine(lines, foundLine),
                 });
                 blocksRecovered++;
@@ -883,13 +923,13 @@ export default class MarkVaultPlugin extends Plugin {
               }
             } else {
               // 指纹一致或没有指纹，仅同步 anchorLine
-              if (anchor.anchorLine !== ann.anchorLine) {
-                await annotationStore.updateAnnotation(ann.uuid, { anchorLine: anchor.anchorLine });
+              if (anchor!.anchorLine !== ann.anchorLine) {
+                await annotationStore.updateAnnotation(ann.uuid, { anchorLine: anchor!.anchorLine });
               }
             }
           } else if (ann.kind === 'span') {
             // 跳过锚点行、空行、特殊围栏，找到 span 实际内容起始行
-            let actualTargetLine = anchor.anchorLine + 1;
+            let actualTargetLine = anchor!.anchorLine + 1;
             for (let i = actualTargetLine; i < lines.length; i++) {
               const trimmed = lines[i].trim();
               if (
@@ -929,13 +969,13 @@ export default class MarkVaultPlugin extends Plugin {
               const newSpanRanges = computeSpanRanges(content, actualTargetLine, fullSpanText);
               const changed =
                 actualTargetLine !== ann.targetLine ||
-                anchor.anchorLine !== ann.anchorLine ||
+                anchor!.anchorLine !== ann.anchorLine ||
                 JSON.stringify(newSpanRanges) !== JSON.stringify(ann.spanRanges);
 
               if (changed) {
                 await annotationStore.updateAnnotation(ann.uuid, {
                   targetLine: actualTargetLine,
-                  anchorLine: anchor.anchorLine,
+                  anchorLine: anchor!.anchorLine,
                   spanRanges: newSpanRanges,
                 });
                 spansRecovered++;
@@ -1058,17 +1098,24 @@ export default class MarkVaultPlugin extends Plugin {
 
   /**
    * 处理块级锚点标注的阅读模式渲染
-   * Obsidian 将 %%markvault:uuid:type:color:note%% 渲染为注释节点
-   * 我们需要找到这些节点，给下一个兄弟元素添加装饰样式
-   * 同时处理 %%markvault-span:uuid:type:color:note%% 格式的 span 锚点
+   * 支持三种锚点格式：
+   * - %%markvault:uuid:type:color:note%%         旧单锚点 block
+   * - %%markvault-span:uuid:type:color:note%%    span
+   * - %%markvault-block:uuid:type:color:start|end:note%%  新双锚点 block
+   *
+   * 对单锚点和双锚点的 start 锚点，找到其后第一个内容块并添加装饰样式。
    */
-  private async processBlockAnchors(el: HTMLElement, sourcePath: string): Promise<void> {
+  private async processBlockAnchors(el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> {
+    const sourcePath = ctx.sourcePath;
     // Obsidian 将 %%...%% 注释渲染为：
     //   - COMMENT_NODE（不可见，理想情况）
     //   - ELEMENT_NODE（可见，需要手动隐藏）
     // 遍历所有节点查找 markvault 锚点
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT | NodeFilter.SHOW_ELEMENT);
     const anchorNodes: { uuid: string; type: string; color: string; note: string; node: Node; anchorKind: 'block' | 'span' }[] = [];
+    const doubleAnchors = new Map<string, { start?: Node; end?: Node; type: string; color: string; note: string }>();
+
+    const decodeNote = (raw: string) => raw.replace(/\\p/g, '%').replace(/\\c/g, ':');
 
     let currentNode: Node | null;
     while ((currentNode = walker.nextNode())) {
@@ -1098,6 +1145,19 @@ export default class MarkVaultPlugin extends Plugin {
             node: currentNode,
             anchorKind: 'span',
           });
+        }
+        // 双锚点 block 格式：markvault-block:uuid:type:color:start|end:note
+        const doubleMatch = text.match(/^markvault-block:([^:]+):([^:]+):([^:]+):(start|end):?([\s\S]*)$/);
+        if (doubleMatch) {
+          const uuid = doubleMatch[1];
+          const entry = doubleAnchors.get(uuid) || {
+            type: doubleMatch[2],
+            color: doubleMatch[3],
+            note: doubleMatch[5] ? decodeNote(doubleMatch[5]) : '',
+          };
+          if (doubleMatch[4] === 'start') entry.start = currentNode;
+          else entry.end = currentNode;
+          doubleAnchors.set(uuid, entry);
         }
       } else if (currentNode.nodeType === Node.ELEMENT_NODE) {
         // 检查是否有 Obsidian 的 comment 类名
@@ -1132,66 +1192,460 @@ export default class MarkVaultPlugin extends Plugin {
             node: currentNode,
             anchorKind: 'span',
           });
+          continue;
+        }
+        // 双锚点 block 格式
+        const doubleMatch = text.match(/^%%markvault-block:([^:]+):([^:]+):([^:]+):(start|end):?([\s\S]*)%%$/);
+        if (doubleMatch) {
+          const uuid = doubleMatch[1];
+          const entry = doubleAnchors.get(uuid) || {
+            type: doubleMatch[2],
+            color: doubleMatch[3],
+            note: doubleMatch[5] ? decodeNote(doubleMatch[5]) : '',
+          };
+          if (doubleMatch[4] === 'start') entry.start = currentNode;
+          else entry.end = currentNode;
+          doubleAnchors.set(uuid, entry);
+          // 可见锚点需要隐藏
+          htmlEl.style.display = 'none';
+          htmlEl.addClass('markvault-anchor-hidden');
+          continue;
         }
       }
     }
 
-    // 给锚点下方的元素添加装饰
+    // 给 span 锚点下方的元素添加装饰（block 改走源码行号映射，避免 DOM 偏移）
     for (const anchor of anchorNodes) {
-      // 🔧 修复 Bug 1: 隐藏锚点节点本身，防止 UUID 暴露
+      // 隐藏锚点节点本身，防止 UUID 暴露
       if (anchor.node.nodeType === Node.ELEMENT_NODE) {
         const anchorEl = anchor.node as HTMLElement;
         anchorEl.style.display = 'none';
         anchorEl.addClass('markvault-anchor-hidden');
       }
 
-      // 🔧 修复 Bug 2: 改进下一个兄弟元素查找
-      // Obsidian DOM 中锚点和目标元素之间可能有空白文本节点，
-      // 也可能锚点在 <p> 内而目标在下一个 <p> 中
-      const targetEl = this.findNextContentElement(anchor.node);
-
-      if (targetEl) {
-        targetEl.addClass('markvault-block-mark');
-        targetEl.addClass(`markvault-block-${anchor.type}`);
-        targetEl.addClass(`markvault-block-${anchor.color}`);
-        targetEl.style.cursor = 'pointer';
-        targetEl.dataset.uuid = anchor.uuid;
-
-        // span 标注的视觉标记
-        if (anchor.anchorKind === 'span') {
-          targetEl.addClass('markvault-span-mark');
-          // 异步高亮 span 范围内的文本片段
-          this.highlightSpanFragments(targetEl, anchor.uuid, anchor.type, anchor.color, sourcePath).catch((err) => {
-            console.error('MarkVault: failed to highlight span fragments', err);
-          });
-        }
-
-        // 块级标注类型徽章（右上角小 pill）
-        if (anchor.anchorKind === 'block') {
-          const typeIcon = anchor.type === 'bold' ? '𝗕' : anchor.type === 'underline' ? 'U̲' : '🎨';
-          const badge = document.createElement('span');
-          badge.className = `markvault-block-type-badge markvault-block-badge-type-${anchor.type} markvault-block-badge-color-${anchor.color}`;
-          const iconSpan = document.createElement('span');
-          iconSpan.className = 'markvault-block-type-badge-icon';
-          iconSpan.textContent = typeIcon;
-          const dot = document.createElement('span');
-          dot.className = 'markvault-block-type-badge-dot';
-          badge.appendChild(iconSpan);
-          badge.appendChild(dot);
-          targetEl.style.position = 'relative';
-          targetEl.appendChild(badge);
-        }
-
-        if (anchor.note) {
-          const indicator = document.createElement('span');
-          indicator.className = 'markvault-block-note-indicator';
-          indicator.textContent = '📝';
-          indicator.title = anchor.note;
-          targetEl.style.position = 'relative';
-          targetEl.appendChild(indicator);
+      // span 仍使用 DOM 下一个内容元素；block 统一按源码行号映射
+      if (anchor.anchorKind === 'span') {
+        const targetEl = this.findNextContentElement(anchor.node);
+        if (targetEl) {
+          this.applyBlockDecoration(targetEl, anchor.uuid, anchor.type, anchor.color, anchor.note, anchor.anchorKind, sourcePath);
         }
       }
     }
+
+    // 处理 block 锚点（旧单锚点 + 新双锚点）：统一按源码行号映射到当前 section 的叶子块。
+    // 即使 Obsidian 把 %%...%% 注释剥离，也能正确高亮。
+    const decoratedUuids = await this.applyBlockDecorationsFromSource(el, ctx, sourcePath);
+
+    // 安全网：源码行号映射未覆盖的 block 锚点，回退到 DOM 下一个内容元素
+    for (const anchor of anchorNodes) {
+      if (anchor.anchorKind === 'block' && !decoratedUuids.has(anchor.uuid)) {
+        const targetEl = this.findNextContentElement(anchor.node);
+        if (targetEl) {
+          this.applyBlockDecoration(targetEl, anchor.uuid, anchor.type, anchor.color, anchor.note, 'block', sourcePath);
+        }
+      }
+    }
+    for (const [uuid, entry] of doubleAnchors.entries()) {
+      if (entry.start && !decoratedUuids.has(uuid)) {
+        const targetEl = this.findNextContentElement(entry.start);
+        if (targetEl) {
+          this.applyBlockDecoration(targetEl, uuid, entry.type, entry.color, entry.note, 'block', sourcePath);
+        }
+      }
+    }
+  }
+
+  /**
+   * 给阅读模式下的目标块元素添加 block/span 装饰、徽章与批注指示器
+   */
+  private applyBlockDecoration(
+    targetEl: HTMLElement,
+    uuid: string,
+    type: string,
+    color: string,
+    note: string,
+    anchorKind: 'block' | 'span',
+    sourcePath: string,
+  ): void {
+    targetEl.addClass('markvault-block-mark');
+    targetEl.addClass(`markvault-block-${type}`);
+    targetEl.addClass(`markvault-block-${color}`);
+    targetEl.style.cursor = 'pointer';
+    targetEl.dataset.uuid = uuid;
+
+    if (anchorKind === 'span') {
+      targetEl.addClass('markvault-span-mark');
+      this.highlightSpanFragments(targetEl, uuid, type, color, sourcePath).catch((err) => {
+        console.error('MarkVault: failed to highlight span fragments', err);
+      });
+    }
+
+    if (anchorKind === 'block') {
+      const typeIcon = type === 'bold' ? '𝗕' : type === 'underline' ? 'U̲' : '🎨';
+      const badge = document.createElement('span');
+      badge.className = `markvault-block-type-badge markvault-block-badge-type-${type} markvault-block-badge-color-${color}`;
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'markvault-block-type-badge-icon';
+      iconSpan.textContent = typeIcon;
+      const dot = document.createElement('span');
+      dot.className = 'markvault-block-type-badge-dot';
+      badge.appendChild(iconSpan);
+      badge.appendChild(dot);
+      targetEl.style.position = 'relative';
+      targetEl.appendChild(badge);
+    }
+
+    if (note) {
+      const indicator = document.createElement('span');
+      indicator.className = 'markvault-block-note-indicator';
+      indicator.textContent = '📝';
+      indicator.title = note;
+      targetEl.style.position = 'relative';
+      targetEl.appendChild(indicator);
+    }
+  }
+
+  /**
+   * 判断 a 是否在 b 之前（按文档顺序）
+   */
+  private isNodeBefore(a: Node, b: Node): boolean {
+    const position = a.compareDocumentPosition(b);
+    return (position & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  }
+
+  /**
+   * 从源码行号映射，给当前 section 内的 block 锚点（旧单锚点 + 新双锚点）
+   * 添加阅读模式装饰。即使 Obsidian 把 %%...%% 注释剥离，也能正确高亮。
+   */
+  private async applyBlockDecorationsFromSource(
+    el: HTMLElement,
+    ctx: MarkdownPostProcessorContext,
+    sourcePath: string,
+  ): Promise<Set<string>> {
+    const decorated = new Set<string>();
+    const info = ctx.getSectionInfo(el);
+    if (!info) return decorated;
+
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile)) return decorated;
+
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const lines = content.split('\n');
+      const sectionStart = info.lineStart;
+      const sectionEnd = info.lineEnd;
+
+      interface BlockAnchorMatch {
+        uuid: string;
+        type: string;
+        color: string;
+        note: string;
+        startLine: number;
+        endLine: number;
+      }
+      const matches: BlockAnchorMatch[] = [];
+
+      // 旧单锚点 %%markvault:uuid:type:color:note%%
+      // 整篇扫描：锚点可能在目标块之前的 section 里（如列表首项）
+      const oldRegex = /^%%markvault:([^:%]+):([^:%]+):([^:%]+):([^%]*)%%$/;
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].trim().match(oldRegex);
+        if (!m) continue;
+        const targetLine = findBlockTargetLine(content, i);
+        if (targetLine > sectionEnd || targetLine < sectionStart) continue;
+        matches.push({
+          uuid: m[1],
+          type: m[2],
+          color: m[3],
+          note: m[4].replace(/\\c/g, ':').replace(/\\p/g, '%'),
+          startLine: targetLine,
+          endLine: targetLine,
+        });
+      }
+
+      // 新双锚点 %%markvault-block:uuid:type:color:start|end:note%%
+      // 整篇扫描；只要目标区间与当前 section 有重叠就处理
+      const doubleAnchors = parseBlockDoubleAnchors(content);
+      const doubleByUuid = new Map<string, { start?: typeof doubleAnchors[0]; end?: typeof doubleAnchors[0] }>();
+      for (const a of doubleAnchors) {
+        const entry = doubleByUuid.get(a.uuid) || {};
+        if (a.position === 'start') {
+          if (!entry.start) entry.start = a;
+        } else {
+          if (!entry.end) entry.end = a;
+        }
+        doubleByUuid.set(a.uuid, entry);
+      }
+      for (const [uuid, entry] of doubleByUuid.entries()) {
+        if (!entry.start) continue;
+        const startLine = findBlockTargetLine(content, entry.start.anchorLine);
+        const endLine = entry.end ? findBlockContentEndLine(content, entry.end.anchorLine) : startLine;
+        if (endLine < startLine) continue;
+        if (endLine < sectionStart || startLine > sectionEnd) continue;
+        matches.push({
+          uuid,
+          type: entry.start.type,
+          color: entry.start.color,
+          note: entry.start.note,
+          startLine,
+          endLine,
+        });
+      }
+
+      if (matches.length === 0) return decorated;
+
+      const leafBlocks = this.collectLeafBlocks(el);
+      if (leafBlocks.length === 0) return decorated;
+
+      const blockStarts = this.computeBlockStarts(lines, sectionStart, sectionEnd);
+
+      // 🔧 DEBUG: 打印当前 section 的映射关系
+      console.log('[MarkVault DEBUG] applyBlockDecorationsFromSource', {
+        sourcePath,
+        sectionStart,
+        sectionEnd,
+        blockStarts,
+        leafBlocks: leafBlocks.map(b => ({ tag: b.tagName, text: (b.textContent ?? '').slice(0, 60).replace(/\n/g, '\\n') })),
+        matches: matches.map(m => ({ uuid: m.uuid, startLine: m.startLine, endLine: m.endLine })),
+      });
+
+      for (const match of matches) {
+        // 收集所有 blockStart 落在 [startLine, endLine] 区间内的叶子块
+        const targetIndices: number[] = [];
+        for (let i = 0; i < blockStarts.length; i++) {
+          const absLine = sectionStart + blockStarts[i];
+          if (absLine >= match.startLine && absLine <= match.endLine) {
+            targetIndices.push(i);
+          }
+        }
+        if (targetIndices.length > 0) {
+          decorated.add(match.uuid);
+        }
+
+        // 找不到精确区间时，退而求其次：找最近的前一个块
+        if (targetIndices.length === 0) {
+          let nearest = -1;
+          for (let i = 0; i < blockStarts.length; i++) {
+            if (sectionStart + blockStarts[i] <= match.startLine) {
+              nearest = i;
+            } else {
+              break;
+            }
+          }
+          if (nearest !== -1) targetIndices.push(nearest);
+        }
+
+        console.log('[MarkVault DEBUG] decorate uuid', match.uuid, 'targetIndices', targetIndices, 'targetElements',
+          targetIndices.map(i => leafBlocks[i]?.tagName + ':' + (leafBlocks[i]?.textContent ?? '').slice(0, 40).replace(/\n/g, '\\n')));
+
+        for (let k = 0; k < targetIndices.length; k++) {
+          const idx = targetIndices[k];
+          const targetEl = leafBlocks[idx];
+          if (!targetEl) continue;
+
+          targetEl.addClass('markvault-block-mark');
+          targetEl.addClass(`markvault-block-${match.type}`);
+          targetEl.addClass(`markvault-block-${match.color}`);
+          targetEl.style.cursor = 'pointer';
+          targetEl.dataset.uuid = match.uuid;
+
+          // 仅在第一个目标块上添加徽章和批注指示器，
+          // 避免跨多个 <li>/段落 的块出现多个重叠徽章。
+          if (k === 0) {
+            const typeIcon = match.type === 'bold' ? '𝗕' : match.type === 'underline' ? 'U̲' : '🎨';
+            const badge = document.createElement('span');
+            badge.className = `markvault-block-type-badge markvault-block-badge-type-${match.type} markvault-block-badge-color-${match.color}`;
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'markvault-block-type-badge-icon';
+            iconSpan.textContent = typeIcon;
+            const dot = document.createElement('span');
+            dot.className = 'markvault-block-type-badge-dot';
+            badge.appendChild(iconSpan);
+            badge.appendChild(dot);
+            targetEl.style.position = 'relative';
+            targetEl.appendChild(badge);
+
+            if (match.note) {
+              const indicator = document.createElement('span');
+              indicator.className = 'markvault-block-note-indicator';
+              indicator.textContent = '📝';
+              indicator.title = match.note;
+              targetEl.style.position = 'relative';
+              targetEl.appendChild(indicator);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('MarkVault: block decoration from source failed', err);
+    }
+    return decorated;
+  }
+
+  /**
+   * 收集当前 section 内可作为块级标注目标的叶子块元素（按文档顺序）。
+   * <li> / .callout 被视为叶子，避免整个列表/Callout 被染色。
+   */
+  private collectLeafBlocks(root: HTMLElement): HTMLElement[] {
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    const candidates: HTMLElement[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let node: Node | null;
+    while ((node = walker.nextNode()) !== null) {
+      const el = node as HTMLElement;
+      if (el.hasClass('markvault-anchor-hidden') || el.hasClass('markvault-leaked-anchor-hidden')) continue;
+      // 已经 inline 隐藏的锚点容器（如阅读模式尚未走到隐藏逻辑的 region 锚点）直接跳过
+      if (el.style.display === 'none') continue;
+
+      const isBlock = blockTags.has(el.tagName) || el.hasClass('callout');
+      if (!isBlock) continue;
+
+      // 跳过仅包含锚点文本的容器，避免其进入 leaf 索引导致行号映射错位
+      const text = (el.textContent ?? '').trim();
+      if (/^%%(markvault|markvault-span|markvault-region|markvault-block):/.test(text) && text.endsWith('%%')) {
+        continue;
+      }
+
+      if (el.tagName === 'LI' || el.hasClass('callout')) {
+        candidates.push(el);
+        continue;
+      }
+
+      const hasBlockChild = Array.from(el.children).some(
+        child => blockTags.has((child as HTMLElement).tagName) || (child as HTMLElement).hasClass?.('callout')
+      );
+      if (!hasBlockChild) {
+        candidates.push(el);
+      }
+    }
+
+    return candidates
+      .filter((el) => !candidates.some(other => other !== el && other.contains(el)))
+      // 过滤掉只包含隐藏锚点或完全为空的叶子块，避免行号映射时指到空段落
+      .filter((el) => (el.innerText ?? el.textContent ?? '').trim().length > 0);
+  }
+
+  /**
+   * 计算 section 内各内容块的起始行（相对于 sectionStart 的偏移）。
+   * 用于把源码行号映射到 DOM 中的第几个叶子块。
+   */
+  private computeBlockStarts(lines: string[], sectionStart: number, sectionEnd: number): number[] {
+    const starts: number[] = [];
+    let inParagraph = false;
+    let inCode = false;
+    let inCallout = false;
+    let inQuote = false;
+    let inTable = false;
+
+    for (let i = sectionStart; i <= sectionEnd && i < lines.length; i++) {
+      const raw = lines[i];
+      const line = raw.trimStart();
+      const trimmed = raw.trim();
+      const isBlank = trimmed === '';
+      const isAnchor = /^%%(markvault|markvault-span|markvault-region|markvault-block):/.test(trimmed);
+
+      if (isBlank) {
+        inParagraph = false;
+        if (!inCode) {
+          inCallout = false;
+          inQuote = false;
+          inTable = false;
+        }
+        continue;
+      }
+
+      if (isAnchor) {
+        inParagraph = false;
+        if (!inCode) {
+          inCallout = false;
+          inQuote = false;
+          inTable = false;
+        }
+        continue;
+      }
+
+      if (/^\s*```/.test(raw)) {
+        if (!inCode) {
+          starts.push(i - sectionStart);
+          inCode = true;
+        } else {
+          inCode = false;
+        }
+        inParagraph = false;
+        inCallout = false;
+        inQuote = false;
+        inTable = false;
+        continue;
+      }
+
+      if (inCode) continue;
+
+      if (/^\s*#{1,6}\s/.test(line)) {
+        starts.push(i - sectionStart);
+        inParagraph = false;
+        inCallout = false;
+        inQuote = false;
+        inTable = false;
+        continue;
+      }
+
+      if (/^\s*([-]{3,}|[*]{3,}|[_]{3,})\s*$/.test(trimmed)) {
+        starts.push(i - sectionStart);
+        inParagraph = false;
+        continue;
+      }
+
+      if (/^\s*>\s*\[!/.test(line)) {
+        starts.push(i - sectionStart);
+        inCallout = true;
+        inParagraph = false;
+        inQuote = false;
+        inTable = false;
+        continue;
+      }
+
+      if (inCallout) continue;
+
+      if (/^\s*[-*+]\s/.test(line) || /^\s*\d+\.\s/.test(line)) {
+        starts.push(i - sectionStart);
+        inParagraph = false;
+        inQuote = false;
+        inTable = false;
+        continue;
+      }
+
+      if (/^\s*>/.test(line)) {
+        if (!inQuote) starts.push(i - sectionStart);
+        inQuote = true;
+        inParagraph = false;
+        inTable = false;
+        continue;
+      }
+
+      if (inQuote) continue;
+
+      if (/^\s*\|/.test(line)) {
+        if (!inTable) starts.push(i - sectionStart);
+        inTable = true;
+        inParagraph = false;
+        continue;
+      }
+
+      if (inTable) continue;
+
+      if (!inParagraph) {
+        starts.push(i - sectionStart);
+        inParagraph = true;
+      }
+    }
+
+    return starts;
   }
 
   /**
@@ -1538,7 +1992,7 @@ export default class MarkVaultPlugin extends Plugin {
     // 🔧 关键修复：使用 [^\n]*? 替代 [^%]*，能匹配含 % 的锚点文本
     const ANCHOR_PATTERNS = [
       /%%markvault-region:[^\n]*?%%/g,          // 完整 region 锚点
-      /%%markvault(-span)?:[^\n]*?%%/g,        // 完整 block/span 锚点
+      /%%markvault(-span|-block)?:[^\n]*?%%/g,  // 完整 block/span/双锚点 block 锚点
       /%%mv:i:[^\n]*?%%/g,                     // 完整 native 锚点
       /%+markvault[^\n]*?%+/g,                 // 损坏的锚点（分隔符不完整）
     ];
@@ -1622,13 +2076,8 @@ export default class MarkVaultPlugin extends Plugin {
             child => blockTags.has(child.tagName) || (child as HTMLElement).hasClass?.('callout')
           );
           if (hasBlockChildren) {
-            // 容器块：只添加点击事件和元数据，不加背景类
-            el.addClass('markvault-clickable');
-            el.dataset.uuid = uuid;
-            el.dataset.type = type;
-            el.dataset.color = color;
-            el.style.cursor = 'pointer';
-            styledAncestors.add(el);
+            // 容器块：不在这里加样式，让 TreeWalker 继续遍历其子节点，
+            // 避免整段列表/嵌套块被染色，同时保证内部叶子块能被正确处理。
             continue;
           }
         }
@@ -2003,13 +2452,7 @@ export default class MarkVaultPlugin extends Plugin {
             c => blockTags.has(c.tagName) || (c as HTMLElement).hasClass?.('callout')
           );
           if (hasBlockChildren) {
-            // 容器块：只加点击事件，不染色
-            el.addClass('markvault-clickable');
-            el.dataset.uuid = uuid;
-            el.dataset.type = type;
-            el.dataset.color = color;
-            el.style.cursor = 'pointer';
-            styledAncestors.add(el);
+            // 容器块：不染色，继续处理其内部叶子块
             continue;
           }
 
@@ -2474,23 +2917,44 @@ export default class MarkVaultPlugin extends Plugin {
       this.modifyGuard.acquire(filePath);
 
       if (kind === 'block') {
-        // ── 块标注：在选中文本所在块的边界前插入锚点 ──
-        // 向前搜索块边界（空行、标题、callout 起始）
-        const beforeText = content.substring(0, startOffset);
-        const blockStart = this.findBlockBoundary(beforeText);
+        // ── 块标注：用双锚点包围选中文本所在的块 ──
+        const startLine = content.substring(0, startOffset).split('\n').length - 1;
+        let blockInfo = detectBlockAtLine(content, startLine);
+        const lines = content.split('\n');
 
-        const anchor = buildBlockAnchor({
-          uuid,
-          type,
-          color,
-          note: '',
-        });
+        // 如果光标不在特殊块上，退而求其次把当前行当作一个 paragraph 块包围
+        if (!blockInfo && startLine >= 0 && startLine < lines.length && lines[startLine].trim().length > 0) {
+          blockInfo = {
+            type: 'paragraph',
+            startLine,
+            endLine: startLine,
+            content: lines[startLine],
+          };
+        }
+        if (!blockInfo) {
+          console.warn('MarkVault: reading-mode block annotation target is not a recognized block');
+          new Notice('MarkVault: selected text is not in a block element (formula, code, image, etc.)', 4000);
+          return;
+        }
 
-        // 在块边界插入锚点
-        const newContent = content.substring(0, blockStart) + anchor + '\n' + content.substring(blockStart);
+
+        const blockStartOffset = lines.slice(0, blockInfo.startLine).reduce((sum, l) => sum + l.length + 1, 0);
+        const blockEndOffset = lines.slice(0, blockInfo.endLine + 1).reduce((sum, l) => sum + l.length + 1, 0);
+        const blockContent = content.substring(blockStartOffset, blockEndOffset);
+
+        const startAnchor = buildBlockAnchorStart({ uuid, type, color, note: '' });
+        const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note: '' });
+
+        // 如果目标块是列表项，把锚点缩进到列表层级，避免打断列表结构和阅读模式 section 切割
+        const { startAnchorPrefix, endAnchorPrefix } = getBlockAnchorPrefixesForListItem(lines, blockInfo.startLine);
+
+        const replacement = startAnchorPrefix || endAnchorPrefix
+          ? startAnchorPrefix + startAnchor + '\n' + blockContent + '\n' + endAnchorPrefix + endAnchor + '\n'
+          : startAnchor + '\n' + blockContent + endAnchor + '\n';
+
+        const newContent = content.substring(0, blockStartOffset) + replacement + content.substring(blockEndOffset);
         await this.app.vault.modify(view.file, newContent);
 
-        // 强制阅读模式重新渲染，确保 post-processor 立即生效
         if (view.previewMode) {
           view.previewMode.rerender(true);
         }
@@ -2500,18 +2964,22 @@ export default class MarkVaultPlugin extends Plugin {
           filePath,
           type,
           color,
-          text: selectedText,
+          text: blockContent,
           note: '',
           tags: [],
-          startOffset: blockStart,
-          endOffset: blockStart + anchor.length,
-          startLine: 0,
-          contextBefore: content.substring(Math.max(0, blockStart - 80), blockStart),
-          contextAfter: content.substring(blockStart, Math.min(content.length, blockStart + 80)),
+          startOffset: blockStartOffset,
+          endOffset: blockStartOffset + replacement.length,
+          startLine: blockInfo.startLine,
+          endLine: blockInfo.endLine + 2,
+          contextBefore: content.substring(Math.max(0, blockStartOffset - 80), blockStartOffset),
+          contextAfter: content.substring(blockEndOffset, Math.min(content.length, blockEndOffset + 80)),
           createdAt: Date.now(),
           updatedAt: Date.now(),
           kind: 'block',
-          targetHash: computeSignature(selectedText),
+          blockType: blockInfo.type,
+          targetLine: blockInfo.startLine + 1,
+          anchorLine: blockInfo.startLine,
+          targetHash: computeSignature(blockContent),
         };
 
         await addAnnotation(annotation);
@@ -2528,38 +2996,44 @@ export default class MarkVaultPlugin extends Plugin {
 
         // 显式指定 kind === 'region' 时，强制走双锚点区域标注
         if (kind === 'region' || scan.hasSpecialContent || spansBlocks) {
-          // ── 区域标注：双锚点包围原选区 ──
+          // —— 区域标注：双锚点包围原选区 ——
+          const regionStartOffset = adjustRegionStartOffsetForListItem(content, startOffset);
+          const regionEndOffset = adjustRegionEndOffsetForListItem(content, endOffset);
+          const safeStartOffset = Math.min(regionStartOffset, regionEndOffset);
+          const safeEndOffset = Math.max(regionStartOffset, regionEndOffset);
+          const regionSelected = content.substring(safeStartOffset, safeEndOffset);
+
           const startAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'start');
           const endAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'end');
-          const replacement = startAnchor + sourceSelected + endAnchor;
-          const newContent = content.substring(0, startOffset) + replacement + content.substring(endOffset);
+          const replacement = startAnchor + regionSelected + endAnchor;
+          const newContent = content.substring(0, safeStartOffset) + replacement + content.substring(safeEndOffset);
           await this.app.vault.modify(view.file, newContent);
 
           if (view.previewMode) {
             view.previewMode.rerender(true);
           }
 
-          const startLine = content.substring(0, startOffset).split('\n').length - 1;
-          const endLine = content.substring(0, endOffset).split('\n').length - 1;
+          const startLine = content.substring(0, safeStartOffset).split('\n').length - 1;
+          const endLine = content.substring(0, safeEndOffset).split('\n').length - 1;
 
           const annotation: Annotation = {
             uuid,
             filePath,
             type,
             color,
-            text: selectedText,
+            text: regionSelected,
             note: '',
             tags: [],
-            startOffset,
-            endOffset: startOffset + replacement.length,
+            startOffset: safeStartOffset,
+            endOffset: safeStartOffset + replacement.length,
             startLine,
             endLine,
-            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
-            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+            contextBefore: content.substring(Math.max(0, safeStartOffset - 40), safeStartOffset),
+            contextAfter: content.substring(safeEndOffset, Math.min(content.length, safeEndOffset + 40)),
             createdAt: Date.now(),
             updatedAt: Date.now(),
             kind: 'region',
-            targetHash: computeSpanSignature(sourceSelected),
+            targetHash: computeSpanSignature(regionSelected),
           };
 
           await addAnnotation(annotation);

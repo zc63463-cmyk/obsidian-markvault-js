@@ -3,7 +3,7 @@ import type MarkVaultPlugin from '../../main';
 import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
 import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
-import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
+import { buildMarkTag, buildBlockAnchorStart, buildBlockAnchorEnd, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { buildNativeAnnotation } from '../../core/native-annotation';
 import { buildRegionAnchor } from '../../core/region-annotation';
 import { computeSignature, computeSpanSignature } from '../../core/block-fingerprint';
@@ -506,14 +506,27 @@ async function createRegionAnnotation(
 ): Promise<Annotation | null> {
   if (!view.file) return null;
 
-  const selection = editor.getSelection();
-  if (!selection) return null;
-
   const uuid = generateId();
   const filePath = view.file.path;
-  const from = editor.getCursor('from');
-  const to = editor.getCursor('to');
-  const startOffset = editor.posToOffset(from);
+  let from = editor.getCursor('from');
+  let to = editor.getCursor('to');
+  const fullContent = editor.getValue();
+  let startOffset = editor.posToOffset(from);
+  let endOffset = editor.posToOffset(to);
+
+  // 如果起点/终点落在列表项行首，调整锚点位置以免打断列表结构
+  const adjustedStart = adjustRegionStartOffsetForListItem(fullContent, startOffset);
+  const adjustedEnd = adjustRegionEndOffsetForListItem(fullContent, endOffset);
+  if (adjustedStart <= adjustedEnd) {
+    startOffset = adjustedStart;
+    endOffset = adjustedEnd;
+    from = editor.offsetToPos(startOffset);
+    to = editor.offsetToPos(endOffset);
+    editor.setSelection(from, to);
+  }
+
+  const selection = editor.getSelection();
+  if (!selection) return null;
 
   const startAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'start');
   const endAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'end');
@@ -598,10 +611,84 @@ async function createBlockAnnotationFromSelection(
 }
 
 /**
+ * 如果一行是列表项，返回它的标记前缀（含前导空格和标记后的空格）
+ * 以及用于子内容的缩进空格串。
+ */
+export function getListItemPrefix(line: string): { marker: string; childIndent: string } | null {
+  const m = line.match(/^(\s*)((?:[-*+])|(?:\d+\.))\s/);
+  if (!m) return null;
+  const leading = m[1];
+  const markerBody = m[2] + ' ';
+  return { marker: m[0], childIndent: leading + ' '.repeat(markerBody.length) };
+}
+
+/**
+ * 为列表项目标计算 start / end 锚点应该使用的缩进。
+ * start 锚点放在前一个同层或外层列表项的子内容位置，
+ * end 锚点放在当前列表项的子内容位置。
+ */
+export function getBlockAnchorPrefixesForListItem(
+  lines: string[],
+  targetLine: number,
+): { startAnchorPrefix: string; endAnchorPrefix: string } {
+  const targetLineText = lines[targetLine] ?? '';
+  const targetListPrefix = getListItemPrefix(targetLineText);
+  if (!targetListPrefix) return { startAnchorPrefix: '', endAnchorPrefix: '' };
+
+  const targetLeadingSpaces = (targetLineText.match(/^(\s*)/)?.[1] ?? '').length;
+  let startAnchorPrefix = '';
+
+  // 向上找到最近一个级别不比目标更深的列表项，作为 start 锚点的依附对象
+  for (let i = targetLine - 1; i >= 0; i--) {
+    const prevPrefix = getListItemPrefix(lines[i]);
+    if (!prevPrefix) continue;
+    const prevLeadingSpaces = (lines[i].match(/^(\s*)/)?.[1] ?? '').length;
+    if (prevLeadingSpaces <= targetLeadingSpaces) {
+      startAnchorPrefix = prevPrefix.childIndent;
+      break;
+    }
+  }
+
+  return { startAnchorPrefix, endAnchorPrefix: targetListPrefix.childIndent };
+}
+
+/**
+ * 如果 region 起点/终点落在列表项的行首，将锚点后移到 marker 之后（起点）
+ * 或前移到上一行末尾（终点），避免 %%...%% 锚点拆断列表结构。
+ */
+function offsetToLineCh(content: string, offset: number): { line: number; ch: number } {
+  const before = content.substring(0, offset);
+  const line = before.split('\\n').length - 1;
+  const lastNewline = before.lastIndexOf('\\n');
+  const ch = offset - lastNewline - 1;
+  return { line, ch };
+}
+
+export function adjustRegionStartOffsetForListItem(content: string, offset: number): number {
+  const { line, ch } = offsetToLineCh(content, offset);
+  const lines = content.split('\\n');
+  const prefix = getListItemPrefix(lines[line] ?? '');
+  if (prefix && ch === 0) {
+    return offset + prefix.marker.length;
+  }
+  return offset;
+}
+
+export function adjustRegionEndOffsetForListItem(content: string, offset: number): number {
+  const { line, ch } = offsetToLineCh(content, offset);
+  const lines = content.split('\\n');
+  const prefix = getListItemPrefix(lines[line] ?? '');
+  if (prefix && ch === 0 && offset > 0) {
+    return offset - 1;
+  }
+  return offset;
+}
+
+/**
  * 块级锚点标注 — Track B
  *
- * 在目标块上方插入 %%markvault:uuid:type:color:note%% 注释锚点，
- * CM6 装饰器和 PostProcessor 检测锚点后给下方块添加视觉效果。
+ * 用 %%markvault-block:uuid:type:color:start%% ... %%markvault-block:...:end%% 双锚点包围目标块，
+ * CM6 装饰器和 PostProcessor 检测锚点后给中间块添加视觉效果。
  */
 async function createBlockAnnotation(
   plugin: MarkVaultPlugin,
@@ -616,13 +703,25 @@ async function createBlockAnnotation(
   const uuid = generateId();
   const filePath = view.file.path;
 
-  // 构建锚点字符串
-  const anchor = buildBlockAnchor({ uuid, type, color, note: '' });
-  const anchorWithNewline = anchor + '\n';
+  // 构建双锚点字符串
+  const startAnchor = buildBlockAnchorStart({ uuid, type, color, note: '' });
+  const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note: '' });
 
-  // 在块起始行上方插入锚点
+  // 块所占行数
+  const blockLineCount = blockInfo.endLine - blockInfo.startLine + 1;
+
+  // 在块起始行上方插入 start 锚点
   const anchorLine = blockInfo.startLine;
   const anchorOffset = editor.posToOffset({ line: anchorLine, ch: 0 });
+
+  // 如果目标块是列表项，把锚点缩进到列表层级，
+  // 避免插入非列表行导致有序列表断裂和阅读模式 section 分割。
+  const editorLines = editor.getValue().split('\n');
+  const { startAnchorPrefix, endAnchorPrefix } = getBlockAnchorPrefixesForListItem(editorLines, anchorLine);
+
+  // 计算两个锚点插入后，块内容在文档中的结束位置（用于 endOffset 近似）
+  const startAnchorWithNewline = startAnchorPrefix + startAnchor + '\n';
+  const endAnchorWithNewline = endAnchorPrefix + endAnchor + '\n';
 
   const annotation: Annotation = {
     uuid,
@@ -633,15 +732,16 @@ async function createBlockAnnotation(
     note: '',
     tags: [],
     startOffset: anchorOffset,
-    endOffset: anchorOffset + anchorWithNewline.length,
+    endOffset: anchorOffset + startAnchorWithNewline.length + blockInfo.content.length + 1 + endAnchorWithNewline.length,
     startLine: anchorLine,
+    endLine: blockInfo.endLine + 2, // start + end 两个锚点使原块向下移动两行
     contextBefore: '',
     contextAfter: '',
     createdAt: Date.now(),
     updatedAt: Date.now(),
     kind: 'block',
     blockType: blockInfo.type,
-    targetLine: anchorLine + 1, // 锚点下一行是目标块
+    targetLine: anchorLine + 1, // start 锚点下一行是目标块
     anchorLine,
     targetHash: computeSignature(blockInfo.content),
   };
@@ -654,11 +754,11 @@ async function createBlockAnnotation(
   plugin.modifyGuard.acquire(filePath);
 
   try {
-    // 在目标行上方插入锚点
-    editor.replaceRange(
-      anchorWithNewline,
-      { line: anchorLine, ch: 0 },
-    );
+    // 在目标块前插入 start 锚点
+    editor.replaceRange(startAnchorWithNewline, { line: anchorLine, ch: 0 });
+
+    // 在目标块后插入 end 锚点（块已被 start 锚点推下一行）
+    editor.replaceRange(endAnchorWithNewline, { line: anchorLine + blockLineCount + 1, ch: 0 });
 
     console.log(`MarkVault: created block annotation ${uuid} for ${blockInfo.type} at line ${anchorLine}`);
 

@@ -33,6 +33,7 @@ import {
 import { PRESET_COLORS, type AnnotationType, type SpanRange } from '../types/annotation';
 import { findNativeWrapper, NATIVE_ANCHOR_REGEX } from './native-annotation';
 import { REGION_ANCHOR_REGEX } from './region-annotation';
+import { parseBlockAnchors, findBlockTargetLine, parseBlockDoubleAnchors } from './annotation-parser';
 
 // ─── Region Layer 重绘触发器 ──────────────────────────────
 
@@ -506,10 +507,41 @@ class MarkVaultDecorator implements PluginValue {
 
     // ── 3. Block 标注行装饰 ──
     // 给 block 标注的目标行添加左侧色条/背景
+    // 🔧 关键修复：每次渲染时从当前文档重新解析锚点并定位目标块，
+    // 避免 targetLine 在编辑后偏移导致装饰位置错误。
+    const blockAnchorMap = new Map<string, number>();
+
+    // 3a. 旧单锚点 block 标注
+    const blockAnchors = parseBlockAnchors(doc);
+    for (const anchor of blockAnchors) {
+      if (anchor.anchorKind !== 'block') continue;
+      const targetLine = findBlockTargetLine(doc, anchor.anchorLine);
+      blockAnchorMap.set(anchor.uuid, targetLine);
+    }
+
+    // 3b. 新双锚点 block 标注：start 锚点的下一有效行即为目标行
+    const doubleBlockAnchors = parseBlockDoubleAnchors(doc);
+    const doubleBlockByUuid = new Map<string, { start?: { anchorLine: number }; end?: { anchorLine: number } }>();
+    for (const anchor of doubleBlockAnchors) {
+      const entry = doubleBlockByUuid.get(anchor.uuid) || {};
+      if (anchor.position === 'start') {
+        if (!entry.start) entry.start = { anchorLine: anchor.anchorLine };
+      } else {
+        if (!entry.end) entry.end = { anchorLine: anchor.anchorLine };
+      }
+      doubleBlockByUuid.set(anchor.uuid, entry);
+    }
+    for (const [uuid, entry] of doubleBlockByUuid.entries()) {
+      if (!entry.start) continue;
+      const targetLine = findBlockTargetLine(doc, entry.start.anchorLine);
+      blockAnchorMap.set(uuid, targetLine);
+    }
+
     if (filePath) {
       const blockAnnotations = getBlockCacheForFile(filePath);
       for (const blockAnn of blockAnnotations) {
-        const lineNumber = blockAnn.targetLine + 1;
+        const targetLine = blockAnchorMap.get(blockAnn.uuid) ?? blockAnn.targetLine;
+        const lineNumber = targetLine + 1;
         if (lineNumber < 1 || lineNumber > view.state.doc.lines) continue;
         const lineStart = view.state.doc.line(lineNumber).from;
         decoItems.push({
@@ -618,9 +650,53 @@ class MarkVaultDecorator implements PluginValue {
       });
     }
 
-    // 编辑模式下 region 不渲染背景/边框；边界通过上面的小符号标识，
-    // 内容范围的高亮完全交给 Obsidian 原生选区。
-    // 这里只隐藏锚点，具体的选区设置由 main.ts / sidebar 在跳转/创建时调用 setSelection 实现。
+    // 编辑模式下 region 用淡淡的 inline 背景 + 边界小符号标识，
+    // 内容范围的高亮仍可通过 Obsidian 原生选区触发。
+    const regionByUuid = new Map<string, { start?: RegionAnchorMatch; end?: RegionAnchorMatch }>();
+    for (const a of regionAnchors) {
+      const entry = regionByUuid.get(a.uuid) || {};
+      if (a.position === 'start') {
+        if (!entry.start) entry.start = a;
+      } else {
+        if (!entry.end) entry.end = a;
+      }
+      regionByUuid.set(a.uuid, entry);
+    }
+    for (const [uuid, entry] of regionByUuid.entries()) {
+      if (!entry.start || !entry.end) continue;
+      const contentStart = entry.start.index + entry.start.length;
+      const contentEnd = entry.end.index;
+      if (contentStart >= contentEnd) continue;
+
+      // 淡淡的 inline 背景，不覆盖整行
+      decoItems.push({
+        from: contentStart,
+        to: contentEnd,
+        deco: Decoration.mark({
+          class: `markvault-region-edit-bg markvault-region-${entry.start.color}`,
+          attributes: {
+            'data-uuid': uuid,
+            'data-kind': 'region',
+          },
+        }),
+      });
+
+      // 块级内容（代码块/公式块）用左侧竖线标识，inline mark 覆盖不到 widget
+      try {
+        const blockLines = this.findRegionBlockLines(view.state.doc, contentStart, contentEnd);
+        for (const line of blockLines) {
+          decoItems.push({
+            from: line.from,
+            to: line.from,
+            deco: Decoration.line({
+              class: `markvault-region-block-line markvault-region-${entry.start.color}`,
+            }),
+          });
+        }
+      } catch {
+        // 忽略 line 解析异常
+      }
+    }
 
     // 🔧 4b. 子串兜底：捕获所有未被严格正则匹配的 region 锚点文本
     // 处理场景：锚点分隔符损坏（如只有单个 %）、note 中含 %% 导致提前截断等极端情况。
@@ -690,7 +766,9 @@ class MarkVaultDecorator implements PluginValue {
     for (let i = 0; i < lines.length; i++) {
       const lineText = lines[i];
       const trimmed = lineText.trim();
-      if (/^%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%$/.test(trimmed)) {
+      const isOldBlockOrSpan = /^%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%$/.test(trimmed);
+      const isDoubleBlock = /^%%markvault-block:[^:%]+:[^:%]+:[^:%]+:(start|end):[^%]*%%$/.test(trimmed);
+      if (isOldBlockOrSpan || isDoubleBlock) {
         const from = lineOffset;
         const to = lineOffset + lineText.length;
         // 隐藏整行锚点内容，但保留换行符
@@ -724,6 +802,48 @@ class MarkVaultDecorator implements PluginValue {
     }
 
     return builder.finish();
+  }
+
+  /**
+   * 找出 region 范围内属于代码块 / 公式块的行
+   * 编辑模式下这些行是 CM6 widget，inline mark 覆盖不到，需要单独加行级标识。
+   */
+  private findRegionBlockLines(
+    cmDoc: import('@codemirror/state').Text,
+    startOffset: number,
+    endOffset: number,
+  ): Array<{ from: number }> {
+    const result: Array<{ from: number }> = [];
+    const startLine = cmDoc.lineAt(startOffset).number;
+    const endLine = cmDoc.lineAt(endOffset).number;
+
+    let inCodeBlock = false;
+    let inMathBlock = false;
+
+    for (let ln = 1; ln <= cmDoc.lines; ln++) {
+      const line = cmDoc.line(ln);
+      const trimmed = line.text.trim();
+
+      if (!inCodeBlock && !inMathBlock) {
+        if (trimmed.startsWith('```')) {
+          inCodeBlock = true;
+        } else if (trimmed === '$$') {
+          inMathBlock = true;
+        }
+      } else {
+        if (inCodeBlock && trimmed.startsWith('```')) {
+          inCodeBlock = false;
+        } else if (inMathBlock && trimmed === '$$') {
+          inMathBlock = false;
+        }
+      }
+
+      if (ln >= startLine && ln <= endLine && (inCodeBlock || inMathBlock)) {
+        result.push({ from: line.from });
+      }
+    }
+
+    return result;
   }
 
   /**
