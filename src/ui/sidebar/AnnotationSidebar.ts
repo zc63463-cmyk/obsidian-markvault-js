@@ -12,6 +12,7 @@ import { debounce } from '../../utils/debounce';
 import { AnnotationModal } from '../editor/annotation-modal';
 import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { removeNativeAnnotation } from '../../core/native-annotation';
+import { removeRegionAnnotation } from '../../core/region-annotation';
 import { StatsView } from './views/StatsView';
 import { CurrentFileToolbar } from './components/CurrentFileToolbar';
 import { FilterBar } from './components/FilterBar';
@@ -519,10 +520,20 @@ export class AnnotationSidebar extends ItemView {
         searchStr = `markvault:${annotation.uuid}`;
       } else if (annotation.kind === 'span') {
         searchStr = `markvault-span:${annotation.uuid}`;
+      } else if (annotation.kind === 'region') {
+        searchStr = `markvault-region:${annotation.uuid}:start`;
       } else if (annotation.format === 'native') {
         searchStr = `mv:i:${annotation.uuid}`;
       } else {
         searchStr = `data-uuid="${annotation.uuid}"`;
+      }
+
+      // region 在编辑模式下通过原生选区定位，触发外部选框
+      if (annotation.kind === 'region') {
+        const plugin = this.pluginInstance;
+        if (plugin && plugin.selectRegionInEditor(annotation)) {
+          return;
+        }
       }
 
       const idx = content.indexOf(searchStr);
@@ -647,6 +658,10 @@ export class AnnotationSidebar extends ItemView {
     if (annotation.kind === 'span') {
       const result = removeSpanAnchor(content, annotation.uuid);
       return result !== content ? result : null;
+    }
+    if (annotation.kind === 'region') {
+      const result = removeRegionAnnotation(content, annotation.uuid);
+      return result ?? null;
     }
     const result = removeMarkTag(content, annotation.uuid);
     return result ? result.content : null;

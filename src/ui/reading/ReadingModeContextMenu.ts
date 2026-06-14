@@ -85,6 +85,14 @@ export class ReadingModeContextMenu {
         });
     });
 
+    menu.addItem((item) => {
+      item.setTitle('▭ Region')
+        .setIcon('maximize')
+        .onClick(async () => {
+          await this.createAnnotation(selectedText, 'highlight', defaultColor, 'region');
+        });
+    });
+
     menu.addSeparator();
 
     for (const color of PRESET_COLORS) {
@@ -103,13 +111,14 @@ export class ReadingModeContextMenu {
     selectedText: string,
     type: AnnotationType,
     color: string,
+    kind: Annotation['kind'] = 'inline',
   ): Promise<void> {
     try {
       await this.host.createReadingAnnotation({
         selectedText,
         color,
         type,
-        kind: 'inline',
+        kind,
       });
     } catch (err) {
       console.error('MarkVault: reading mode context menu create annotation failed', err);

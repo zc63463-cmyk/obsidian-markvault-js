@@ -2,9 +2,9 @@
  * 隐身锚点 + 可见 CSS 包裹标注
  *
  * 格式：
- *   高亮  → %%mv:i:<uuid>:highlight:<color>%%==文本==
- *   粗体  → %%mv:i:<uuid>:bold:<color>%%<b class="markvault-native markvault-bold markvault-<color>" data-uuid="<uuid>">文本</b>
- *   下划线 → %%mv:i:<uuid>:underline:<color>%%<u>文本</u>
+ *   高亮   → %%mv:i:<uuid>:highlight:<color>%%<mark class="markvault-native markvault-highlight markvault-<color>" data-uuid="<uuid>">文本</mark>
+ *   粗体   → %%mv:i:<uuid>:bold:<color>%%<b class="markvault-native markvault-bold markvault-<color>" data-uuid="<uuid>">文本</b>
+ *   下划线 → %%mv:i:<uuid>:underline:<color>%%<u class="markvault-native markvault-underline markvault-<color>" data-uuid="<uuid>">文本</u>
  *
  * 锚点负责身份标识（uuid / type / color），可见包裹负责阅读模式快速定位（带 data-uuid/class）。
  * 元数据（note / tags / fields）存 Store。
@@ -16,14 +16,43 @@ import { generateId } from '../utils/id';
 /** 匹配隐身锚点 */
 export const NATIVE_ANCHOR_REGEX = /%%mv:i:([^:%]+):([^:%]+):([^:%]+)%%/g;
 
-/** 根据 type 获取自然语法包裹符号 */
-export function getNativeWrapper(type: AnnotationType): { open: string; close: string; tag?: string; html?: boolean } {
+/** 生成新版带 class/data 的可见 HTML 包裹开标签 */
+function buildNativeWrapper(
+  type: AnnotationType,
+  color: string,
+  uuid: string,
+): { open: string; close: string; tag: string } {
+  const baseClass = `markvault-native markvault-${type} markvault-${color} markvault-clickable`;
   switch (type) {
     case 'bold':
-      // 粗体试验田：用 <b class="..."> 包裹，便于阅读模式直接命中
-      return { open: `<b class="markvault-native markvault-bold">`, close: '</b>', tag: 'b', html: true };
+      return {
+        open: `<b class="${baseClass}" data-uuid="${uuid}" data-type="bold" data-color="${color}">`,
+        close: '</b>',
+        tag: 'b',
+      };
     case 'underline':
-      return { open: '<u>', close: '</u>', tag: 'u' };
+      return {
+        open: `<u class="${baseClass}" data-uuid="${uuid}" data-type="underline" data-color="${color}">`,
+        close: '</u>',
+        tag: 'u',
+      };
+    case 'highlight':
+    default:
+      return {
+        open: `<mark class="${baseClass}" data-uuid="${uuid}" data-type="highlight" data-color="${color}">`,
+        close: '</mark>',
+        tag: 'mark',
+      };
+  }
+}
+
+/** 旧版自然语法包裹，仅用于兼容解析 */
+function getLegacyNativeWrapper(type: AnnotationType): { open: string; close: string } | null {
+  switch (type) {
+    case 'bold':
+      return { open: '**', close: '**' };
+    case 'underline':
+      return { open: '<u>', close: '</u>' };
     case 'highlight':
     default:
       return { open: '==', close: '==' };
@@ -41,16 +70,18 @@ function isEscaped(doc: string, pos: number): boolean {
   return backslashes % 2 === 1;
 }
 
-/**
- * 查找粗体试验田的 <b class="markvault-native ..." data-uuid="...">...</b> 包裹
- */
-function findNativeBoldWrapper(
+/** 查找新版 <tag class="markvault-native ..." data-uuid="...">...</tag> 包裹 */
+function findNativeHtmlWrapper(
   doc: string,
   pos: number,
+  type: AnnotationType,
+  tag: string,
 ): { wrapperStart: number; contentStart: number; contentEnd: number; wrapperEnd: number; text: string } | null {
-  const boldRegex = /^<b\s+class="markvault-native\s+markvault-bold\s+markvault-([^"\s]+)(?:\s+markvault-clickable)?"\s+data-uuid="([^"]+)"\s+data-type="bold"\s+data-color="([^"]+)">([^<]*)<\/b>/;
+  const htmlRegex = new RegExp(
+    `^<${tag}\\s+class="markvault-native\\s+markvault-${type}\\s+markvault-([^"\\s]+)(?:\\s+markvault-clickable)?"\\s+data-uuid="([^"]+)"\\s+data-type="${type}"\\s+data-color="([^"]+)">([^<]*)</${tag}>`,
+  );
   const slice = doc.substring(pos);
-  const match = slice.match(boldRegex);
+  const match = slice.match(htmlRegex);
   if (!match) return null;
 
   const wrapperStart = pos;
@@ -63,29 +94,20 @@ function findNativeBoldWrapper(
   return { wrapperStart, contentStart, contentEnd, wrapperEnd, text };
 }
 
-/** 在文档中查找锚点后紧跟的可见包裹范围 */
-export function findNativeWrapper(
+/** 查找旧版 Markdown 符号包裹（==...== / **...** / <u>...</u>） */
+function findLegacyNativeWrapper(
   doc: string,
-  anchorEnd: number,
+  pos: number,
   type: AnnotationType,
 ): { wrapperStart: number; contentStart: number; contentEnd: number; wrapperEnd: number; text: string } | null {
-  // 允许锚点和包裹之间有少量空白/换行
-  let pos = anchorEnd;
-  while (pos < doc.length && /\s/.test(doc[pos])) pos++;
-
-  // 粗体试验田：可见包裹是 <b class="markvault-native ...">...</b>
-  if (type === 'bold') {
-    return findNativeBoldWrapper(doc, pos);
-  }
-
-  const wrapper = getNativeWrapper(type);
+  const wrapper = getLegacyNativeWrapper(type);
+  if (!wrapper) return null;
 
   if (!doc.startsWith(wrapper.open, pos)) return null;
 
   const wrapperStart = pos;
   const contentStart = wrapperStart + wrapper.open.length;
 
-  // 查找闭合符号，跳过转义
   let searchFrom = contentStart;
   while (true) {
     const closeIdx = doc.indexOf(wrapper.close, searchFrom);
@@ -102,6 +124,25 @@ export function findNativeWrapper(
   }
 }
 
+/** 在文档中查找锚点后紧跟的可见包裹范围 */
+export function findNativeWrapper(
+  doc: string,
+  anchorEnd: number,
+  type: AnnotationType,
+): { wrapperStart: number; contentStart: number; contentEnd: number; wrapperEnd: number; text: string } | null {
+  // 允许锚点和包裹之间有少量空白/换行
+  let pos = anchorEnd;
+  while (pos < doc.length && /\s/.test(doc[pos])) pos++;
+
+  // 优先识别新版 HTML 包裹（带 class/data-uuid）
+  const tag = type === 'bold' ? 'b' : type === 'underline' ? 'u' : 'mark';
+  const htmlWrapper = findNativeHtmlWrapper(doc, pos, type, tag);
+  if (htmlWrapper) return htmlWrapper;
+
+  // 兜底：识别旧版自然语法（==...== / **...** / <u>...</u>）
+  return findLegacyNativeWrapper(doc, pos, type);
+}
+
 /** 构建隐身锚点字符串 */
 export function buildNativeAnchor(uuid: string, type: AnnotationType, color: string): string {
   return `%%mv:i:${uuid}:${type}:${color}%%`;
@@ -110,11 +151,7 @@ export function buildNativeAnchor(uuid: string, type: AnnotationType, color: str
 /** 构建完整的自然语法标注文本（锚点 + 包裹） */
 export function buildNativeAnnotation(annotation: Pick<Annotation, 'uuid' | 'type' | 'color' | 'text'>): string {
   const anchor = buildNativeAnchor(annotation.uuid, annotation.type, annotation.color);
-  const wrapper = getNativeWrapper(annotation.type);
-  if (annotation.type === 'bold') {
-    // 粗体可见包裹带 class / data-uuid，便于阅读模式快速定位
-    return `${anchor}<b class="markvault-native markvault-bold markvault-${annotation.color} markvault-clickable" data-uuid="${annotation.uuid}" data-type="bold" data-color="${annotation.color}">${annotation.text}</b>`;
-  }
+  const wrapper = buildNativeWrapper(annotation.type, annotation.color, annotation.uuid);
   return `${anchor}${wrapper.open}${annotation.text}${wrapper.close}`;
 }
 

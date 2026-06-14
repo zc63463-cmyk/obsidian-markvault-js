@@ -4,6 +4,7 @@ import { PRESET_COLORS } from '../../types/annotation';
 import { updateAnnotation, deleteAnnotation, addAnnotation } from '../../db/annotation-repo';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
+import { updateRegionAnnotation, removeRegionAnnotation } from '../../core/region-annotation';
 import { encodeFields, applyTemplate } from '../../utils/fields';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 
@@ -392,6 +393,13 @@ export class AnnotationModal extends Modal {
           color: updates.color,
           type: updates.type,
         });
+      } else if (this.annotation.kind === 'region') {
+        // 区域标注：双锚点包围
+        newContent = updateRegionAnnotation(content, this.annotation.uuid, {
+          color: updates.color,
+          type: updates.type,
+          note: this.noteValue,
+        }) ?? content;
       } else if (this.annotation.format === 'native') {
         // 自然语法标注：隐身锚点 + 原生 Markdown 包裹
         // note/tags/fields 只存在 Store 中，锚点只保存 uuid/type/color
@@ -453,6 +461,7 @@ export class AnnotationModal extends Modal {
     // 🔧 P1 修复：更新 span 缓存，确保 CM6 装饰立即反映最新修改
     try {
       await this.plugin.updateSpanCache(this.annotation.filePath);
+      await this.plugin.updateRegionCache(this.annotation.filePath);
     } catch (err) {
       console.error('MarkVault modal: updateSpanCache error', err);
     }
@@ -478,6 +487,9 @@ export class AnnotationModal extends Modal {
           }
           if (this.annotation.kind === 'block') {
             return removeBlockAnchor(content, this.annotation.uuid);
+          }
+          if (this.annotation.kind === 'region') {
+            return removeRegionAnnotation(content, this.annotation.uuid) ?? content;
           }
           if (this.annotation.format === 'native') {
             return removeNativeAnnotation(content, this.annotation.uuid) ?? content;

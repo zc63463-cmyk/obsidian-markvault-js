@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, Notice } from 'obsidian';
+import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
 import { DEFAULT_SETTINGS } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
@@ -15,7 +15,7 @@ import {
 import { parseBlockAnchors, computeSpanRanges, findSpanEndLine } from './core/annotation-parser';
 import { scanMarkdownContexts } from './core/md-context';
 import { markdownToPlainWithMap } from './core/markdown-plain';
-import { markvaultDecorationPlugin, setFilePathResolver } from './core/highlight-applier';
+import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, requestRegionLayerRedraw } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
 import { AnnotationModal } from './ui/editor/annotation-modal';
@@ -25,8 +25,9 @@ import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor } from './core/annotation-parser';
 import { buildNativeAnnotation } from './core/native-annotation';
+import { buildRegionAnchor, parseRegionAnnotations, REGION_ANCHOR_REGEX } from './core/region-annotation';
 import { computeSignature } from './core/block-fingerprint';
-import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData } from './core/highlight-applier';
+import { updateSpanCacheForFile, clearSpanCacheForFile, type SpanAnnotationData, updateRegionCacheForFile, clearRegionCacheForFile, type RegionAnnotationData, getRegionCacheForFile, updateBlockCacheForFile, clearBlockCacheForFile, type BlockAnnotationData, getBlockCacheForFile } from './core/highlight-applier';
 
 import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeToolbar } from './ui/reading/ReadingModeToolbar';
@@ -152,12 +153,13 @@ export default class MarkVaultPlugin extends Plugin {
   }
 
   /**
-   * 更新 span 标注缓存（供 CM6 装饰器使用）
-   * 从 DB 加载指定文件的 span 标注数据到缓存
+   * 更新 span / block / region 标注缓存（供 CM6 装饰器使用）
+   * 从 DB 加载指定文件的 span/block/region 标注数据到缓存
    */
   public async updateSpanCache(filePath: string): Promise<void> {
     try {
       const annotations = await annotationStore.getAnnotationsForFile(filePath);
+
       const spanAnnotations = annotations.filter(a => a.kind === 'span' && a.spanRanges && a.spanRanges.length > 0);
       const spanData: SpanAnnotationData[] = spanAnnotations.map(a => ({
         uuid: a.uuid,
@@ -168,8 +170,145 @@ export default class MarkVaultPlugin extends Plugin {
         note: a.note,
       }));
       updateSpanCacheForFile(filePath, spanData);
+
+      const blockAnnotations = annotations.filter(a => a.kind === 'block' && a.targetLine !== undefined);
+      const blockData: BlockAnnotationData[] = blockAnnotations.map(a => ({
+        uuid: a.uuid,
+        type: a.type,
+        color: a.color,
+        targetLine: a.targetLine ?? a.startLine,
+        note: a.note,
+      }));
+      updateBlockCacheForFile(filePath, blockData);
     } catch (err) {
       console.error('MarkVault: updateSpanCache error', err);
+    }
+  }
+
+  /**
+   * 更新 region 标注缓存（供 CM6 layer 使用）
+   * 🔧 BUG-5.1 修复：缓存更新后强制 CM6 layer 重绘，解决异步缓存竞态
+   */
+  public async updateRegionCache(filePath: string): Promise<void> {
+    try {
+      const annotations = await annotationStore.getAnnotationsForFile(filePath);
+      const regionAnnotations = annotations.filter(a => a.kind === 'region');
+      const regionData: RegionAnnotationData[] = regionAnnotations.map(a => ({
+        uuid: a.uuid,
+        type: a.type,
+        color: a.color,
+        startOffset: a.startOffset,
+        endOffset: a.endOffset,
+        note: a.note,
+      }));
+      updateRegionCacheForFile(filePath, regionData);
+      // 缓存已更新，通知 CM6 region layer 重新渲染
+      requestRegionLayerRedraw();
+    } catch (err) {
+      console.error('MarkVault: updateRegionCache error', err);
+    }
+  }
+
+  /**
+   * 🔧 BUG-5.1 修复：立即同步更新 region 缓存（预填充）
+   *
+   * 在 editor.replaceSelection() 之前调用，确保 CM6 layer 首次渲染时
+   * 就能看到新创建的 region 标注数据，避免异步缓存竞态导致 layer 为空。
+   *
+   * @param filePath 文件路径
+   * @param newAnnotation 即将创建的标注对象（尚未写入 DB）
+   */
+  public updateRegionCacheImmediately(filePath: string, newAnnotation: Annotation): void {
+    try {
+      // 读取当前缓存
+      const existingData = getRegionCacheForFile(filePath);
+      const newData: RegionAnnotationData[] = [
+        ...existingData,
+        {
+          uuid: newAnnotation.uuid,
+          type: newAnnotation.type,
+          color: newAnnotation.color,
+          startOffset: newAnnotation.startOffset,
+          endOffset: newAnnotation.endOffset,
+          note: newAnnotation.note,
+        },
+      ];
+      updateRegionCacheForFile(filePath, newData);
+      // 预填充后也通知 CM6 重绘
+      requestRegionLayerRedraw();
+    } catch (err) {
+      // 预填充失败不影响主流程，updateRegionCache 会随后修正
+      console.warn('MarkVault: updateRegionCacheImmediately failed (will be corrected by updateRegionCache)', err);
+    }
+  }
+
+  /**
+   * 🔧 BUG-5.3 修复：立即同步更新 block 缓存（预填充）
+   *
+   * 在 editor.replaceRange() 之前调用，确保 CM6 decoration plugin 首次渲染时
+   * 就能看到新创建的 block 标注数据，避免异步缓存竞态导致行装饰缺失。
+   *
+   * @param filePath 文件路径
+   * @param newAnnotation 即将创建的标注对象（尚未写入 DB）
+   */
+  /**
+   * 在编辑模式下选中 region 的内容范围，触发 Obsidian 原生选区（外部选框）。
+   *
+   * 编辑模式下 region 不渲染自定义背景/边框，视觉反馈完全通过原生 selection 完成。
+   */
+  public selectRegionInEditor(annotation: Annotation): boolean {
+    if (annotation.kind !== 'region') return false;
+
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || !view.file || view.file.path !== annotation.filePath) return false;
+    if (view.getMode() === 'preview') return false;
+
+    const editor = view.editor;
+    const content = editor.getValue();
+
+    const startRegex = new RegExp(`%%markvault-region:${annotation.uuid}:([^:%]+):([^:%]+):start:[^%]*%%`);
+    const endRegex = new RegExp(`%%markvault-region:${annotation.uuid}:([^:%]+):([^:%]+):end:[^%]*%%`);
+
+    const startMatch = content.match(startRegex);
+    const endMatch = content.match(endRegex);
+    if (!startMatch || !endMatch) return false;
+
+    const startOffset = startMatch.index! + startMatch[0].length;
+    const endOffset = endMatch.index!;
+    if (startOffset >= endOffset) return false;
+
+    try {
+      const from = editor.offsetToPos(startOffset);
+      const to = editor.offsetToPos(endOffset);
+      editor.setSelection(from, to);
+      editor.scrollIntoView({ from, to }, true);
+      return true;
+    } catch (err) {
+      console.error('MarkVault: selectRegionInEditor error', err);
+      return false;
+    }
+  }
+
+  public updateBlockCacheImmediately(filePath: string, newAnnotation: Annotation): void {
+    try {
+      // 读取当前缓存
+      const existingData = getBlockCacheForFile(filePath);
+      const newData: BlockAnnotationData[] = [
+        ...existingData,
+        {
+          uuid: newAnnotation.uuid,
+          type: newAnnotation.type,
+          color: newAnnotation.color,
+          targetLine: newAnnotation.targetLine ?? newAnnotation.startLine,
+          note: newAnnotation.note,
+        },
+      ];
+      updateBlockCacheForFile(filePath, newData);
+      // 预填充后通知 CM6 重绘（decoration plugin 也会读 block 缓存）
+      requestRegionLayerRedraw();
+    } catch (err) {
+      // 预填充失败不影响主流程，updateSpanCache 会随后修正
+      console.warn('MarkVault: updateBlockCacheImmediately failed (will be corrected by updateSpanCache)', err);
     }
   }
 
@@ -379,13 +518,38 @@ export default class MarkVaultPlugin extends Plugin {
       console.error('MarkVault: failed to register rename handler', err);
     }
 
-    // 🆕 当前文件变化时同步（用于切换标签页、重命名等）
-    // ⚠️ 已禁用：active-leaf-change 在 vault.modify 后会被频繁触发，
-    // 导致重复 onFileOpen → 重复全量 sync → UI 长时间无响应。
-    // file-open 事件本身已覆盖文件打开场景，无需额外监听。
+    // 🆕 当前文件/视图变化时刷新缓存（用于切换标签页、阅读/编辑模式切换）
+    // 只做轻量级缓存刷新，不做全量 sync，避免 vault.modify 后重复昂贵同步。
     try {
-      // NO-OP: active-leaf-change handler removed for performance
-      // (kept as comment to document the decision)
+      this.registerEvent(
+        this.app.workspace.on('active-leaf-change', async () => {
+          // 🔧 BUG-5.1 修复：注入当前活跃的 EditorView，用于 region 缓存更新后强制 layer 重绘
+          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+          if (activeView && activeView.editor) {
+            // Obsidian 的 Editor 对象可能包含 CM6 EditorView
+            const cmView = (activeView.editor as any).cm as import('@codemirror/view').EditorView | undefined;
+            setActiveEditorView(cmView || null);
+          } else {
+            setActiveEditorView(null);
+          }
+
+          const file = this.app.workspace.getActiveFile();
+          if (file instanceof TFile && file.extension === 'md') {
+            // 文件真正切换时由 file-open 处理；这里主要处理同文件不同视图切换
+            if (this.activeFilePath === file.path) {
+              try {
+                await annotationStore.ensureFileLoaded(file.path);
+                await this.updateSpanCache(file.path);
+                await this.updateRegionCache(file.path);
+                requestRegionLayerRedraw();
+                this.scheduleSidebarRefresh();
+              } catch (err) {
+                console.error('MarkVault: active-leaf-change cache refresh failed', err);
+              }
+            }
+          }
+        }),
+      );
     } catch (err) {
       console.error('MarkVault: failed to register active-leaf-change handler', err);
     }
@@ -444,6 +608,14 @@ export default class MarkVaultPlugin extends Plugin {
           // Obsidian 会将 %%...%% 注释渲染为特殊的 comment 节点
           // 我们需要在渲染后的 DOM 中找到这些锚点，给下方的块添加装饰
           await this.processBlockAnchors(el, ctx.sourcePath);
+
+          // 🆕 v3.x: 处理区域标注（双锚点包围）
+          await this.processRegionAnnotations(el, ctx);
+
+          // 🔧 防御性清理：隐藏阅读模式中泄漏的锚点文本
+          // 某些情况下 Obsidian 未将 %%...%% 渲染为 Comment 节点（如内联锚点、
+          // note 中含特殊字符导致格式损坏等），导致锚点元数据以纯文本暴露
+          this.hideLeakedAnchorText(el);
         } catch (err) {
           console.error('MarkVault: post processor error', err);
         }
@@ -542,6 +714,13 @@ export default class MarkVaultPlugin extends Plugin {
   // ─── 文件打开时同步 ────────────────────────────
 
   async onFileOpen(file: TFile) {
+    // 🔧 BUG-5.1 修复：更新活跃的 EditorView 引用
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView && activeView.editor) {
+      const cmView = (activeView.editor as any).cm as import('@codemirror/view').EditorView | undefined;
+      setActiveEditorView(cmView || null);
+    }
+
     // 防重入：如果当前文件正在被插件自身修改，跳过此次同步
     if (this.modifyGuard.isLocked(file.path)) {
       return;
@@ -574,6 +753,7 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       await annotationStore.ensureFileLoaded(file.path);
       await this.updateSpanCache(file.path);
+      await this.updateRegionCache(file.path);
 
       // 刷新侧边栏调度到下一帧，避免阻塞当前事件循环并去重
       this.scheduleSidebarRefresh();
@@ -767,9 +947,44 @@ export default class MarkVaultPlugin extends Plugin {
         }
       }
 
+      // 3.5 region 标注位置恢复
+      const regionAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
+        (a) => a.kind === 'region',
+      );
+      if (regionAnnotations.length > 0) {
+        const parsedRegions = parseRegionAnnotations(content, filePath);
+        const regionByUuid = new Map(parsedRegions.map((r) => [r.uuid, r]));
+
+        for (const ann of regionAnnotations) {
+          const parsed = regionByUuid.get(ann.uuid);
+          if (!parsed) {
+            failed++;
+            continue;
+          }
+
+          const newEndLine = content.substring(0, parsed.endOffset).split('\n').length - 1;
+          const changed =
+            parsed.startOffset !== ann.startOffset ||
+            parsed.endOffset !== ann.endOffset ||
+            parsed.text !== ann.text;
+
+          if (changed) {
+            await annotationStore.updateAnnotation(ann.uuid, {
+              startOffset: parsed.startOffset,
+              endOffset: parsed.endOffset,
+              startLine: parsed.startLine,
+              endLine: newEndLine,
+              text: parsed.text,
+              targetHash: computeSpanSignature(parsed.text),
+            });
+          }
+        }
+      }
+
       // 4. 刷新缓存与 UI
       this.markFileSynced(filePath);
       await this.updateSpanCache(filePath);
+      await this.updateRegionCache(filePath);
       this.scheduleSidebarRefresh();
     } finally {
       this.modifyGuard.release(filePath);
@@ -824,6 +1039,7 @@ export default class MarkVaultPlugin extends Plugin {
 
             // 🔧 BUG-7 修复：偏移修正后刷新 span 缓存，确保 CM6 装饰使用最新偏移
             await this.updateSpanCache(filePath);
+      await this.updateRegionCache(filePath);
 
             if (result.deleted > 0) {
               await this.refreshSidebar();
@@ -950,6 +1166,22 @@ export default class MarkVaultPlugin extends Plugin {
           });
         }
 
+        // 块级标注类型徽章（右上角小 pill）
+        if (anchor.anchorKind === 'block') {
+          const typeIcon = anchor.type === 'bold' ? '𝗕' : anchor.type === 'underline' ? 'U̲' : '🎨';
+          const badge = document.createElement('span');
+          badge.className = `markvault-block-type-badge markvault-block-badge-type-${anchor.type} markvault-block-badge-color-${anchor.color}`;
+          const iconSpan = document.createElement('span');
+          iconSpan.className = 'markvault-block-type-badge-icon';
+          iconSpan.textContent = typeIcon;
+          const dot = document.createElement('span');
+          dot.className = 'markvault-block-type-badge-dot';
+          badge.appendChild(iconSpan);
+          badge.appendChild(dot);
+          targetEl.style.position = 'relative';
+          targetEl.appendChild(badge);
+        }
+
         if (anchor.note) {
           const indicator = document.createElement('span');
           indicator.className = 'markvault-block-note-indicator';
@@ -992,35 +1224,957 @@ export default class MarkVaultPlugin extends Plugin {
       const annotation = await getAnnotationByUuid(anchor.uuid);
       const type = anchor.type;
       const color = anchor.color;
-      const preset = DEFAULT_SETTINGS.presetColors.find((c) => c.id === color);
-      const hex = preset ? preset.hex : color;
 
+      // 确保 wrapper 元素携带识别 class 与 data-uuid
+      // 视觉样式完全由 CSS class（markvault-<type> + markvault-<color>）控制
       targetEl.addClass('markvault-native', `markvault-${type}`, `markvault-${color}`, 'markvault-clickable');
       targetEl.dataset.uuid = anchor.uuid;
       targetEl.dataset.type = type;
       targetEl.dataset.color = color;
       targetEl.style.cursor = 'pointer';
 
-      switch (type) {
-        case 'highlight':
-          targetEl.style.backgroundColor = `${hex}66`;
-          targetEl.style.borderRadius = '2px';
-          targetEl.style.padding = '1px 0';
-          break;
-        case 'bold':
-          // 粗体标注的视觉样式完全由 CSS class（markvault-bold + markvault-<color>）控制
-          // 不设置内联样式，便于用户/主题覆盖
-          break;
-        case 'underline':
-          targetEl.style.textDecoration = 'underline';
-          targetEl.style.textDecorationColor = hex;
-          targetEl.style.textUnderlineOffset = '2px';
-          break;
-      }
-
       if (annotation?.note) {
         targetEl.setAttribute('title', annotation.note);
         targetEl.addClass('markvault-has-note');
+      }
+    }
+  }
+
+  /**
+   * 在阅读模式下处理 region 标注（双锚点包围区域）
+   *
+   * 🔧 BUG-5.2 修复：支持跨 section 的 region 标注
+   *
+   * Obsidian 的 post-processor 每个 section 调用一次。
+   * 如果 region 跨多个 section，start/end Comment 会在不同的 el 中。
+   *
+   * 策略：
+   * A. 当前 section 内同时有 start + end → 精确高亮
+   * B. 当前 section 只有 start → 高亮 start 到 section 末尾
+   * C. 当前 section 只有 end → 高亮 section 开头到 end
+   * D. 当前 section 完全在 region 内（无 start 也无 end）→ 高亮整个 section
+   * E. Comment 节点被 Obsidian 剥离 → fallback 用 section 行范围匹配
+   */
+  private async processRegionAnnotations(el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> {
+    const sourcePath = ctx.sourcePath;
+
+    // 收集当前 section 中的 region 锚点节点（Comment / Element / Text）
+    const regionAnchors = new Map<string, { start?: Node; end?: Node; type: AnnotationType; color: string }>();
+    const anchorNodesToHide = new Set<Node>();
+
+    const collectRegionAnchor = (node: Node, text: string) => {
+      const match = text.match(/^%%markvault-region:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%$/);
+      if (!match) return false;
+      const uuid = match[1];
+      const type = match[2] as AnnotationType;
+      const color = match[3];
+      const pos = match[4] as 'start' | 'end';
+      const entry = regionAnchors.get(uuid) || { type, color };
+      if (pos === 'start') entry.start = node;
+      else entry.end = node;
+      regionAnchors.set(uuid, entry);
+      anchorNodesToHide.add(node);
+      return true;
+    };
+
+    // 1. 扫描 COMMENT 节点（理想情况）
+    const commentWalker = document.createTreeWalker(el, NodeFilter.SHOW_COMMENT);
+    let commentNode: Node | null;
+    while ((commentNode = commentWalker.nextNode()) !== null) {
+      const text = commentNode.textContent || '';
+      collectRegionAnchor(commentNode, text);
+    }
+
+    // 2. 扫描 ELEMENT / TEXT 节点（Obsidian 未把 %%...%% 渲染成 comment 时）
+    const nodeWalker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let domNode: Node | null;
+    while ((domNode = nodeWalker.nextNode()) !== null) {
+      // 跳过已隐藏的锚点或已收集锚点的子节点
+      if (domNode.parentNode && anchorNodesToHide.has(domNode.parentNode)) continue;
+      if (domNode.nodeType === Node.ELEMENT_NODE) {
+        const htmlEl = domNode as HTMLElement;
+        if (htmlEl.classList.contains('markvault-anchor-hidden') || htmlEl.classList.contains('markvault-leaked-anchor-hidden')) {
+          continue;
+        }
+      }
+      const text = domNode.textContent || '';
+      if (!text.includes('markvault-region')) continue;
+      // 只有整段文本都是锚点才处理，避免误吞正文
+      const trimmed = text.trim();
+      collectRegionAnchor(domNode, trimmed);
+    }
+
+    // 方案 A/B/C：使用锚点节点精确高亮（高亮完成后再隐藏 element/text 锚点）
+    if (regionAnchors.size > 0) {
+      for (const [uuid, entry] of regionAnchors.entries()) {
+        if (entry.start && entry.end) {
+          // A. 同一 section 内同时有 start 和 end — 精确高亮
+          this.highlightRegionNodes(el, entry.start, entry.end, uuid, entry.type, entry.color);
+
+          const annotation = await annotationStore.getAnnotationByUuid(uuid);
+          const first = this.findFirstRegionElement(entry.start, entry.end);
+          if (first) {
+            this.addRegionBadge(first, entry.type, entry.color, annotation?.note);
+            if (annotation?.note) {
+              first.setAttribute('title', annotation.note);
+              first.addClass('markvault-has-note');
+            }
+          }
+        } else if (entry.start) {
+          // B. 只有 start（跨 section，end 在另一个 section）— 高亮 start 到 el 末尾
+          this.highlightRegionFromStart(el, entry.start, uuid, entry.type, entry.color);
+
+          const annotation = await annotationStore.getAnnotationByUuid(uuid);
+          const first = this.findFirstRegionElement(entry.start, null);
+          if (first) {
+            this.addRegionBadge(first, entry.type, entry.color, annotation?.note);
+            if (annotation?.note) {
+              first.setAttribute('title', annotation.note);
+              first.addClass('markvault-has-note');
+            }
+          }
+        } else if (entry.end) {
+          // C. 只有 end（跨 section，start 在另一个 section）— 高亮 el 开头到 end
+          this.highlightRegionToEnd(el, entry.end, uuid, entry.type, entry.color);
+        }
+      }
+
+      // 高亮完成后隐藏 element/text 形式的锚点（comment 节点天然不可见）
+      for (const node of anchorNodesToHide.values()) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const htmlEl = node as HTMLElement;
+          htmlEl.style.display = 'none';
+          htmlEl.addClass('markvault-anchor-hidden');
+        } else if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.textContent || '';
+          const wrapper = document.createElement('span');
+          wrapper.className = 'markvault-leaked-anchor-hidden';
+          wrapper.style.display = 'none';
+          wrapper.textContent = text;
+          node.parentNode?.replaceChild(wrapper, node);
+        }
+      }
+      return;
+    }
+
+    // 方案 D/E：fallback — 没有找到 comment 节点
+    // 可能是 Obsidian 剥离了 %% 注释，或者当前 section 完全在 region 内
+    const info = ctx.getSectionInfo(el);
+    if (!info) return;
+
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile)) return;
+
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const regions = parseRegionAnnotations(content, sourcePath);
+      if (regions.length === 0) return;
+
+      const sectionStart = info.lineStart;
+      const sectionEnd = info.lineEnd;
+
+      for (const region of regions) {
+        const regionStart = region.startLine ?? 0;
+        const regionEnd = region.endLine ?? regionStart;
+        // section 与 region 有重叠
+        if (regionStart > sectionEnd || regionEnd < sectionStart) continue;
+
+        // 判断当前 section 与 region 的位置关系
+        const sectionContainsStart = regionStart >= sectionStart && regionStart <= sectionEnd;
+        const sectionContainsEnd = regionEnd >= sectionStart && regionEnd <= sectionEnd;
+
+        if (sectionContainsStart && sectionContainsEnd) {
+          // section 同时包含 start 和 end 锚点 — 精确匹配
+          const firstWrapped = this.applyRegionStyleToSectionPrecise(el, info.text, region);
+          if (!firstWrapped) {
+            // 🔧 fallback 不再染整个 section，只染包含 region 文本的 leaf block
+            this.applyRegionStyleToSection(el, region.uuid, region.type, region.color, region.text);
+            const first = el.querySelector('.markvault-region');
+            if (first) {
+              this.addRegionBadge(first as HTMLElement, region.type, region.color, region.note);
+            }
+          }
+        } else if (sectionContainsStart) {
+          // section 包含 start 但不包含 end — 精确匹配 start 之后的部分
+          const firstWrapped = this.applyRegionStyleFromStartAnchor(el, info.text, region);
+          if (firstWrapped) {
+            this.addRegionBadge(firstWrapped, region.type, region.color, region.note);
+          }
+        } else if (sectionContainsEnd) {
+          // section 包含 end 但不包含 start — 精确匹配 end 之前的部分
+          this.applyRegionStyleToEndAnchor(el, info.text, region);
+        } else {
+          // section 完全在 region 内 — 给所有块级子元素加样式
+          this.applyRegionStyleToMiddleSection(el, region.uuid, region.type, region.color);
+        }
+
+        if (region.note) {
+          const first = el.querySelector('.markvault-region');
+          if (first) {
+            first.setAttribute('title', region.note);
+            first.addClass('markvault-has-note');
+          }
+        }
+      }
+    } catch (err) {
+      console.error('MarkVault: region section fallback failed', err);
+    }
+  }
+
+  /**
+   * 高亮 region 两个锚点之间的 DOM 节点
+   *
+   * 🔧 关键修复：当 start/end 在同一块元素（如 <li>）内时，
+   * 不给任何块级元素添加 markvault-region 背景类（会导致整块染色）。
+   * 只精确包裹文本节点为带背景的 <span>。
+   */
+  private highlightRegionNodes(
+    root: HTMLElement,
+    start: Node,
+    end: Node,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL);
+    walker.currentNode = start;
+    const nodes: Node[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode()) !== null && n !== end) {
+      nodes.push(n);
+    }
+
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    // 🔧 判断 start 和 end 是否在同一个块级祖先内
+    const startBlockAncestor = this.findNearestBlockAncestor(start, blockTags);
+    const endBlockAncestor = this.findNearestBlockAncestor(end, blockTags);
+    const isWithinSameBlock = startBlockAncestor && startBlockAncestor === endBlockAncestor;
+
+    const styledAncestors = new Set<Element>();
+
+    for (const node of nodes) {
+      // 如果已经在某个被样式化的祖先内部，跳过避免重复处理
+      let ancestor: Element | null = node.parentElement;
+      let skip = false;
+      while (ancestor && ancestor !== root) {
+        if (styledAncestors.has(ancestor)) {
+          skip = true;
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      if (skip) continue;
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        const isBlock = blockTags.has(el.tagName) || el.hasClass('callout');
+
+        // 🔧 关键修复：当 start/end 在同一块元素内时，
+        // 不给任何块级元素添加 markvault-region 背景类。
+        // 只处理文本节点的精确包裹（下面 TEXT_NODE 分支），
+        // 避免整块（如整个 <li>）被染上背景色。
+        if (isWithinSameBlock && isBlock) {
+          continue; // 跳过所有块级元素，不添加背景类
+        }
+
+        // 非同块情况：给块级元素添加左侧竖线标识，不整块染色
+        el.addClass('markvault-region-block-border', `markvault-region-${color}`, 'markvault-clickable');
+        el.dataset.uuid = uuid;
+        el.dataset.type = type;
+        el.dataset.color = color;
+        el.style.cursor = 'pointer';
+        styledAncestors.add(el);
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (!text.trim()) continue;
+        const span = document.createElement('span');
+        span.className = `markvault-region markvault-region-${type} markvault-region-${color} markvault-${type} markvault-${color} markvault-clickable`;
+        span.dataset.uuid = uuid;
+        span.dataset.type = type;
+        span.dataset.color = color;
+        span.style.cursor = 'pointer';
+        span.textContent = text;
+        node.parentNode?.replaceChild(span, node);
+      }
+    }
+  }
+
+  /**
+   * 🔧 NEW: 找到节点的最近块级祖先元素
+   */
+  private findNearestBlockAncestor(node: Node, blockTags: Set<string>): HTMLElement | null {
+    let current: Node | null = node.parentNode;
+    while (current && current !== document.body) {
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const el = current as HTMLElement;
+        if (blockTags.has(el.tagName) || el.hasClass('callout')) return el;
+      }
+      current = current.parentNode;
+    }
+    return null;
+  }
+
+  /**
+   * 🔧 防御性清理：隐藏阅读模式中泄漏的 markvault 锚点文本
+   *
+   * 某些情况下 Obsidian 未将 %%...%% 渲染为 Comment 节点：
+   * - 内联锚点（不在独立行上）
+   * - note 中含特殊字符导致锚点格式损坏
+   * - Obsidian 版本差异
+   *
+   * 结果是锚点元数据以纯文本暴露在阅读视图中。
+   * 此方法遍历 DOM 文本节点，找到匹配的锚点文本并隐藏。
+   *
+   * 🔧 关键修复：使用 [^\n]*? 替代 [^%]*，能匹配含 % 的锚点文本。
+   */
+  private hideLeakedAnchorText(root: HTMLElement): void {
+    // 匹配所有可能的 markvault 锚点文本模式
+    // 🔧 关键修复：使用 [^\n]*? 替代 [^%]*，能匹配含 % 的锚点文本
+    const ANCHOR_PATTERNS = [
+      /%%markvault-region:[^\n]*?%%/g,          // 完整 region 锚点
+      /%%markvault(-span)?:[^\n]*?%%/g,        // 完整 block/span 锚点
+      /%%mv:i:[^\n]*?%%/g,                     // 完整 native 锚点
+      /%+markvault[^\n]*?%+/g,                 // 损坏的锚点（分隔符不完整）
+    ];
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    let node: Node | null;
+    while ((node = walker.nextNode()) !== null) {
+      textNodes.push(node as Text);
+    }
+
+    for (const textNode of textNodes) {
+      const text = textNode.textContent || '';
+      if (!text.includes('markvault') && !text.includes('mv:i')) continue;
+
+      // 检查是否匹配任何锚点模式
+      for (const pattern of ANCHOR_PATTERNS) {
+        pattern.lastIndex = 0;
+        if (pattern.test(text)) {
+          // 找到泄漏的锚点文本 → 隐藏整个文本节点
+          const wrapper = document.createElement('span');
+          wrapper.className = 'markvault-leaked-anchor-hidden';
+          wrapper.style.display = 'none';
+          wrapper.textContent = text;
+          textNode.parentNode?.replaceChild(wrapper, textNode);
+          console.debug('MarkVault: hid leaked anchor text in reading mode');
+          break; // 已经隐藏，不需要检查其他 pattern
+        }
+      }
+    }
+  }
+
+  /**
+   * 给整个 section 加 region 样式（fallback 用，不依赖 comment 节点）
+   *
+   * 🔧 关键修复：不给容器块元素（如 <ul>/<ol>）添加 markvault-region 背景类。
+   * 容器块包含多个子块（如多个 <li>），给容器加背景会导致整个列表被染色。
+   * 只给叶子块元素（不包含其他块级子元素的块）添加背景。
+   */
+  private applyRegionStyleToSection(root: HTMLElement, uuid: string, type: AnnotationType, color: string, regionText?: string): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    const styledAncestors = new Set<Element>();
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    const normalizedRegionText = regionText ? this.normalizeRegionMatchText(regionText) : undefined;
+    const regionTokens = normalizedRegionText ? this.tokenizeRegionMatchText(normalizedRegionText) : [];
+
+    let node: Node | null;
+    while ((node = walker.nextNode()) !== null) {
+      // 跳过不可见/无意义节点
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const tag = (node as HTMLElement).tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+      }
+
+      // 如果已经在某个被样式化的祖先内部，跳过避免重复处理
+      let ancestor: Element | null = node.parentElement;
+      let skip = false;
+      while (ancestor && ancestor !== root) {
+        if (styledAncestors.has(ancestor)) {
+          skip = true;
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      if (skip) continue;
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        const isBlock = blockTags.has(el.tagName) || el.hasClass('callout');
+
+        // 🔧 关键修复：跳过容器块元素（包含其他块级子元素的块）
+        // 容器块（如 <ul>/<ol>）加背景会导致整段列表被染色
+        if (isBlock) {
+          const hasBlockChildren = Array.from(el.children).some(
+            child => blockTags.has(child.tagName) || (child as HTMLElement).hasClass?.('callout')
+          );
+          if (hasBlockChildren) {
+            // 容器块：只添加点击事件和元数据，不加背景类
+            el.addClass('markvault-clickable');
+            el.dataset.uuid = uuid;
+            el.dataset.type = type;
+            el.dataset.color = color;
+            el.style.cursor = 'pointer';
+            styledAncestors.add(el);
+            continue;
+          }
+        }
+
+        // 🔧 fallback 限域：只有块文本与 region 文本相关时才染色，避免扩到整段/整列表
+        if (normalizedRegionText) {
+          const blockText = this.normalizeRegionMatchText(el.textContent || '');
+          const containsRegion = blockText.includes(normalizedRegionText);
+          const containedByRegion = normalizedRegionText.includes(blockText) && blockText.length > 0;
+          if (!containsRegion && !containedByRegion) {
+            const matchedTokens = regionTokens.filter(t => blockText.includes(t)).length;
+            if (regionTokens.length === 0 || matchedTokens / regionTokens.length < 0.5) {
+              continue;
+            }
+          }
+        }
+
+        // 块级元素只加左侧竖线，文本节点包裹为 inline span，避免整块大色块
+        this.styleRegionBlockBorderAndText(el, uuid, type, color);
+        styledAncestors.add(el);
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (!text.trim()) continue;
+        const parent = node.parentElement;
+        if (parent?.hasClass('markvault-region')) continue;
+        const span = document.createElement('span');
+        span.className = `markvault-region markvault-region-${type} markvault-region-${color} markvault-${type} markvault-${color} markvault-clickable`;
+        span.dataset.uuid = uuid;
+        span.dataset.type = type;
+        span.dataset.color = color;
+        span.style.cursor = 'pointer';
+        span.textContent = text;
+        node.parentNode?.replaceChild(span, node);
+      }
+    }
+  }
+
+  /**
+   * 给块级元素加左侧竖线，并把其内部文本节点包裹为 inline span
+   * 用于阅读模式 fallback，避免整块大色块。
+   */
+  private styleRegionBlockBorderAndText(
+    el: HTMLElement,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    el.addClass('markvault-region-block-border', `markvault-region-${color}`, 'markvault-clickable');
+    el.dataset.uuid = uuid;
+    el.dataset.type = type;
+    el.dataset.color = color;
+    el.style.cursor = 'pointer';
+
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode()) !== null) {
+      textNodes.push(n as Text);
+    }
+
+    for (const textNode of textNodes) {
+      const text = textNode.textContent || '';
+      if (!text.trim()) continue;
+      const parent = textNode.parentElement;
+      if (parent?.hasClass('markvault-region')) continue;
+
+      const span = document.createElement('span');
+      span.className = `markvault-region markvault-region-${type} markvault-region-${color} markvault-${type} markvault-${color} markvault-clickable`;
+      span.dataset.uuid = uuid;
+      span.dataset.type = type;
+      span.dataset.color = color;
+      span.style.cursor = 'pointer';
+      span.textContent = text;
+      textNode.parentNode?.replaceChild(span, textNode);
+    }
+  }
+
+  /**
+   * 归一化 region/块文本，用于 fallback 限域匹配
+   */
+  private normalizeRegionMatchText(text: string): string {
+    return text
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/[*=_~`#\[\]()|<>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * 把 region 文本拆成可用于限域匹配的词元
+   */
+  private tokenizeRegionMatchText(text: string): string[] {
+    return text
+      .split(/[\s,.;:!?，。；：！？、（）()\[\]【】《》""''「」『』—–\-\/\\]+/)
+      .filter(token => token.length >= 2);
+  }
+
+  /**
+   * 精确匹配 section 内的 region 内容并高亮，避免把整个 section（如一整个 <ol>）染色。
+   * 返回第一个被包裹的元素（用于后续加徽章）；失败返回 null。
+   *
+   * 🔧 关键修复：使用 REGION_ANCHOR_REGEX 搜索锚点位置，而非 buildRegionAnchor。
+   * buildRegionAnchor 会生成转义后的锚点字符串（如 \p 替换 %），
+   * 与源文件中的原始锚点不匹配，导致精确匹配失败回退到 applyRegionStyleToSection。
+   */
+  private applyRegionStyleToSectionPrecise(root: HTMLElement, sectionSource: string, region: Annotation): HTMLElement | null {
+    // 用 REGION_ANCHOR_REGEX 在 section 源文本中搜索 start/end 锚点位置
+    let srcStart = -1;
+    let srcEnd = sectionSource.length;
+
+    REGION_ANCHOR_REGEX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = REGION_ANCHOR_REGEX.exec(sectionSource)) !== null) {
+      const uuid = m[1];
+      const pos = m[4] as 'start' | 'end';
+      if (uuid === region.uuid && pos === 'start') {
+        srcStart = m.index + m[0].length;
+      } else if (uuid === region.uuid && pos === 'end') {
+        srcEnd = m.index;
+      }
+    }
+
+    if (srcStart === -1) {
+      // 未能找到 start 锚点，用 buildRegionAnchor 兜底尝试
+      const startAnchor = buildRegionAnchor({ uuid: region.uuid, type: region.type, color: region.color, note: region.note }, 'start');
+      const endAnchor = buildRegionAnchor({ uuid: region.uuid, type: region.type, color: region.color, note: region.note }, 'end');
+
+      const startIdx = sectionSource.indexOf(startAnchor);
+      if (startIdx !== -1) srcStart = startIdx + startAnchor.length;
+
+      const endIdx = sectionSource.indexOf(endAnchor);
+      if (endIdx !== -1) srcEnd = endIdx;
+    }
+
+    if (srcStart === -1 || srcStart >= srcEnd) return null;
+
+    const { plain, map } = markdownToPlainWithMap(sectionSource);
+    const plainStart = map.findIndex(offset => offset >= srcStart);
+    let plainEnd = map.findIndex(offset => offset >= srcEnd);
+    if (plainStart === -1 || plainStart >= plain.length) return null;
+    if (plainEnd === -1) plainEnd = plain.length;
+    const searchText = plain.substring(plainStart, plainEnd).trim();
+    if (!searchText) return null;
+
+    const rootText = root.textContent || '';
+    const idx = rootText.indexOf(searchText);
+    if (idx === -1) return null;
+
+    const firstWrapped = this.wrapTextRange(root, idx, idx + searchText.length, region.uuid, region.type, region.color);
+    if (firstWrapped) {
+      this.styleRegionBlockAncestor(firstWrapped, region.type, region.color, region.note);
+    }
+    return firstWrapped;
+  }
+
+  /**
+   * 把 root 内 [startChar, endChar) 范围内的文本节点包裹成 region span
+   */
+  private wrapTextRange(
+    root: HTMLElement,
+    startChar: number,
+    endChar: number,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): HTMLElement | null {
+    let current = 0;
+    let firstWrapped: HTMLElement | null = null;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const ranges: { node: Text; start: number; end: number }[] = [];
+    let node: Node | null;
+    while ((node = walker.nextNode()) !== null) {
+      const textNode = node as Text;
+      const text = textNode.textContent || '';
+      const nodeStart = current;
+      const nodeEnd = current + text.length;
+      current = nodeEnd;
+      if (nodeEnd <= startChar || nodeStart >= endChar) continue;
+      ranges.push({
+        node: textNode,
+        start: Math.max(0, startChar - nodeStart),
+        end: Math.min(text.length, endChar - nodeStart),
+      });
+    }
+
+    for (const { node, start, end } of ranges) {
+      const text = node.textContent || '';
+      const before = text.substring(0, start);
+      const middle = text.substring(start, end);
+      const after = text.substring(end);
+      const span = document.createElement('span');
+      span.className = `markvault-region markvault-region-${type} markvault-region-${color} markvault-${type} markvault-${color} markvault-clickable`;
+      span.dataset.uuid = uuid;
+      span.dataset.type = type;
+      span.dataset.color = color;
+      span.style.cursor = 'pointer';
+      span.textContent = middle;
+      if (!firstWrapped) firstWrapped = span;
+
+      const parent = node.parentNode;
+      if (!parent) continue;
+      if (before) parent.insertBefore(document.createTextNode(before), node);
+      parent.insertBefore(span, node);
+      if (after) parent.insertBefore(document.createTextNode(after), node);
+      parent.removeChild(node);
+    }
+
+    return firstWrapped;
+  }
+
+  /**
+   * 找到 startEl 的最近块级祖先，给它加上点击事件和徽章（但不加背景色）
+   *
+   * 🔧 修复：不再给块祖先加 markvault-region 背景色类，
+   * 因为 wrapTextRange 已经精确包裹了文本节点为带背景的 <span>。
+   * 如果再给块祖先加背景，会导致整个块被染色。
+   */
+  private styleRegionBlockAncestor(startEl: HTMLElement, type: AnnotationType, color: string, note?: string): void {
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    let target: HTMLElement | null = startEl;
+    while (target && target !== document.body) {
+      if (blockTags.has(target.tagName) || target.hasClass('callout')) break;
+      target = target.parentElement;
+    }
+    if (!target || target === document.body) return;
+
+    // 🔧 只添加左侧竖线标识、点击事件和元数据，不加背景色相关类
+    target.addClass('markvault-region-block-border', `markvault-region-${color}`, 'markvault-clickable');
+    target.dataset.uuid = startEl.dataset.uuid || '';
+    target.dataset.type = type;
+    target.dataset.color = color;
+    target.style.cursor = 'pointer';
+    this.addRegionBadge(target, type, color, note);
+  }
+
+  /**
+   * 给 region 标注的目标元素添加右上角类型徽章
+   */
+  private addRegionBadge(targetEl: HTMLElement, type: AnnotationType, color: string, note?: string): void {
+    targetEl.style.position = 'relative';
+    const badge = document.createElement('span');
+    badge.className = `markvault-region-type-badge markvault-region-badge-type-${type} markvault-region-badge-color-${color}`;
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'markvault-region-type-badge-icon';
+    iconSpan.textContent = '▭';
+    const dot = document.createElement('span');
+    dot.className = 'markvault-region-type-badge-dot';
+    badge.appendChild(iconSpan);
+    badge.appendChild(dot);
+    targetEl.appendChild(badge);
+
+    if (note) {
+      const indicator = document.createElement('span');
+      indicator.className = 'markvault-region-note-indicator';
+      indicator.textContent = '📝';
+      indicator.title = note;
+      targetEl.appendChild(indicator);
+    }
+  }
+
+  /**
+   * 找到 region 两个锚点之间的第一个元素节点
+   */
+  private findFirstRegionElement(start: Node, end: Node | null): HTMLElement | null {
+    let node: Node | null = start.nextSibling;
+    while (node && node !== end) {
+      if (node.nodeType === Node.ELEMENT_NODE) return node as HTMLElement;
+      if (node.firstChild) {
+        node = node.firstChild;
+      } else {
+        while (node && !node.nextSibling && node !== start) {
+          node = node.parentNode;
+        }
+        node = node && node !== start ? node.nextSibling : null;
+      }
+    }
+    return null;
+  }
+
+  // ─── BUG-5.2 修复：跨 section region 的辅助方法 ────────────
+
+  /**
+   * 高亮从 start Comment 到 el 末尾的 DOM 节点
+   * 用于跨 section region 的起始 section（只有 start，end 在另一个 section）
+   */
+  private highlightRegionFromStart(
+    root: HTMLElement,
+    start: Node,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL);
+    walker.currentNode = start;
+    const nodes: Node[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode()) !== null) {
+      nodes.push(n);
+    }
+
+    this.applyRegionStyleToNodes(root, nodes, uuid, type, color);
+  }
+
+  /**
+   * 高亮从 el 开头到 end Comment 的 DOM 节点
+   * 用于跨 section region 的结束 section（只有 end，start 在另一个 section）
+   */
+  private highlightRegionToEnd(
+    root: HTMLElement,
+    end: Node,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL);
+    const nodes: Node[] = [];
+    let n: Node | null;
+    while ((n = walker.nextNode()) !== null && n !== end) {
+      nodes.push(n);
+    }
+
+    this.applyRegionStyleToNodes(root, nodes, uuid, type, color);
+  }
+
+  /**
+   * 给一组 DOM 节点批量应用 region 样式
+   * 提取自 highlightRegionNodes 的通用逻辑
+   *
+   * 🔧 关键修复：不给容器块元素（如 <ul>/<ol>）添加 markvault-region 背景类。
+   */
+  private applyRegionStyleToNodes(
+    root: HTMLElement,
+    nodes: Node[],
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    const styledAncestors = new Set<Element>();
+
+    for (const node of nodes) {
+      // 如果已经在某个被样式化的祖先内部，跳过避免重复处理
+      let ancestor: Element | null = node.parentElement;
+      let skip = false;
+      while (ancestor && ancestor !== root) {
+        if (styledAncestors.has(ancestor)) {
+          skip = true;
+          break;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      if (skip) continue;
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        const isBlock = blockTags.has(el.tagName) || el.hasClass('callout');
+
+        if (isBlock) {
+          const hasBlockChildren = Array.from(el.children).some(
+            c => blockTags.has(c.tagName) || (c as HTMLElement).hasClass?.('callout')
+          );
+          if (hasBlockChildren) {
+            // 容器块：只加点击事件，不染色
+            el.addClass('markvault-clickable');
+            el.dataset.uuid = uuid;
+            el.dataset.type = type;
+            el.dataset.color = color;
+            el.style.cursor = 'pointer';
+            styledAncestors.add(el);
+            continue;
+          }
+
+          // 叶子块：左侧竖线 + inline 文本包裹，不整块染色
+          this.styleRegionBlockBorderAndText(el, uuid, type, color);
+          styledAncestors.add(el);
+        }
+        // 行内元素跳过，其文本节点会在下面 TEXT_NODE 分支被包裹
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (!text.trim()) continue;
+        const parent = node.parentElement;
+        if (parent?.hasClass('markvault-region')) continue;
+        const span = document.createElement('span');
+        span.className = `markvault-region markvault-region-${type} markvault-region-${color} markvault-${type} markvault-${color} markvault-clickable`;
+        span.dataset.uuid = uuid;
+        span.dataset.type = type;
+        span.dataset.color = color;
+        span.style.cursor = 'pointer';
+        span.textContent = text;
+        node.parentNode?.replaceChild(span, node);
+      }
+    }
+  }
+
+  /**
+   * 精确匹配 section 中从 start 锚点到 section 末尾的内容并高亮
+   * 用于跨 section region 的起始 section（fallback 路径，Comment 节点不可用时）
+   *
+   * 🔧 关键修复：使用 REGION_ANCHOR_REGEX 搜索锚点位置，而非 buildRegionAnchor。
+   */
+  private applyRegionStyleFromStartAnchor(root: HTMLElement, sectionSource: string, region: Annotation): HTMLElement | null {
+    let srcStart = -1;
+
+    // 先用 REGION_ANCHOR_REGEX 搜索（能匹配含 % 的旧版锚点）
+    REGION_ANCHOR_REGEX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = REGION_ANCHOR_REGEX.exec(sectionSource)) !== null) {
+      if (m[1] === region.uuid && m[4] === 'start') {
+        srcStart = m.index + m[0].length;
+        break;
+      }
+    }
+
+    // 兜底用 buildRegionAnchor
+    if (srcStart === -1) {
+      const startAnchor = buildRegionAnchor({ uuid: region.uuid, type: region.type, color: region.color, note: region.note }, 'start');
+      const startIdx = sectionSource.indexOf(startAnchor);
+      if (startIdx === -1) return null;
+      srcStart = startIdx + startAnchor.length;
+    }
+
+    // end 到 section 末尾
+    const srcEnd = sectionSource.length;
+
+    const { plain, map } = markdownToPlainWithMap(sectionSource);
+    const plainStart = map.findIndex(offset => offset >= srcStart);
+    let plainEnd = map.findIndex(offset => offset >= srcEnd);
+    if (plainStart === -1 || plainStart >= plain.length) return null;
+    if (plainEnd === -1) plainEnd = plain.length;
+    const searchText = plain.substring(plainStart, plainEnd).trim();
+    if (!searchText) return null;
+
+    const rootText = root.textContent || '';
+    const idx = rootText.indexOf(searchText);
+    if (idx === -1) return null;
+
+    const firstWrapped = this.wrapTextRange(root, idx, idx + searchText.length, region.uuid, region.type, region.color);
+    if (firstWrapped) {
+      this.styleRegionBlockAncestor(firstWrapped, region.type, region.color, region.note);
+    }
+    return firstWrapped;
+  }
+
+  /**
+   * 精确匹配 section 中从 section 开头到 end 锚点的内容并高亮
+   * 用于跨 section region 的结束 section（fallback 路径，Comment 节点不可用时）
+   *
+   * 🔧 关键修复：使用 REGION_ANCHOR_REGEX 搜索锚点位置，而非 buildRegionAnchor。
+   */
+  private applyRegionStyleToEndAnchor(root: HTMLElement, sectionSource: string, region: Annotation): HTMLElement | null {
+    let srcEnd = -1;
+
+    // 先用 REGION_ANCHOR_REGEX 搜索（能匹配含 % 的旧版锚点）
+    REGION_ANCHOR_REGEX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = REGION_ANCHOR_REGEX.exec(sectionSource)) !== null) {
+      if (m[1] === region.uuid && m[4] === 'end') {
+        srcEnd = m.index;
+        break;
+      }
+    }
+
+    // 兜底用 buildRegionAnchor
+    if (srcEnd === -1) {
+      const endAnchor = buildRegionAnchor({ uuid: region.uuid, type: region.type, color: region.color, note: region.note }, 'end');
+      const endIdx = sectionSource.indexOf(endAnchor);
+      if (endIdx === -1) return null;
+      srcEnd = endIdx;
+    }
+
+    // 从 section 开头到 end 锚点
+    const srcStart = 0;
+
+    const { plain, map } = markdownToPlainWithMap(sectionSource);
+    const plainStart = 0;
+    let plainEnd = map.findIndex(offset => offset >= srcEnd);
+    if (plainEnd === -1) plainEnd = plain.length;
+    if (plainEnd <= 0) return null;
+    const searchText = plain.substring(plainStart, plainEnd).trim();
+    if (!searchText) return null;
+
+    const rootText = root.textContent || '';
+    const idx = rootText.indexOf(searchText);
+    if (idx === -1) return null;
+
+    const firstWrapped = this.wrapTextRange(root, idx, idx + searchText.length, region.uuid, region.type, region.color);
+    if (firstWrapped) {
+      this.styleRegionBlockAncestor(firstWrapped, region.type, region.color, region.note);
+    }
+    return firstWrapped;
+  }
+
+  /**
+   * 给完全在 region 内的 section 的所有块级子元素加样式
+   *
+   * 🔧 关键修复：不给容器块（如 <ul>/<ol>）添加 markvault-region 背景类，
+   * 只给叶子块元素（如 <li>/<p>）添加，避免整段列表被染色。
+   */
+  private applyRegionStyleToMiddleSection(
+    root: HTMLElement,
+    uuid: string,
+    type: AnnotationType,
+    color: string,
+  ): void {
+    const blockTags = new Set([
+      'P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER', 'NAV',
+      'FIGURE', 'FIGCAPTION', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TD', 'TH',
+      'OL', 'UL', 'DL', 'DT', 'DD', 'HR',
+    ]);
+
+    // 只给直接块级子元素加样式，不递归进入子节点
+    for (const child of Array.from(root.children)) {
+      const el = child as HTMLElement;
+      const isBlock = blockTags.has(el.tagName) || el.hasClass('callout');
+      if (isBlock) {
+        // 🔧 跳过容器块（包含其他块级子元素的块）
+        const hasBlockChildren = Array.from(el.children).some(
+          c => blockTags.has(c.tagName) || (c as HTMLElement).hasClass?.('callout')
+        );
+        if (hasBlockChildren) {
+          // 容器块：只添加点击事件和元数据，不加背景类
+          el.addClass('markvault-clickable');
+          el.dataset.uuid = uuid;
+          el.dataset.type = type;
+          el.dataset.color = color;
+          el.style.cursor = 'pointer';
+          // 递归处理子块
+          this.applyRegionStyleToMiddleSection(el, uuid, type, color);
+          continue;
+        }
+
+        // 叶子块：左侧竖线 + inline 文本包裹，不整块染色
+        this.styleRegionBlockBorderAndText(el, uuid, type, color);
       }
     }
   }
@@ -1269,6 +2423,7 @@ export default class MarkVaultPlugin extends Plugin {
           // 标记文件已同步（Modal 中 modifyGuard 已释放）
           this.markFileSynced(annotation.filePath);
           await this.updateSpanCache(annotation.filePath);
+      await this.updateRegionCache(annotation.filePath);
           await this.refreshSidebar();
         },
       );
@@ -1362,9 +2517,59 @@ export default class MarkVaultPlugin extends Plugin {
         await addAnnotation(annotation);
         console.log(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
         this.markFileSynced(filePath);
+        // 🔧 BUG-5.3 修复：阅读模式创建 block 后刷新缓存，确保切回编辑模式时装饰正确
+        await this.updateSpanCache(filePath);
+        await this.updateRegionCache(filePath);
         await this.refreshSidebar();
-      } else if (this.settings.useNativeSyntax || type === 'bold') {
-        // ── 自然语法标注：隐身锚点 + 原生 Markdown 包裹 ──
+      } else {
+        const sourceSelected = content.substring(startOffset, endOffset);
+        const scan = scanMarkdownContexts(sourceSelected);
+        const spansBlocks = sourceSelected.includes('\n');
+
+        // 显式指定 kind === 'region' 时，强制走双锚点区域标注
+        if (kind === 'region' || scan.hasSpecialContent || spansBlocks) {
+          // ── 区域标注：双锚点包围原选区 ──
+          const startAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'start');
+          const endAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'end');
+          const replacement = startAnchor + sourceSelected + endAnchor;
+          const newContent = content.substring(0, startOffset) + replacement + content.substring(endOffset);
+          await this.app.vault.modify(view.file, newContent);
+
+          if (view.previewMode) {
+            view.previewMode.rerender(true);
+          }
+
+          const startLine = content.substring(0, startOffset).split('\n').length - 1;
+          const endLine = content.substring(0, endOffset).split('\n').length - 1;
+
+          const annotation: Annotation = {
+            uuid,
+            filePath,
+            type,
+            color,
+            text: selectedText,
+            note: '',
+            tags: [],
+            startOffset,
+            endOffset: startOffset + replacement.length,
+            startLine,
+            endLine,
+            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
+            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            kind: 'region',
+            targetHash: computeSpanSignature(sourceSelected),
+          };
+
+          await addAnnotation(annotation);
+          await this.updateSpanCache(filePath);
+          await this.updateRegionCache(filePath);
+          console.log(`MarkVault: created reading-mode region annotation ${uuid} in ${filePath}`);
+          this.markFileSynced(filePath);
+          await this.refreshSidebar();
+        } else {
+        // ── 自然语法行内标注：隐身锚点 + 原生 HTML 包裹 ──
         const annotation: Annotation = {
           uuid,
           filePath,
@@ -1398,99 +2603,7 @@ export default class MarkVaultPlugin extends Plugin {
         console.log(`MarkVault: created reading-mode native annotation ${uuid} in ${filePath}`);
         this.markFileSynced(filePath);
         await this.refreshSidebar();
-      } else {
-        const sourceSelected = content.substring(startOffset, endOffset);
-        const scan = scanMarkdownContexts(sourceSelected);
-
-        if (scan.hasSpecialContent) {
-          // ── span 标注：选区包含公式/代码/链接等 Markdown 语法，不能直接用 <mark> 包裹 ──
-          const beforeText = content.substring(0, startOffset);
-          const blockStart = this.findBlockBoundary(beforeText);
-          const anchorLine = content.substring(0, blockStart).split('\n').length - 1;
-
-          const anchor = buildSpanAnchor({ uuid, type, color, note: '' });
-          const anchorWithNewline = anchor + '\n';
-          const newContent = content.substring(0, blockStart) + anchorWithNewline + content.substring(blockStart);
-          await this.app.vault.modify(view.file, newContent);
-
-          if (view.previewMode) {
-            view.previewMode.rerender(true);
-          }
-
-          const insertedLen = anchorWithNewline.length;
-          const spanRanges: SpanRange[] = [];
-          for (const seg of scan.segments) {
-            if (seg.type === 'text' && seg.content.trim().length > 0) {
-              spanRanges.push({
-                from: startOffset + seg.startOffset + insertedLen,
-                to: startOffset + seg.endOffset + insertedLen,
-              });
-            }
-          }
-
-          const annotation: Annotation = {
-            uuid,
-            filePath,
-            type,
-            color,
-            text: selectedText,
-            note: '',
-            tags: [],
-            startOffset: blockStart,
-            endOffset: blockStart + anchor.length,
-            startLine: 0,
-            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
-            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            kind: 'span',
-            anchorLine,
-            spanRanges,
-            targetHash: computeSpanSignature(selectedText),
-          };
-
-          await addAnnotation(annotation);
-          await this.updateSpanCache(filePath);
-          console.log(`MarkVault: created reading-mode span annotation ${uuid} in ${filePath}`);
-          this.markFileSynced(filePath);
-          await this.refreshSidebar();
-        } else {
-          // ── 行内标注：包裹 <mark> 标签 ──
-          const annotation: Annotation = {
-            uuid,
-            filePath,
-            type,
-            color,
-            text: selectedText,
-            note: '',
-            tags: [],
-            startOffset,
-            endOffset,
-            startLine: 0,
-            contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
-            contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            kind: 'inline',
-          };
-
-          const markTag = buildMarkTag(annotation);
-
-          const newContent = content.substring(0, startOffset) + markTag + content.substring(endOffset);
-          await this.app.vault.modify(view.file, newContent);
-
-          // 强制阅读模式重新渲染，确保 post-processor 立即生效
-          if (view.previewMode) {
-            view.previewMode.rerender(true);
-          }
-
-          annotation.endOffset = startOffset + markTag.length;
-          await addAnnotation(annotation);
-
-          console.log(`MarkVault: created reading-mode inline annotation ${uuid} in ${filePath}`);
-          this.markFileSynced(filePath);
-          await this.refreshSidebar();
-        }
+      }
       }
     } catch (err) {
       console.error('MarkVault: failed to create reading-mode annotation', err);
@@ -1507,68 +2620,301 @@ export default class MarkVaultPlugin extends Plugin {
    * 返回源文件中的 [startOffset, endOffset)，用于包裹 <mark> 或定位块边界。
    * 阅读模式下用户看到的是渲染后的纯文本，因此先把 Markdown 源文本转成纯文本
    * 并维护偏移映射。
+   *
+   * 🔧 修复：阅读模式选中跨段落文本创建 region 标注时，normalizeSelectedText 把
+   * 换行压缩为空格，但 plain 保留原始换行符导致匹配失败。
+   * 解决方案：同时生成空白规范化的 plain（normalizedPlain）和映射，所有匹配
+   * 都在 normalizedPlain 上进行，通过 normalizedMap → map → 源文件偏移 回溯。
    */
   private findBestTextOffset(content: string, selectedText: string): { startOffset: number; endOffset: number } | null {
     const { plain, map } = markdownToPlainWithMap(content);
-    const normalizedSelected = selectedText.replace(/\s+/g, ' ').trim();
+    const normalizedSelected = this.normalizeSelectedText(selectedText);
 
-    let plainIdx = plain.indexOf(normalizedSelected);
-    if (plainIdx !== -1) {
-      const startOffset = map[plainIdx];
-      const endOffset = map[plainIdx + normalizedSelected.length - 1] + 1;
-      return { startOffset, endOffset };
+    // 🔧 生成空白规范化版本的 plain 和映射
+    // normalizedPlain: 与 normalizedSelected 一样把 \s+ 压缩为单个空格
+    // normalizedMap: normalizedPlain[i] → plain 中的索引 → map[plainIdx] → 源文件偏移
+    const { normalizedPlain, normalizedMap } = this.buildNormalizedPlainAndMap(plain);
+
+    // 1. 完整匹配（在规范化空间中搜索）
+    let normIdx = normalizedPlain.indexOf(normalizedSelected);
+    if (normIdx !== -1) {
+      const startPlainIdx = normalizedMap[normIdx];
+      const endPlainIdx = normalizedMap[normIdx + normalizedSelected.length - 1];
+      return { startOffset: map[startPlainIdx], endOffset: map[endPlainIdx] + 1 };
     }
 
-    // 尝试去除首尾空格后的匹配
-    const trimmedSelected = selectedText.trim();
-    plainIdx = plain.indexOf(trimmedSelected);
-    if (plainIdx !== -1) {
-      const startOffset = map[plainIdx];
-      const endOffset = map[plainIdx + trimmedSelected.length - 1] + 1;
-      return { startOffset, endOffset };
-    }
+    // 2. 用首尾片段匹配（对长选区/含特殊格式的情况更鲁棒）
+    const snippetMatch = this.findByTextSnippets(normalizedPlain, normalizedMap, map, normalizedSelected);
+    if (snippetMatch) return snippetMatch;
 
-    // 仍未找到：尝试通过 DOM 段落上下文定位
-    const sel = window.getSelection();
-    if (sel && sel.rangeCount > 0) {
-      const range = sel.getRangeAt(0);
-      let container: Node | null = range.commonAncestorContainer;
-      const blockTags = ['P', 'LI', 'DIV', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION'];
+    // 3. 通过 DOM 段落上下文定位
+    const domMatch = this.findOffsetByDOMContext(normalizedPlain, normalizedMap, map, normalizedSelected);
+    if (domMatch) return domMatch;
 
-      while (container && container !== document.body) {
-        const el = container.nodeType === Node.ELEMENT_NODE
-          ? (container as HTMLElement)
-          : container.parentElement;
-        if (
-          el &&
-          (blockTags.includes(el.tagName) || el.hasClass?.('markdown-preview-sizer'))
-        ) {
-          const paragraphText = (el.textContent || '').replace(/\s+/g, ' ').trim();
-          const idxInParagraph = paragraphText.indexOf(normalizedSelected);
-          if (idxInParagraph !== -1) {
-            // 用段落中一段上下文在 plain 中定位
-            const contextStart = Math.max(0, idxInParagraph - 30);
-            const contextEnd = Math.min(
-              paragraphText.length,
-              idxInParagraph + normalizedSelected.length + 30,
-            );
-            const context = paragraphText.substring(contextStart, contextEnd);
-            const contextIdx = plain.indexOf(context);
-            if (contextIdx !== -1) {
-              const innerIdx = idxInParagraph - contextStart;
-              const startOffset = map[contextIdx + innerIdx];
-              const endOffset = map[contextIdx + innerIdx + normalizedSelected.length - 1] + 1;
-              return { startOffset, endOffset };
-            }
-          }
-          break;
-        }
-        container = container.parentNode;
-      }
-    }
+    // 4. 模糊匹配兜底 — 逐词滑动窗口
+    // 用于处理 Obsidian 渲染后标点/空格差异导致精确匹配失败的情况
+    const fuzzyMatch = this.findByFuzzySlidingWindow(normalizedPlain, normalizedMap, map, normalizedSelected);
+    if (fuzzyMatch) return fuzzyMatch;
 
     console.warn(`MarkVault: selected text not found in source file: "${selectedText}"`);
     return null;
+  }
+
+  /**
+   * 🔧 NEW: 构建空白规范化版本的 plain 和映射
+   *
+   * 将 plain 中的 \s+ 压缩为单个空格，生成 normalizedPlain。
+   * normalizedMap[i] = plain 中的原始索引，即 normalizedPlain[i] 对应 plain[normalizedMap[i]]。
+   */
+  private buildNormalizedPlainAndMap(plain: string): { normalizedPlain: string; normalizedMap: number[] } {
+    const normalizedPlainChars: string[] = [];
+    const normalizedMap: number[] = [];
+    let i = 0;
+    while (i < plain.length) {
+      if (/\s/.test(plain[i])) {
+        // 把连续空白压缩为一个空格
+        normalizedPlainChars.push(' ');
+        // 映射到第一个空白字符在 plain 中的位置
+        normalizedMap.push(i);
+        // 跳过所有连续空白
+        while (i < plain.length && /\s/.test(plain[i])) i++;
+      } else {
+        normalizedPlainChars.push(plain[i]);
+        normalizedMap.push(i);
+        i++;
+      }
+    }
+    return { normalizedPlain: normalizedPlainChars.join(''), normalizedMap };
+  }
+
+  /**
+   * 🔧 NEW: 通过 DOM 段落上下文定位（从 findBestTextOffset 提取）
+   * 用选区所在块级元素的文本内容作为上下文在 normalizedPlain 中定位
+   *
+   * @param normalizedPlain 空白规范化后的纯文本
+   * @param normalizedMap normalizedPlain 索引 → plain 索引的映射
+   * @param srcMap plain 索引 → 源文件偏移的映射
+   */
+  private findOffsetByDOMContext(
+    normalizedPlain: string,
+    normalizedMap: number[],
+    srcMap: number[],
+    normalizedSelected: string,
+  ): { startOffset: number; endOffset: number } | null {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+
+    const range = sel.getRangeAt(0);
+    let container: Node | null = range.commonAncestorContainer;
+    const blockTags = ['P', 'LI', 'DIV', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION'];
+
+    while (container && container !== document.body) {
+      const el = container.nodeType === Node.ELEMENT_NODE
+        ? (container as HTMLElement)
+        : container.parentElement;
+      if (
+        el &&
+        (blockTags.includes(el.tagName) || el.hasClass?.('markdown-preview-sizer'))
+      ) {
+        const paragraphText = this.normalizeSelectedText(el.textContent || '');
+        const idxInParagraph = paragraphText.indexOf(normalizedSelected);
+        if (idxInParagraph !== -1) {
+          const contextStart = Math.max(0, idxInParagraph - 30);
+          const contextEnd = Math.min(
+            paragraphText.length,
+            idxInParagraph + normalizedSelected.length + 30,
+          );
+          const context = paragraphText.substring(contextStart, contextEnd);
+          const contextIdx = normalizedPlain.indexOf(context);
+          if (contextIdx !== -1) {
+            const innerIdx = idxInParagraph - contextStart;
+            const startPlainIdx = normalizedMap[contextIdx + innerIdx];
+            const endPlainIdx = normalizedMap[contextIdx + innerIdx + normalizedSelected.length - 1];
+            return { startOffset: srcMap[startPlainIdx], endOffset: srcMap[endPlainIdx] + 1 };
+          }
+        }
+        break;
+      }
+      container = container.parentNode;
+    }
+    return null;
+  }
+
+  /**
+   * 🔧 NEW: 模糊滑动窗口匹配
+   *
+   * 当精确匹配失败时（Obsidian 渲染后标点/空格/Unicode 与源文件有差异），
+   * 使用滑动窗口在 normalizedPlain 文本中寻找与选中文本最相似的片段。
+   *
+   * @param normalizedPlain 空白规范化后的纯文本
+   * @param normalizedMap normalizedPlain 索引 → plain 索引的映射
+   * @param srcMap plain 索引 → 源文件偏移的映射
+   */
+  private findByFuzzySlidingWindow(
+    normalizedPlain: string,
+    normalizedMap: number[],
+    srcMap: number[],
+    normalizedSelected: string,
+  ): { startOffset: number; endOffset: number } | null {
+    // 太短的选区不做模糊匹配（误匹配风险高）
+    if (normalizedSelected.length < 8) return null;
+
+    const selectedTokens = this.tokenizeForFuzzy(normalizedSelected);
+    if (selectedTokens.length < 2) return null;
+
+    // 在 normalizedPlain 中搜索第一个词元出现的位置，作为候选起点
+    const firstToken = selectedTokens[0];
+    const secondToken = selectedTokens.length > 1 ? selectedTokens[1] : null;
+    const lastToken = selectedTokens[selectedTokens.length - 1];
+
+    // 搜索窗口：选中文本长度的 ±50%
+    const estLen = normalizedSelected.length;
+    const windowSize = Math.round(estLen * 1.5);
+
+    let bestStart = -1;
+    let bestScore = 0;
+
+    // 在 normalizedPlain 中找所有 firstToken 出现的位置
+    let searchFrom = 0;
+    while (searchFrom < normalizedPlain.length) {
+      const firstIdx = normalizedPlain.indexOf(firstToken, searchFrom);
+      if (firstIdx === -1) break;
+
+      // 候选窗口：[firstIdx, firstIdx + windowSize)
+      const windowEnd = Math.min(firstIdx + windowSize, normalizedPlain.length);
+      const windowText = normalizedPlain.substring(firstIdx, windowEnd);
+
+      // 计算词元匹配得分
+      let score = 0;
+      let matchedLength = firstToken.length; // 已匹配的字符数
+
+      for (let t = 1; t < selectedTokens.length; t++) {
+        const token = selectedTokens[t];
+        const tokenIdx = windowText.indexOf(token, matchedLength - firstIdx > 0 ? matchedLength - firstIdx : 0);
+        if (tokenIdx !== -1) {
+          score++;
+          matchedLength = firstIdx + tokenIdx + token.length;
+        }
+      }
+
+      // 额外检查：lastToken 应该在窗口内
+      if (lastToken !== firstToken) {
+        const lastIdx = windowText.lastIndexOf(lastToken);
+        if (lastIdx !== -1) {
+          score += 2; // 最后一个词元匹配权重更高
+        }
+      }
+
+      // 也检查第二个词元是否在 firstToken 附近
+      if (secondToken && secondToken !== firstToken) {
+        const secondIdx = windowText.indexOf(secondToken, firstToken.length);
+        if (secondIdx !== -1 && secondIdx < firstToken.length * 3) {
+          score += 1;
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = firstIdx;
+      }
+
+      searchFrom = firstIdx + 1;
+    }
+
+    if (bestStart === -1 || bestScore < Math.min(selectedTokens.length * 0.3, 2)) {
+      return null;
+    }
+
+    // 用 lastToken 确定终点
+    const searchEnd = Math.min(bestStart + windowSize, normalizedPlain.length);
+    const windowFromBest = normalizedPlain.substring(bestStart, searchEnd);
+    const lastIdx = windowFromBest.lastIndexOf(lastToken);
+
+    let endNormIdx: number;
+    if (lastIdx !== -1) {
+      endNormIdx = bestStart + lastIdx + lastToken.length;
+    } else {
+      // 估算终点
+      endNormIdx = bestStart + estLen;
+    }
+
+    if (endNormIdx > normalizedPlain.length) endNormIdx = normalizedPlain.length;
+    if (bestStart >= endNormIdx) return null;
+
+    // 安全检查：normalizedMap 索引越界
+    if (bestStart >= normalizedMap.length || endNormIdx - 1 >= normalizedMap.length) return null;
+
+    // 通过 normalizedMap → srcMap 回溯到源文件偏移
+    const startPlainIdx = normalizedMap[bestStart];
+    const endPlainIdx = normalizedMap[endNormIdx - 1];
+    return {
+      startOffset: srcMap[startPlainIdx],
+      endOffset: srcMap[endPlainIdx] + 1,
+    };
+  }
+
+  /**
+   * 🔧 NEW: 将文本拆分为可用于模糊匹配的词元
+   * 按标点和空格拆分，过滤掉过短的片段
+   */
+  private tokenizeForFuzzy(text: string): string[] {
+    // 按空格和常见标点拆分，保留 2 字符以上的片段
+    return text
+      .split(/[\s,.;:!?，。；：！？、（）()\[\]【】《》""''「」『』—–\-\/\\]+/)
+      .filter(token => token.length >= 2);
+  }
+
+  /**
+   * 规范化阅读模式选中的文本：统一空白、去除零宽字符
+   */
+  private normalizeSelectedText(text: string): string {
+    return text
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * 用选区的前缀 + 后缀片段在 normalizedPlain 中定位，适应中间有格式差异的情况
+   *
+   * @param normalizedPlain 空白规范化后的纯文本
+   * @param normalizedMap normalizedPlain 索引 → plain 索引的映射
+   * @param srcMap plain 索引 → 源文件偏移的映射
+   */
+  private findByTextSnippets(
+    normalizedPlain: string,
+    normalizedMap: number[],
+    srcMap: number[],
+    normalizedSelected: string,
+  ): { startOffset: number; endOffset: number } | null {
+    if (normalizedSelected.length < 10) return null;
+
+    const snippetLen = Math.min(30, Math.floor(normalizedSelected.length / 3));
+    const prefix = normalizedSelected.slice(0, snippetLen);
+    const suffix = normalizedSelected.slice(-snippetLen);
+
+    const prefixIdx = normalizedPlain.indexOf(prefix);
+    if (prefixIdx === -1) return null;
+
+    const suffixIdx = normalizedPlain.indexOf(suffix, prefixIdx + prefix.length);
+    if (suffixIdx === -1) {
+      // 只有前缀找到：按选区长度估算终点
+      const endNormIdx = prefixIdx + normalizedSelected.length;
+      if (endNormIdx > normalizedPlain.length) return null;
+      const startPlainIdx = normalizedMap[prefixIdx];
+      const endPlainIdx = normalizedMap[endNormIdx - 1];
+      return {
+        startOffset: srcMap[startPlainIdx],
+        endOffset: srcMap[endPlainIdx] + 1,
+      };
+    }
+
+    const startPlainIdx = normalizedMap[prefixIdx];
+    const endPlainIdx = normalizedMap[suffixIdx + suffix.length - 1];
+    return {
+      startOffset: srcMap[startPlainIdx],
+      endOffset: srcMap[endPlainIdx] + 1,
+    };
   }
 
   /** 向前查找块边界位置（空行、标题行、callout行 之后） */

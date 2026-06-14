@@ -30,6 +30,57 @@ export function markdownToPlainWithMap(content: string): { plain: string; map: n
       continue;
     }
 
+    // 块级公式 $$...$$
+    if (content.startsWith('$$', i)) {
+      const end = content.indexOf('$$', i + 2);
+      if (end !== -1) {
+        // 保留内部文本，跳过 $$ 标记
+        for (let k = i + 2; k < end; k++) {
+          push(content[k], k);
+        }
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // 行内公式 $...$（简化处理：匹配最近的下一个 $）
+    if (content[i] === '$') {
+      const end = content.indexOf('$', i + 1);
+      if (end !== -1) {
+        for (let k = i + 1; k < end; k++) {
+          push(content[k], k);
+        }
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // 代码围栏 ```...``` — 跳过开闭围栏，保留内部代码文本
+    if (content.startsWith('```', i)) {
+      // 找到行尾（跳过语言标识，如 ```python）
+      const lineEnd = content.indexOf('\n', i);
+      if (lineEnd !== -1) {
+        // 跳过开围栏行
+        i = lineEnd + 1;
+        // 保留内部代码文本
+        const closeFence = content.indexOf('\n```', i);
+        if (closeFence !== -1) {
+          for (let k = i; k < closeFence; k++) {
+            push(content[k], k);
+          }
+          i = closeFence + 4; // 跳过 \n```
+          continue;
+        } else {
+          // 没有闭合围栏：保留剩余文本
+          for (let k = i; k < content.length; k++) {
+            push(content[k], k);
+          }
+          i = content.length;
+          continue;
+        }
+      }
+    }
+
     // 行内代码 `...`
     if (content[i] === '`') {
       const end = content.indexOf('`', i + 1);
@@ -49,8 +100,11 @@ export function markdownToPlainWithMap(content: string): { plain: string; map: n
     if (content.startsWith('**', i)) {
       const end = content.indexOf('**', i + 2);
       if (end !== -1) {
-        // 保留内部文本，跳过 ** 标记
-        i += 2;
+        // 保留内部文本，跳过开闭 ** 标记
+        for (let k = i + 2; k < end; k++) {
+          push(content[k], k);
+        }
+        i = end + 2;
         continue;
       }
       push(content[i], i);
@@ -62,11 +116,53 @@ export function markdownToPlainWithMap(content: string): { plain: string; map: n
     if (content.startsWith('==', i) || content.startsWith('~~', i)) {
       const marker = content.slice(i, i + 2);
       const end = content.indexOf(marker, i + 2);
-      i = end === -1 ? i + 2 : end + 2;
+      if (end !== -1) {
+        // 保留内部文本，跳过开闭标记
+        for (let k = i + 2; k < end; k++) {
+          push(content[k], k);
+        }
+        i = end + 2;
+      } else {
+        i += 2;
+      }
       continue;
     }
 
-    // 斜体 *...*（避免与 ** 冲突）
+    // 标题行 # Title
+    if (content[i] === '#' && (i === 0 || content[i - 1] === '\n')) {
+      let j = i;
+      while (j < content.length && content[j] === '#') j++;
+      if (j < content.length && content[j] === ' ') j++;
+      i = j;
+      continue;
+    }
+
+    // 无序列表项 - / * / + （必须带空格，避免误吞普通星号）
+    if (
+      (content[i] === '-' || content[i] === '*' || content[i] === '+') &&
+      (i === 0 || content[i - 1] === '\n') &&
+      content[i + 1] === ' '
+    ) {
+      i += 2;
+      // 任务列表 - [ ] / - [x]
+      if (content[i] === '[' && (content[i + 1] === ' ' || content[i + 1] === 'x' || content[i + 1] === 'X') && content[i + 2] === ']') {
+        i += 3;
+        if (content[i] === ' ') i++;
+      }
+      continue;
+    }
+
+    // 有序列表项 1. / 2. 
+    if (/\d/.test(content[i]) && (i === 0 || content[i - 1] === '\n')) {
+      let j = i;
+      while (j < content.length && /\d/.test(content[j])) j++;
+      if (content[j] === '.' && content[j + 1] === ' ') {
+        i = j + 2;
+        continue;
+      }
+    }
+
+    // 斜体 *...*（避免与 **、列表项 * 冲突）
     if (content[i] === '*') {
       const end = content.indexOf('*', i + 1);
       if (end !== -1 && end === i + 1) {
@@ -76,7 +172,11 @@ export function markdownToPlainWithMap(content: string): { plain: string; map: n
         continue;
       }
       if (end !== -1) {
-        i++;
+        // 保留内部文本，跳过开闭 * 标记
+        for (let k = i + 1; k < end; k++) {
+          push(content[k], k);
+        }
+        i = end + 1;
         continue;
       }
       push(content[i], i);

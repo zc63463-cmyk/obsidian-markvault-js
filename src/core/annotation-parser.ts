@@ -5,6 +5,7 @@ import { encodeFields, decodeFields } from '../utils/fields';
 import { scanMarkdownContexts } from './md-context';
 import { computeBlockSignature, computeSpanSignature } from './block-fingerprint';
 import { parseNativeAnnotations } from './native-annotation';
+import { parseRegionAnnotations } from './region-annotation';
 
 const MARK_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_REGEX = /\b([\w-]+)="([^"]*)"/g;
@@ -692,10 +693,13 @@ export function parseAllAnnotationsFromMarkdown(
     };
   });
 
-  // 3. 自然语法标注（隐身锚点 + 原生包裹）
+  // 3. 区域标注（双锚点包围）
+  const regionAnnotations = parseRegionAnnotations(content, filePath);
+
+  // 4. 自然语法标注（隐身锚点 + 原生包裹）
   const nativeAnnotations = parseNativeAnnotations(content, filePath);
 
-  return [...inlineAnnotations, ...blockAnnotations, ...nativeAnnotations];
+  return [...inlineAnnotations, ...blockAnnotations, ...regionAnnotations, ...nativeAnnotations];
 }
 
 /**

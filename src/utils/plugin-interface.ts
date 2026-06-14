@@ -1,6 +1,6 @@
 import type { ModifyGuard } from './modify-guard';
 import type { AnnotationModal } from '../ui/editor/annotation-modal';
-import type { MarkVaultSettings } from '../types/annotation';
+import type { Annotation, MarkVaultSettings } from '../types/annotation';
 
 /**
  * 侧边栏需要的 Plugin 接口
@@ -24,6 +24,12 @@ export interface MarkVaultPluginInterface {
 
   /** 更新指定文件的 span 缓存 */
   updateSpanCache(filePath: string): Promise<void>;
+
+  /** 更新指定文件的 region 缓存 */
+  updateRegionCache(filePath: string): Promise<void>;
+
+  /** 在编辑模式下选中 region 内容，触发原生选区 */
+  selectRegionInEditor(annotation: Annotation): boolean;
 
   /** 刷新侧边栏 */
   refreshSidebar(): Promise<void>;

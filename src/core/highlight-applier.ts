@@ -16,19 +16,62 @@
  * - Obsidian 内部提供 @codemirror/state 和 @codemirror/view，无需安装
  */
 
-import { RangeSetBuilder, type Extension } from '@codemirror/state';
+import { EditorSelection, RangeSetBuilder, StateEffect, type Extension } from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
   type EditorView,
+  layer,
+  type LayerMarker,
   type PluginSpec,
   type PluginValue,
+  RectangleMarker,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
 } from '@codemirror/view';
 import { PRESET_COLORS, type AnnotationType, type SpanRange } from '../types/annotation';
-import { NATIVE_ANCHOR_REGEX } from './native-annotation';
+import { findNativeWrapper, NATIVE_ANCHOR_REGEX } from './native-annotation';
+import { REGION_ANCHOR_REGEX } from './region-annotation';
+
+// ─── Region Layer 重绘触发器 ──────────────────────────────
+
+/**
+ * 自定义 StateEffect：用于在 region 缓存更新后强制 CM6 layer 重绘。
+ *
+ * 问题：regionLayerExtension 的 update() 只在 docChanged || viewportChanged 时返回 true。
+ * 当 updateRegionCache() 异步填充缓存后，没有任何事件通知 CM6 layer 重新渲染。
+ * 发送此 effect 后，layer 的 update() 会返回 true，触发 markers() 重新计算。
+ */
+export const regionCacheUpdatedEffect = StateEffect.define<void>();
+
+/** 当前活跃的 EditorView 引用，由 main.ts 注入 */
+let activeEditorView: EditorView | null = null;
+
+/** 注入当前活跃的 EditorView（在 main.ts 的 active-leaf-change 中调用） */
+export function setActiveEditorView(view: EditorView | null): void {
+  activeEditorView = view;
+}
+
+/**
+ * 在 region 缓存更新后强制 CM6 layer 重绘。
+ * 通过发送 regionCacheUpdatedEffect 触发 layer 的 update() 返回 true。
+ * 必须在 updateRegionCache() 完成后调用。
+ */
+export function requestRegionLayerRedraw(): void {
+  if (activeEditorView) {
+    try {
+      // 使用 any 访问 destroyed 属性（CM6 内部标记，TypeScript 定义为 private）
+      const view = activeEditorView as any;
+      if (view.destroyed) return;
+      activeEditorView.dispatch({
+        effects: [regionCacheUpdatedEffect.of(undefined)],
+      });
+    } catch {
+      // view 可能已销毁，忽略
+    }
+  }
+}
 
 // ─── 外部注入的文件路径解析器 ──────────────────────────────
 
@@ -56,6 +99,28 @@ function resolveFilePath(): string | null {
   return null;
 }
 
+/**
+ * 从 CM6 view 推断当前文件路径
+ * 通过 Obsidian 的 DOM 结构查找 .workspace-leaf 的 data-path 属性
+ */
+function getFilePathFromView(view: EditorView): string | null {
+  try {
+    const dom = view.dom;
+    const leafEl = dom.closest('.workspace-leaf');
+    if (leafEl) {
+      const contentEl = leafEl.querySelector('.workspace-leaf-content[data-path]');
+      if (contentEl) {
+        return contentEl.getAttribute('data-path');
+      }
+      const pathAttr = (leafEl as HTMLElement).getAttribute('data-path');
+      if (pathAttr) return pathAttr;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 // ─── Regex Patterns ──────────────────────────────────────
 
 /** 匹配完整的 <mark ...>text</mark> */
@@ -64,10 +129,7 @@ const MARK_FULL_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_EXTRACT_REGEX = /\b([\w-]+)="([^"]*)"/g;
 /** 匹配 %%markvault:%% 锚点行（note 段可选） */
 const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
-/** 匹配自然语法粗体标注：%%mv:i:uuid:bold:color%%**文本**（旧） */
-const NATIVE_BOLD_REGEX = /%%mv:i:([^:%]+):bold:([^:%]+)%%\*\*([^*]+?)\*\*/g;
-/** 匹配粗体试验田：<b class="..."> 包裹 */
-const NATIVE_BOLD_B_REGEX = /%%mv:i:([^:%]+):bold:([^:%]+)%%<b\s+class="markvault-native\s+markvault-bold\s+markvault-([^"\s]+)(?:\s+markvault-clickable)?"\s+data-uuid="[^"]+"\s+data-type="bold"\s+data-color="[^"]+">([^<]*)<\/b>/g;
+
 
 // ─── Span Annotation Cache ──────────────────────────────────
 
@@ -110,6 +172,73 @@ export function clearSpanCacheForFile(filePath: string): void {
 /** 清除所有 span 缓存 */
 export function clearSpanCache(): void {
   spanCache.clear();
+}
+
+// ─── Region Annotation Cache ──────────────────────────────────
+
+/** Region 标注缓存数据（从 DB 加载） */
+export interface RegionAnnotationData {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  startOffset: number;
+  endOffset: number;
+  note: string;
+}
+
+const regionCache = new Map<string, RegionAnnotationData[]>();
+
+export function updateRegionCacheForFile(filePath: string, annotations: RegionAnnotationData[]): void {
+  if (annotations.length > 0) {
+    regionCache.set(filePath, annotations);
+  } else {
+    regionCache.delete(filePath);
+  }
+}
+
+export function getRegionCacheForFile(filePath: string): RegionAnnotationData[] {
+  return regionCache.get(filePath) || [];
+}
+
+export function clearRegionCacheForFile(filePath: string): void {
+  regionCache.delete(filePath);
+}
+
+export function clearRegionCache(): void {
+  regionCache.clear();
+}
+
+// ─── Block Annotation Cache ──────────────────────────────────
+
+/** Block 标注缓存数据（从 DB 加载） */
+export interface BlockAnnotationData {
+  uuid: string;
+  type: AnnotationType;
+  color: string;
+  targetLine: number;
+  note: string;
+}
+
+const blockCache = new Map<string, BlockAnnotationData[]>();
+
+export function updateBlockCacheForFile(filePath: string, annotations: BlockAnnotationData[]): void {
+  if (annotations.length > 0) {
+    blockCache.set(filePath, annotations);
+  } else {
+    blockCache.delete(filePath);
+  }
+}
+
+export function getBlockCacheForFile(filePath: string): BlockAnnotationData[] {
+  return blockCache.get(filePath) || [];
+}
+
+export function clearBlockCacheForFile(filePath: string): void {
+  blockCache.delete(filePath);
+}
+
+export function clearBlockCache(): void {
+  blockCache.clear();
 }
 
 // ─── Widget Types ────────────────────────────────────────
@@ -195,6 +324,47 @@ class NativeAnchorWidget extends WidgetType {
   }
 }
 
+/**
+ * Region 锚点标记 Widget
+ * 编辑模式下把隐藏的 region start/end 锚点替换为一个可见的小符号，
+ * 让用户能感知 region 边界，同时不遮挡正文。
+ */
+class RegionAnchorMarkerWidget extends WidgetType {
+  constructor(
+    readonly uuid: string,
+    readonly type: AnnotationType,
+    readonly color: string,
+    readonly position: 'start' | 'end',
+  ) {
+    super();
+  }
+
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = `markvault-region-anchor-marker markvault-region-anchor-${this.position}`;
+    span.textContent = this.position === 'start' ? '▭' : '▭';
+    span.title = `Region ${this.position}`;
+    span.style.color = this.getColorHex();
+    span.style.opacity = '0.6';
+    span.style.fontSize = '0.85em';
+    span.style.padding = '0 1px';
+    span.style.userSelect = 'none';
+    span.style.cursor = 'pointer';
+    span.dataset.uuid = this.uuid;
+    span.dataset.position = this.position;
+    return span;
+  }
+
+  private getColorHex(): string {
+    const preset = PRESET_COLORS.find(c => c.id === this.color);
+    return preset ? preset.hex : this.color;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
+}
+
 // ─── ViewPlugin 实现 ─────────────────────────────────────
 
 class MarkVaultDecorator implements PluginValue {
@@ -205,8 +375,17 @@ class MarkVaultDecorator implements PluginValue {
   }
 
   update(update: ViewUpdate) {
+    // docChanged/viewportChanged: 正常文档/视口变化时重绘
+    // regionCacheUpdatedEffect: 缓存更新后强制重绘（解决异步缓存竞态）
     if (update.docChanged || update.viewportChanged) {
       this.decorations = this.buildDecorations(update.view);
+      return;
+    }
+    for (const effect of update.transactions.flatMap(t => t.effects)) {
+      if (effect.is(regionCacheUpdatedEffect)) {
+        this.decorations = this.buildDecorations(update.view);
+        return;
+      }
     }
   }
 
@@ -228,26 +407,6 @@ class MarkVaultDecorator implements PluginValue {
    * 从 CM6 view 推断当前文件路径
    * 通过 Obsidian 的 DOM 结构查找 .workspace-leaf 的 data-path 属性
    */
-  private getFilePathFromView(view: EditorView): string | null {
-    try {
-      const dom = view.dom;
-      const leafEl = dom.closest('.workspace-leaf');
-      if (leafEl) {
-        // Obsidian 在 .workspace-leaf-content 上存储文件路径
-        const contentEl = leafEl.querySelector('.workspace-leaf-content[data-path]');
-        if (contentEl) {
-          return contentEl.getAttribute('data-path');
-        }
-        // 备选：直接检查 leaf 的属性
-        const pathAttr = (leafEl as HTMLElement).getAttribute('data-path');
-        if (pathAttr) return pathAttr;
-      }
-    } catch {
-      // ignore
-    }
-    return null;
-  }
-
   private buildDecorationsInner(view: EditorView): DecorationSet {
     const doc = view.state.doc.toString();
 
@@ -299,7 +458,7 @@ class MarkVaultDecorator implements PluginValue {
 
     // ── 2. Span 标注装饰 ──
     // 优先使用注入的 resolver（Obsidian API），备选 DOM 属性
-    const filePath = resolveFilePath() || this.getFilePathFromView(view);
+    const filePath = resolveFilePath() || getFilePathFromView(view);
     if (filePath) {
       const spanAnnotations = getSpanCacheForFile(filePath);
       if (spanAnnotations.length > 0) {
@@ -345,98 +504,186 @@ class MarkVaultDecorator implements PluginValue {
       }
     }
 
-    // ── 3. 自然语法粗体装饰 ──
-    // 兼容旧 **文本** 与新的 <b class="..."> 包裹，隐藏标签、高亮内部文本
+    // ── 3. Block 标注行装饰 ──
+    // 给 block 标注的目标行添加左侧色条/背景
+    if (filePath) {
+      const blockAnnotations = getBlockCacheForFile(filePath);
+      for (const blockAnn of blockAnnotations) {
+        const lineNumber = blockAnn.targetLine + 1;
+        if (lineNumber < 1 || lineNumber > view.state.doc.lines) continue;
+        const lineStart = view.state.doc.line(lineNumber).from;
+        decoItems.push({
+          from: lineStart,
+          to: lineStart,
+          deco: Decoration.line({
+            class: `markvault-block-line-deco markvault-block-${blockAnn.type} markvault-block-${blockAnn.color}`,
+          }),
+        });
+      }
+    }
 
-    // 3.1 旧版 **文本**
-    NATIVE_BOLD_REGEX.lastIndex = 0;
-    let nativeBoldMatch: RegExpExecArray | null;
-    while ((nativeBoldMatch = NATIVE_BOLD_REGEX.exec(doc)) !== null) {
-      const uuid = nativeBoldMatch[1];
-      const color = nativeBoldMatch[2];
-      const innerText = nativeBoldMatch[3];
+    // ── 4. Native 标注装饰（bold/highlight/underline） ──
+    // 统一处理所有 native 类型：隐藏锚点与 wrapper 标签，只给内部文本加 class
+    NATIVE_ANCHOR_REGEX.lastIndex = 0;
+    let nativeMatch: RegExpExecArray | null;
+    while ((nativeMatch = NATIVE_ANCHOR_REGEX.exec(doc)) !== null) {
+      const anchorStart = nativeMatch.index;
+      const anchorEnd = anchorStart + nativeMatch[0].length;
+      const uuid = nativeMatch[1];
+      const type = nativeMatch[2] as AnnotationType;
+      const color = nativeMatch[3];
 
-      const anchorEnd = nativeBoldMatch.index + nativeBoldMatch[0].indexOf('**');
-      const innerStart = anchorEnd + 2;
-      const innerEnd = innerStart + innerText.length;
+      const wrapper = findNativeWrapper(doc, anchorEnd, type);
+      if (wrapper) {
+        // 隐藏锚点（及锚点到 wrapper 之间的空白）
+        decoItems.push({
+          from: anchorStart,
+          to: wrapper.wrapperStart,
+          deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+        });
 
-      if (innerStart >= innerEnd) continue;
+        // 隐藏 wrapper 开标签 / 旧版开头符号
+        decoItems.push({
+          from: wrapper.wrapperStart,
+          to: wrapper.contentStart,
+          deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+        });
 
+        // 高亮内部文本
+        decoItems.push({
+          from: wrapper.contentStart,
+          to: wrapper.contentEnd,
+          deco: Decoration.mark({
+            class: `markvault-${type} markvault-${color}`,
+            attributes: {
+              'data-uuid': uuid,
+              'data-type': type,
+              'data-color': color,
+              'data-kind': 'inline',
+            },
+          }),
+        });
+
+        // 隐藏 wrapper 闭标签 / 旧版结尾符号
+        decoItems.push({
+          from: wrapper.contentEnd,
+          to: wrapper.wrapperEnd,
+          deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+        });
+      } else {
+        // 至少把孤儿锚点隐藏掉，避免污染编辑视图
+        decoItems.push({
+          from: anchorStart,
+          to: anchorEnd,
+          deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+        });
+      }
+    }
+
+    // ── 4. Region 锚点隐藏 + 内容装饰 ──
+    // 在编辑模式下隐藏 %%markvault-region:...:start%% 和 %%markvault-region:...:end%%
+    // 并给锚点之间的内容加 CSS class（mark/line），替代 CM6 layer 几何覆盖层。
+    interface RegionAnchorMatch {
+      index: number;
+      length: number;
+      uuid: string;
+      type: AnnotationType;
+      color: string;
+      position: 'start' | 'end';
+    }
+    const regionAnchors: RegionAnchorMatch[] = [];
+    REGION_ANCHOR_REGEX.lastIndex = 0;
+    let regionMatch: RegExpExecArray | null;
+    while ((regionMatch = REGION_ANCHOR_REGEX.exec(doc)) !== null) {
+      regionAnchors.push({
+        index: regionMatch.index,
+        length: regionMatch[0].length,
+        uuid: regionMatch[1],
+        type: regionMatch[2] as AnnotationType,
+        color: regionMatch[3],
+        position: regionMatch[4] as 'start' | 'end',
+      });
       decoItems.push({
-        from: innerStart,
-        to: innerEnd,
-        deco: Decoration.mark({
-          class: `markvault-bold markvault-${color}`,
-          attributes: {
-            'data-uuid': uuid,
-            'data-type': 'bold',
-            'data-color': color,
-            'data-kind': 'inline',
-          },
+        from: regionMatch.index,
+        to: regionMatch.index + regionMatch[0].length,
+        deco: Decoration.replace({
+          widget: new RegionAnchorMarkerWidget(
+            regionMatch[1],
+            regionMatch[2] as AnnotationType,
+            regionMatch[3],
+            regionMatch[4] as 'start' | 'end',
+          ),
+          block: false,
         }),
       });
     }
 
-    // 3.2 新版 <b class="..."> 包裹：隐藏锚点与 <b> 标签，给内部文本加 class
-    NATIVE_BOLD_B_REGEX.lastIndex = 0;
-    let nativeBoldBMatch: RegExpExecArray | null;
-    while ((nativeBoldBMatch = NATIVE_BOLD_B_REGEX.exec(doc)) !== null) {
-      const uuid = nativeBoldBMatch[1];
-      const color = nativeBoldBMatch[2];
-      const innerText = nativeBoldBMatch[4];
+    // 编辑模式下 region 不渲染背景/边框；边界通过上面的小符号标识，
+    // 内容范围的高亮完全交给 Obsidian 原生选区。
+    // 这里只隐藏锚点，具体的选区设置由 main.ts / sidebar 在跳转/创建时调用 setSelection 实现。
 
-      const full = nativeBoldBMatch[0];
-      const anchorLen = full.indexOf('<b');
-      const openingTagLen = full.indexOf('>') + 1 - anchorLen;
-      const closeTagLen = 4; // </b>
+    // 🔧 4b. 子串兜底：捕获所有未被严格正则匹配的 region 锚点文本
+    // 处理场景：锚点分隔符损坏（如只有单个 %）、note 中含 %% 导致提前截断等极端情况。
+    // 策略：扫描文档中所有含 "markvault-region" 的行，将未隐藏的范围补充隐藏。
+    {
+      const hiddenRanges: Array<{ from: number; to: number }> = [];
+      for (const di of decoItems) {
+        hiddenRanges.push({ from: di.from, to: di.to });
+      }
+      // 按行扫描
+      const docLines = doc.split('\n');
+      let lineOffset = 0;
+      for (let li = 0; li < docLines.length; li++) {
+        const lineText = docLines[li];
+        const idx = lineText.indexOf('markvault-region');
+        if (idx === -1) {
+          lineOffset += lineText.length + 1;
+          continue;
+        }
+        // 找到含 markvault-region 的行，检查是否已被隐藏
+        const absStart = lineOffset + idx;
+        // 找到这行中 markvault-region 相关锚点的完整范围
+        // 从当前位置向前找 % 开头，向后找 %% 结尾
+        let rangeStart = absStart;
+        let rangeEnd = lineOffset + lineText.length;
+        // 向前扫描：找到 %% 或 % 开头
+        for (let p = absStart - 1; p >= lineOffset; p--) {
+          if (doc[p] === '%') {
+            rangeStart = p;
+            // 继续向前看是否还有一个 %
+            if (p > 0 && doc[p - 1] === '%') {
+              rangeStart = p - 1;
+            }
+            break;
+          }
+        }
+        // 向后扫描：找到 %% 结尾
+        for (let p = absStart; p < lineOffset + lineText.length - 1; p++) {
+          if (doc[p] === '%' && doc[p + 1] === '%') {
+            rangeEnd = p + 2;
+            break;
+          }
+        }
 
-      const anchorStart = nativeBoldBMatch.index;
-      const anchorEnd = anchorStart + anchorLen;
-      const innerStart = anchorEnd + openingTagLen;
-      const innerEnd = innerStart + innerText.length;
-      const closeStart = innerEnd;
-      const closeEnd = closeStart + closeTagLen;
-
-      if (innerStart >= innerEnd) continue;
-
-      // 隐藏隐身锚点
-      decoItems.push({
-        from: anchorStart,
-        to: anchorEnd,
-        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
-      });
-
-      // 隐藏 <b> 开标签
-      decoItems.push({
-        from: anchorEnd,
-        to: innerStart,
-        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
-      });
-
-      // 高亮内部文本
-      decoItems.push({
-        from: innerStart,
-        to: innerEnd,
-        deco: Decoration.mark({
-          class: `markvault-bold markvault-${color}`,
-          attributes: {
-            'data-uuid': uuid,
-            'data-type': 'bold',
-            'data-color': color,
-            'data-kind': 'inline',
-          },
-        }),
-      });
-
-      // 隐藏 </b> 闭标签
-      decoItems.push({
-        from: closeStart,
-        to: closeEnd,
-        deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
-      });
+        // 检查是否已被隐藏
+        const isAlreadyHidden = hiddenRanges.some(
+          r => rangeStart >= r.from && rangeEnd <= r.to
+        );
+        if (!isAlreadyHidden) {
+          decoItems.push({
+            from: rangeStart,
+            to: rangeEnd,
+            deco: Decoration.replace({
+              widget: new BlockAnchorWidget(),
+              block: false,
+            }),
+          });
+        }
+        lineOffset += lineText.length + 1;
+      }
     }
 
-    // ── 4. 块级/Span 锚点隐藏 ──
+    // ── 5. 块级/Span 锚点隐藏 ──
     // 在编辑模式下隐藏 %%markvault:...%% 和 %%markvault-span:...%% 锚点行
     const lines = doc.split('\n');
     let lineOffset = 0;
@@ -457,21 +704,6 @@ class MarkVaultDecorator implements PluginValue {
         });
       }
       lineOffset += lineText.length + 1; // +1 for \n
-    }
-
-    // ── 4. 自然语法锚点隐藏 ──
-    // 在编辑模式下隐藏 %%mv:i:uuid:type:color%% 隐身锚点
-    NATIVE_ANCHOR_REGEX.lastIndex = 0;
-    let nativeMatch: RegExpExecArray | null;
-    while ((nativeMatch = NATIVE_ANCHOR_REGEX.exec(doc)) !== null) {
-      decoItems.push({
-        from: nativeMatch.index,
-        to: nativeMatch.index + nativeMatch[0].length,
-        deco: Decoration.replace({
-          widget: new NativeAnchorWidget(),
-          block: false,
-        }),
-      });
     }
 
     // 按位置排序（RangeSetBuilder 要求递增）
@@ -560,6 +792,9 @@ class MarkVaultDecorator implements PluginValue {
         // 必须有 uuid 才是 MarkVault 标注
         if (!attrs.uuid) continue;
 
+        // native 标注由专门的 native 循环处理，避免重复装饰
+        if (attrs.class && attrs.class.includes('markvault-native')) continue;
+
         const openFrom = match.index;
         // 计算 <mark ...> 的结束位置
         const gtIndex = match[0].indexOf('>');
@@ -635,6 +870,42 @@ const markvaultPluginSpec: PluginSpec<MarkVaultDecorator> = {
   decorations: (value: MarkVaultDecorator) => value.decorations,
 };
 
+// ─── Region Layer ────────────────────────────────────────
+
+/**
+ * Region 标注的背景层
+ * 使用 RectangleMarker.forRange 为每个 region 范围绘制选择式背景矩形，
+ * 可覆盖普通文本、公式/代码 Widget、图片占位等。
+ */
+const regionLayerExtension: Extension = layer({
+  above: true,
+  class: 'markvault-region-layer',
+  update(update) {
+    // docChanged/viewportChanged: 正常文档/视口变化时重绘
+    // regionCacheUpdatedEffect: 缓存更新后强制重绘（解决异步缓存竞态）
+    if (update.docChanged || update.viewportChanged) return true;
+    for (const effect of update.transactions.flatMap(t => t.effects)) {
+      if (effect.is(regionCacheUpdatedEffect)) return true;
+    }
+    return false;
+  },
+  markers(view) {
+    const filePath = resolveFilePath() || getFilePathFromView(view);
+    if (!filePath) return [];
+
+    const regions = getRegionCacheForFile(filePath);
+    const markers: LayerMarker[] = [];
+
+    for (const region of regions) {
+      const className = `markvault-region-layer-bg markvault-region-${region.type} markvault-region-${region.color}`;
+      const range = EditorSelection.range(region.startOffset, region.endOffset);
+      markers.push(...RectangleMarker.forRange(view, className, range));
+    }
+
+    return markers;
+  },
+});
+
 // ─── 导出 ────────────────────────────────────────────────
 
 /**
@@ -645,6 +916,12 @@ export const markvaultDecorationPlugin: Extension = ViewPlugin.fromClass(
   MarkVaultDecorator,
   markvaultPluginSpec,
 );
+
+/**
+ * Region 背景层扩展
+ * 需要与 markvaultDecorationPlugin 一起注册到编辑器
+ */
+export const markvaultRegionLayer: Extension = regionLayerExtension;
 
 /**
  * 阅读模式 DOM 高亮渲染

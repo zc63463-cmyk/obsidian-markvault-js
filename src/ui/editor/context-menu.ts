@@ -5,6 +5,7 @@ import { PRESET_COLORS } from '../../types/annotation';
 import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
 import { buildMarkTag, buildBlockAnchor, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { buildNativeAnnotation } from '../../core/native-annotation';
+import { buildRegionAnchor } from '../../core/region-annotation';
 import { computeSignature, computeSpanSignature } from '../../core/block-fingerprint';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
@@ -71,6 +72,15 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
           .setIcon('underline')
           .onClick(async () => {
             await createAnnotation(plugin, editor, view, 'underline', plugin.settings.defaultHighlightColor);
+          });
+      });
+
+      // ▭ Region（强制双锚点区域标注）
+      menu.addItem((item) => {
+        item.setTitle('▭ Region')
+          .setIcon('maximize')
+          .onClick(async () => {
+            await createRegionAnnotation(plugin, editor, view, 'highlight', plugin.settings.defaultHighlightColor);
           });
       });
 
@@ -279,30 +289,23 @@ export async function createAnnotation(
 
   // 🆕 扫描 Markdown 上下文边界
   const scanResult = scanMarkdownContexts(selection);
-  console.log(`MarkVault: smart routing — hasSpecial=${scanResult.hasSpecialContent}, isAllSpecial=${scanResult.isAllSpecial}, segments=${scanResult.segments.length}`);
+  const fullContent = editor.getValue();
+  const from = editor.getCursor('from');
+  const to = editor.getCursor('to');
+  const startBlock = detectBlockAtLine(fullContent, from.line);
+  const endBlock = detectBlockAtLine(fullContent, to.line);
+  const spansBlocks = !startBlock || !endBlock || startBlock.startLine !== endBlock.startLine || startBlock.endLine !== endBlock.endLine;
 
-  if (!scanResult.hasSpecialContent) {
-    // 纯文本：走原有逻辑
+  console.log(`MarkVault: smart routing — hasSpecial=${scanResult.hasSpecialContent}, spansBlocks=${spansBlocks}, segments=${scanResult.segments.length}`);
+
+  if (!scanResult.hasSpecialContent && !spansBlocks) {
+    // 纯文本且同一块：走 native inline
     return createSimpleAnnotation(plugin, editor, view, type, color);
   }
 
-  if (scanResult.isAllSpecial) {
-    // 全部为特殊内容（纯公式/代码）：降级为块级锚点标注
-    console.log('MarkVault: selection is all special content, using block annotation');
-    const fullContent = editor.getValue();
-    const from = editor.getCursor('from');
-    const blockInfo = detectBlockAtLine(fullContent, from.line);
-    if (blockInfo) {
-      return createBlockAnnotation(plugin, editor, view, type, color, blockInfo);
-    }
-    // 如果无法检测块级元素，仍然尝试 span 标注
-    // （极端情况：行内公式全部选中但没有 text 段）
-    return createSpanAnnotation(plugin, editor, view, type, color, scanResult);
-  }
-
-  // 混合内容：走 span 标注逻辑（方案C：单锚点 + spanRanges）
-  console.log('MarkVault: selection contains special content, using span annotation');
-  return createSpanAnnotation(plugin, editor, view, type, color, scanResult);
+  // 含特殊内容或跨块：统一走 region 标注（双锚点包围区域）
+  console.log('MarkVault: selection contains special content or spans blocks, using region annotation');
+  return createRegionAnnotation(plugin, editor, view, type, color);
 }
 
 /**
@@ -346,13 +349,13 @@ async function createSimpleAnnotation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
     kind: 'inline',
-    format: (plugin.settings.useNativeSyntax || type === 'bold') ? 'native' : 'mark',
+    format: (plugin.settings.useNativeSyntax || type === 'bold' || type === 'highlight' || type === 'underline') ? 'native' : 'mark',
   };
 
   plugin.modifyGuard.acquire(filePath);
 
   try {
-    if (plugin.settings.useNativeSyntax || type === 'bold') {
+    if (plugin.settings.useNativeSyntax || type === 'bold' || type === 'highlight' || type === 'underline') {
       const nativeTag = buildNativeAnnotation(annotation);
       editor.replaceSelection(nativeTag);
       annotation.endOffset = startOffset + nativeTag.length;
@@ -489,6 +492,90 @@ async function createSpanAnnotation(
 }
 
 /**
+ * Region 标注 — 双锚点包围区域
+ *
+ * 当选区含公式/代码/链接/图片或跨块时，用 start/end 两个锚点包围原选区。
+ * 内容原样保留，编辑模式用 CM6 layer 覆盖高亮，阅读模式遍历 DOM 节点加 class。
+ */
+async function createRegionAnnotation(
+  plugin: MarkVaultPlugin,
+  editor: Editor,
+  view: MarkdownView,
+  type: AnnotationType,
+  color: PresetColorId | string,
+): Promise<Annotation | null> {
+  if (!view.file) return null;
+
+  const selection = editor.getSelection();
+  if (!selection) return null;
+
+  const uuid = generateId();
+  const filePath = view.file.path;
+  const from = editor.getCursor('from');
+  const to = editor.getCursor('to');
+  const startOffset = editor.posToOffset(from);
+
+  const startAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'start');
+  const endAnchor = buildRegionAnchor({ uuid, type, color, note: '' }, 'end');
+  const replacement = startAnchor + selection + endAnchor;
+
+  const { contextBefore, contextAfter } = extractContext(editor, from, to, plugin.settings.contextWindowSize);
+
+  const annotation: Annotation = {
+    uuid,
+    filePath,
+    type,
+    color,
+    text: selection,
+    note: '',
+    tags: [],
+    startOffset,
+    endOffset: startOffset + replacement.length,
+    startLine: from.line,
+    endLine: to.line,
+    contextBefore,
+    contextAfter,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    kind: 'region',
+    targetHash: computeSpanSignature(selection),
+  };
+
+  // 🔧 BUG-5.1 修复：在 replaceSelection 前预填充 region 缓存
+  // editor.replaceSelection() 同步触发 CM6 docChanged → layer markers() 读取缓存
+  // 如果此时缓存没有新 region 数据，layer 会渲染空内容
+  // 预填充确保 CM6 首次渲染时就能看到新 region
+  plugin.updateRegionCacheImmediately(filePath, annotation);
+
+  plugin.modifyGuard.acquire(filePath);
+
+  try {
+    editor.replaceSelection(replacement);
+
+    // 创建后立即选中 region 内容，触发 Obsidian 原生选区（外部选框）
+    try {
+      const anchorLen = startAnchor.length;
+      const contentStart = startOffset + anchorLen;
+      const contentEnd = contentStart + selection.length;
+      editor.setSelection(editor.offsetToPos(contentStart), editor.offsetToPos(contentEnd));
+    } catch (selErr) {
+      console.warn('MarkVault: failed to select region content after creation', selErr);
+    }
+
+    console.log(`MarkVault: created region annotation ${uuid} in ${filePath}`);
+
+    await addAnnotation(annotation);
+    plugin.markFileSynced(filePath);
+    await plugin.updateRegionCache(filePath);
+    await plugin.refreshSidebar();
+  } finally {
+    plugin.modifyGuard.release(filePath);
+  }
+
+  return annotation;
+}
+
+/**
  * 从选区创建块级标注（当选区全部为特殊内容时的降级路径）
  * 尝试检测光标所在行的块级元素类型
  */
@@ -559,6 +646,11 @@ async function createBlockAnnotation(
     targetHash: computeSignature(blockInfo.content),
   };
 
+  // 🔧 BUG-5.3 修复：在 replaceRange 前预填充 block 缓存
+  // editor.replaceRange() 同步触发 CM6 docChanged → decoration plugin 读取缓存
+  // 如果此时缓存没有新 block 数据，行装饰不会渲染
+  plugin.updateBlockCacheImmediately(filePath, annotation);
+
   plugin.modifyGuard.acquire(filePath);
 
   try {
@@ -572,6 +664,9 @@ async function createBlockAnnotation(
 
     await addAnnotation(annotation);
     plugin.markFileSynced(filePath);
+    // 🔧 BUG-5.3 修复：创建后刷新 span/block 缓存，确保 CM6 装饰器正确渲染
+    await plugin.updateSpanCache(filePath);
+    await plugin.updateRegionCache(filePath);
     await plugin.refreshSidebar();
   } finally {
     plugin.modifyGuard.release(filePath);

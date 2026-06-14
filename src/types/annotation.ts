@@ -24,13 +24,14 @@ export interface Annotation {
   startOffset: number;      // 字符偏移起始
   endOffset: number;        // 字符偏移结束
   startLine: number;        // 行号（冗余但方便跳转）
+  endLine?: number;         // 区域标注结束行号（region 等跨行场景）
   contextBefore: string;    // 前文上下文 (50 chars)
   contextAfter: string;     // 后文上下文 (50 chars)
   createdAt: number;        // 创建时间戳
   updatedAt: number;        // 更新时间戳
 
   // v2.0: 拆分标注 & 块级标注支持
-  kind?: 'inline' | 'block' | 'span';  // 标注类型（默认 inline，块级为 block，跨特殊内容为 span）
+  kind?: 'inline' | 'block' | 'span' | 'region';  // 标注类型（默认 inline，块级为 block，跨特殊内容为 span，区域为 region）
   groupUuid?: string;          // Track A: 拆分标注的组 ID，同组标注共享（旧格式兼容）
   blockType?: string;          // Track B: 块级标注的目标类型（math-block/code-block/image/embed/callout/table/paragraph）
   targetLine?: number;         // Track B: 目标块起始行号

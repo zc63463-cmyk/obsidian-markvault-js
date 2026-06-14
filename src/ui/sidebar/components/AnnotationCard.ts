@@ -4,6 +4,7 @@ import { PRESET_COLORS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
 import { updateSpanAnchor, updateBlockAnchor, updateMarkTag } from '../../../core/annotation-parser';
 import { updateNativeAnnotation } from '../../../core/native-annotation';
+import { updateRegionAnnotation } from '../../../core/region-annotation';
 import { updateAnnotation } from '../../../db/annotation-repo';
 
 /**
@@ -245,6 +246,8 @@ export class AnnotationCard {
           newContent = updateNativeAnnotation(content, annotation.uuid, { color: colorId, type: annotation.type }) ?? content;
         } else if (annotation.kind === 'span') {
           newContent = updateSpanAnchor(content, annotation.uuid, { color: colorId });
+        } else if (annotation.kind === 'region') {
+          newContent = updateRegionAnnotation(content, annotation.uuid, { color: colorId }) ?? content;
         } else if (annotation.kind === 'block') {
           newContent = updateBlockAnchor(content, annotation.uuid, { color: colorId });
         } else {
@@ -266,6 +269,7 @@ export class AnnotationCard {
 
         plugin.markFileSynced(annotation.filePath);
         await plugin.updateSpanCache(annotation.filePath);
+        await plugin.updateRegionCache(annotation.filePath);
 
         // 强制所有打开该文件的阅读视图重新渲染
         this.host.app.workspace.iterateAllLeaves((leaf) => {

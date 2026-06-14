@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "npx tsx tests/annotation-store.test.ts",
+    "test": "npx tsx tests/annotation-store.test.ts && npx tsx tests/native-annotation.test.ts && npx tsx tests/region-annotation.test.ts",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [

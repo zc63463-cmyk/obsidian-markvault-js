@@ -1,6 +1,7 @@
 import { annotationStore } from '../db/annotation-store';
 import type { Annotation } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor } from './annotation-parser';
+import { buildNativeAnnotation } from './native-annotation';
 import { stripNativeAnnotations } from './native-annotation';
 import { batchRecoverOffsets } from './offset-recovery';
 import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation } from '../db/annotation-repo';
@@ -209,8 +210,10 @@ export async function upgradeMarkdownAnnotations(
   let newContent = content;
 
   for (const ann of toUpgrade) {
-    // 构建 MarkVault 格式的 <mark> 标签
-    const newTag = buildMarkTag(ann);
+    // 行内类型统一升级为 native 格式（隐身锚点 + 可见 HTML 包裹）
+    const newTag = (ann.type === 'bold' || ann.type === 'highlight' || ann.type === 'underline')
+      ? buildNativeAnnotation(ann as Pick<import('../types/annotation').Annotation, 'uuid' | 'type' | 'color' | 'text'>)
+      : buildMarkTag(ann);
 
     // 替换旧的标签
     // 先尝试匹配 Highlightr 格式

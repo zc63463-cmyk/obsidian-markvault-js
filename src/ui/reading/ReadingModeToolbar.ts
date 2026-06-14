@@ -100,11 +100,12 @@ export class ReadingModeToolbar {
     const typeGroup = document.createElement('div');
     typeGroup.className = 'markvault-reading-type-group';
 
-    const types: Array<{ type: AnnotationType; label: string; icon: string; kind?: Annotation['kind'] }> = [
+    const types: Array<{ type?: AnnotationType; label: string; icon: string; kind?: Annotation['kind'] }> = [
       { type: 'highlight', label: 'Highlight', icon: '🎨' },
-      { type: 'bold', label: 'Bold', icon: 'B' },
+      { type: 'bold', label: 'Bold', icon: '𝗕' },
       { type: 'underline', label: 'Underline', icon: 'U̲' },
-      { type: 'highlight', label: 'Block', icon: '⬜', kind: 'block' },
+      { label: 'Region', icon: '▭', kind: 'region' },
+      { label: 'Block', icon: '⬜', kind: 'block' },
     ];
 
     const typeBtns: HTMLElement[] = [];
@@ -118,7 +119,7 @@ export class ReadingModeToolbar {
       btn.addEventListener('mousedown', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        currentType = t.type;
+        if (t.type) currentType = t.type;
         currentKind = t.kind || 'inline';
         // 切换 active 状态
         typeBtns.forEach(b => b.classList.remove('active'));
