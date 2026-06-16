@@ -114,7 +114,7 @@ export class RelationGraphView extends ItemView {
     this.renderLayout();
     this.initForceGraph();
     this.setupResizeObserver();
-    this.refresh();
+    this.refresh(true); // 首次加载 → zoomToFit
   }
 
   async onClose() {
@@ -167,7 +167,7 @@ export class RelationGraphView extends ItemView {
 
     // 操作按钮
     const refreshBtn = row1.createEl('button', { text: '↻', cls: 'mod-cta markvault-graph-btn-icon', attr: { title: 'Refresh' } });
-    refreshBtn.addEventListener('click', () => this.refresh());
+    refreshBtn.addEventListener('click', () => this.refresh(true));
 
     const fitBtn = row1.createEl('button', { text: '⊞', cls: 'mod-cta markvault-graph-btn-icon', attr: { title: 'Fit to view' } });
     fitBtn.addEventListener('click', () => {
@@ -177,7 +177,7 @@ export class RelationGraphView extends ItemView {
     const resetBtn = row1.createEl('button', { text: '⟲', cls: 'mod-cta markvault-graph-btn-icon', attr: { title: 'Reset all filters' } });
     resetBtn.addEventListener('click', () => {
       this.filter = { ...DEFAULT_FILTER };
-      this.refresh();
+      this.refresh(true); // 重置后 → zoomToFit
       this.renderToolbar();
     });
 
@@ -758,7 +758,12 @@ export class RelationGraphView extends ItemView {
 
   // ── 数据刷新 ──────────────────────────
 
-  refresh() {
+  /**
+   * @param shouldZoomToFit 是否在刷新后重置视口到全局适配
+   *   - true: 首次加载、点击 Refresh/Reset 按钮
+   *   - false (默认): 切换 filter chip、数据变化等，保持用户当前视口
+   */
+  refresh(shouldZoomToFit = false) {
     if (!this.fg) return;
 
     // P2-5: 每次刷新时检测主题变化
@@ -796,8 +801,9 @@ export class RelationGraphView extends ItemView {
       }
     }
 
-    // v5.6: 刷新后自适应缩放（延迟等待力模拟稳定）
-    if (graphData.nodes.length > 0) {
+    // v5.6: 仅在首次加载或用户主动请求时重置视口
+    // 🔧 BUG-10 修复：filter 切换不再覆盖用户的缩放/平移
+    if (shouldZoomToFit && graphData.nodes.length > 0) {
       setTimeout(() => {
         this.fg?.zoomToFit(400, 50);
       }, 500);
@@ -866,8 +872,10 @@ export class RelationGraphView extends ItemView {
     this.adjacencyMap.clear();
 
     for (const link of links) {
-      const sourceId = link.source as string;
-      const targetId = link.target as string;
+      // 🔧 BUG-9 修复：force-graph 运行时将 source/target 从 string 替换为 GraphNode 对象引用
+      // 直接 `as string` 会得到 "[object Object]"，导致邻接表完全失效
+      const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id;
+      const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id;
 
       // source → { nodes, links }
       let sourceEntry = this.adjacencyMap.get(sourceId);
