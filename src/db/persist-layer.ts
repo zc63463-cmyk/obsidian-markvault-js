@@ -6,6 +6,7 @@ import type {
 } from '../types/annotation';
 import { FileEncoder } from './file-encoder';
 import type { IndexLayer } from './index-layer';
+import { stripExtraFields } from './strip-fields';
 
 /**
  * PersistLayer — 持久化层
@@ -187,7 +188,8 @@ export class PersistLayer {
     // 读取或创建 _meta.json
     try {
       this._meta = await this._readMetaFile();
-    } catch {
+    } catch (err) {
+      console.debug('MarkVault: _meta.json not found, creating default');
       this._meta = {
         schemaVersion: 1,
         createdAt: Date.now(),
@@ -199,7 +201,8 @@ export class PersistLayer {
     // 读取或创建 _index.json
     try {
       this._indexData = await this._readIndexFile();
-    } catch {
+    } catch (err) {
+      console.debug('MarkVault: _index.json not found, creating default');
       this._indexData = { version: 1, entries: {} };
       await this._writeIndexFile();
     }
@@ -311,7 +314,7 @@ export class PersistLayer {
 
     // 逐个添加到内存索引（清理可能残留的非标准字段）
     for (const ann of annotations) {
-      const clean = PersistLayer._stripExtraFields(ann);
+      const clean = stripExtraFields(ann);
       this._indexLayer.byUuid.set(clean.uuid, clean);
       this._indexLayer.byFile.get(filePath)!.add(clean.uuid);
       this._indexLayer.addToIndex(clean);
@@ -412,7 +415,8 @@ export class PersistLayer {
     try {
       const dirList = await this.adapter.list(annotationsDir);
       files = dirList.files || [];
-    } catch {
+    } catch (err) {
+      console.warn('MarkVault: rebuildIndex failed to list annotations dir', err);
       return;
     }
 
@@ -423,7 +427,8 @@ export class PersistLayer {
       let filePath: string;
       try {
         filePath = FileEncoder.decodeFilePath(encoded);
-      } catch {
+      } catch (err) {
+        console.warn('MarkVault: rebuildIndex failed to decode file path', encoded, err);
         continue;
       }
 
@@ -564,8 +569,9 @@ export class PersistLayer {
     const oldShardPath = FileEncoder.getShardPath(this._baseDir, oldPath);
     try {
       await this.adapter.remove(oldShardPath);
-    } catch {
+    } catch (err) {
       // 文件可能不存在，忽略
+      console.debug('MarkVault: renameAnnotations old shard remove skipped', oldShardPath, err);
     }
 
     // 更新 _byFile 映射
@@ -727,7 +733,8 @@ export class PersistLayer {
         return data;
       }
       return data.annotations || [];
-    } catch {
+    } catch (err) {
+      console.warn('MarkVault: _readFileShard failed, attempting .bak recovery', shardPath, err);
       const recovered = await this._recoverFromBak(shardPath);
       if (recovered !== null) return recovered;
       return [];
@@ -743,7 +750,8 @@ export class PersistLayer {
       const bakData = JSON.parse(bakContent);
       if (Array.isArray(bakData)) return bakData;
       return bakData.annotations || null;
-    } catch {
+    } catch (err) {
+      console.warn('MarkVault: _recoverFromBak failed, both shard and backup are corrupt', shardPath, err);
       return null;
     }
   }
@@ -898,63 +906,6 @@ export class PersistLayer {
       hash = ((hash << 5) - hash + ch) | 0;
     }
     return (hash >>> 0).toString(16).padStart(8, '0');
-  }
-
-  /** 过滤非标准字段（以 _ 开头的临时标记） */
-  private static _stripExtraFields(annotation: Annotation): Annotation {
-    const clean: Annotation = {
-      uuid: annotation.uuid,
-      filePath: annotation.filePath,
-      type: annotation.type,
-      color: annotation.color,
-      text: annotation.text,
-      note: annotation.note,
-      tags: annotation.tags,
-      startOffset: annotation.startOffset,
-      endOffset: annotation.endOffset,
-      startLine: annotation.startLine,
-      contextBefore: annotation.contextBefore,
-      contextAfter: annotation.contextAfter,
-      createdAt: annotation.createdAt,
-      updatedAt: annotation.updatedAt,
-    };
-    if (annotation.schemaVersion !== undefined) clean.schemaVersion = annotation.schemaVersion;
-    if (annotation.kind !== undefined) clean.kind = annotation.kind;
-    if (annotation.groupUuid !== undefined) clean.groupUuid = annotation.groupUuid;
-    if (annotation.endLine !== undefined) clean.endLine = annotation.endLine;
-    if (annotation.blockType !== undefined) clean.blockType = annotation.blockType;
-    if (annotation.targetLine !== undefined) clean.targetLine = annotation.targetLine;
-    if (annotation.anchorLine !== undefined) clean.anchorLine = annotation.anchorLine;
-    if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges;
-    if (annotation.fields !== undefined) {
-      if (Object.keys(annotation.fields).length > 0) {
-        clean.fields = annotation.fields;
-      }
-    }
-    if (annotation.format !== undefined) clean.format = annotation.format;
-    if (annotation.targetHash !== undefined) clean.targetHash = annotation.targetHash;
-    if (annotation.relations !== undefined && annotation.relations.length > 0) {
-      clean.relations = annotation.relations;
-    }
-    if (annotation.flags !== undefined) {
-      const f = annotation.flags;
-      const hasValue = f.mastery !== undefined || f.reviewPriority !== undefined
-        || f.confidence !== undefined || f.needsCorrection !== undefined
-        || f.lastReviewedAt !== undefined || f.reviewCount !== undefined;
-      if (hasValue) {
-        clean.flags = { ...f };
-      }
-    }
-    if (annotation.groups !== undefined && annotation.groups.length > 0) {
-      clean.groups = annotation.groups;
-    }
-    if (annotation.motivation !== undefined) {
-      clean.motivation = annotation.motivation;
-    }
-    if (annotation.alias !== undefined) {
-      clean.alias = annotation.alias;
-    }
-    return clean;
   }
 
   /** 断言已初始化 */

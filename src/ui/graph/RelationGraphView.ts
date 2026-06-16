@@ -19,7 +19,7 @@ import type { NodeObject, LinkObject } from 'force-graph';
 import { annotationStore } from '../../db/annotation-store';
 import { updateAnnotation, addRelation } from '../../db/annotation-repo';
 import { updateMarkTag, updateBlockAnchor, updateSpanAnchor } from '../../core/annotation-parser';
-import type MarkVaultPlugin from '../../main';
+import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import { RelationSchema, SEMANTIC_GROUPS } from '../../types/annotation';
 import type { Annotation, AnnotationRelation } from '../../types/annotation';
 import { buildGraphData, type GraphNode, type GraphLink } from './graph-data-builder';
@@ -48,7 +48,7 @@ const PASSIVE_CHIP_COLOR = '#9CA3AF';
 type FGInstance = any;
 
 export class RelationGraphView extends ItemView {
-  private plugin: MarkVaultPlugin | null = null;
+  private plugin: MarkVaultPluginInterface | null = null;
   private fg: FGInstance | null = null;
   private filter: GraphFilter = { ...DEFAULT_FILTER };
   private container_: HTMLElement | null = null;
@@ -78,7 +78,7 @@ export class RelationGraphView extends ItemView {
     super(leaf);
   }
 
-  setPluginInstance(plugin: MarkVaultPlugin) {
+  setPluginInstance(plugin: MarkVaultPluginInterface) {
     this.plugin = plugin;
   }
 
@@ -910,12 +910,12 @@ export class RelationGraphView extends ItemView {
 class NodeDetailModal extends Modal {
   private annotation: Annotation;
   private node: GraphNode;
-  private plugin: MarkVaultPlugin | null;
+  private plugin: MarkVaultPluginInterface | null;
   private onRefresh: () => void;
 
   constructor(
     app: App,
-    plugin: MarkVaultPlugin | null,
+    plugin: MarkVaultPluginInterface | null,
     annotation: Annotation,
     node: GraphNode,
     onRefresh: () => void,

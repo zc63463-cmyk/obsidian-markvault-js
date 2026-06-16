@@ -1,5 +1,5 @@
 import { PluginSettingTab, App, Setting } from 'obsidian';
-import type MarkVaultPlugin from '../../main';
+import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import { PRESET_COLORS, DEFAULT_SETTINGS, DEFAULT_RELATION_TYPE_CONFIGS, RelationSchema } from '../../types/annotation';
 import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig } from '../../types/annotation';
 import { annotationStore } from '../../db/annotation-store';
@@ -7,10 +7,10 @@ import { AddRelationTypeModal } from './add-relation-type-modal';
 import { ConfirmModal } from '../confirm-modal';
 
 export class MarkVaultSettingTab extends PluginSettingTab {
-  plugin: MarkVaultPlugin;
+  plugin: MarkVaultPluginInterface;
 
-  constructor(app: App, plugin: MarkVaultPlugin) {
-    super(app, plugin);
+  constructor(app: App, plugin: MarkVaultPluginInterface) {
+    super(app, plugin as any);
     this.plugin = plugin;
   }
 

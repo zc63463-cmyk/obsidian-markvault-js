@@ -473,15 +473,6 @@ export class ReadingModeProcessor {
 
       const blockStarts = this.computeBlockStarts(lines, sectionStart, sectionEnd);
 
-      console.log('[MarkVault DEBUG] applyBlockDecorationsFromSource', {
-        sourcePath,
-        sectionStart,
-        sectionEnd,
-        blockStarts,
-        leafBlocks: leafBlocks.map(b => ({ tag: b.tagName, text: (b.textContent ?? '').slice(0, 60).replace(/\n/g, '\\n') })),
-        matches: matches.map(m => ({ uuid: m.uuid, startLine: m.startLine, endLine: m.endLine })),
-      });
-
       for (const match of matches) {
         const targetIndices: number[] = [];
         for (let i = 0; i < blockStarts.length; i++) {
@@ -505,9 +496,6 @@ export class ReadingModeProcessor {
           }
           if (nearest !== -1) targetIndices.push(nearest);
         }
-
-        console.log('[MarkVault DEBUG] decorate uuid', match.uuid, 'targetIndices', targetIndices, 'targetElements',
-          targetIndices.map(i => leafBlocks[i]?.tagName + ':' + (leafBlocks[i]?.textContent ?? '').slice(0, 40).replace(/\n/g, '\\n')));
 
         for (let k = 0; k < targetIndices.length; k++) {
           const idx = targetIndices[k];

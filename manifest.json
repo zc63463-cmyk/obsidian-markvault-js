@@ -3,7 +3,7 @@
   "name": "MarkVault-JS",
   "version": "5.0.0",
   "minAppVersion": "1.5.0",
-  "description": "MarkVault next-gen: sharded JSON + in-memory index replacing IndexedDB. Annotations travel with your vault.",
+  "description": "Powerful annotation plugin for Obsidian: highlights, bold, underline with notes, tags, relations, graph view, and W3C annotation support.",
   "author": "Jiang",
   "authorUrl": "",
   "isDesktopOnly": false

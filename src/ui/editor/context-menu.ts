@@ -1,8 +1,22 @@
 import { Editor, MarkdownView, Menu, Notice, TFile } from 'obsidian';
-import type MarkVaultPlugin from '../../main';
+import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import type { AnnotationType, PresetColorId, Annotation, SpanRange, AnnotationTemplate } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
 import { getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
+import {
+  getListItemPrefix,
+  getBlockAnchorPrefixesForListItem,
+  offsetToLineCh,
+  adjustRegionStartOffsetForListItem,
+  adjustRegionEndOffsetForListItem,
+} from './list-utils';
+export {
+  getListItemPrefix,
+  getBlockAnchorPrefixesForListItem,
+  offsetToLineCh,
+  adjustRegionStartOffsetForListItem,
+  adjustRegionEndOffsetForListItem,
+};
 import { annotationStore } from '../../db/annotation-store';
 import { buildMarkTag, buildBlockAnchorStart, buildBlockAnchorEnd, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { buildNativeAnnotation } from '../../core/native-annotation';
@@ -24,7 +38,7 @@ import { buildAnnotation, finalizeAnnotation } from '../../core/annotation-creat
  * - 有选中文本时，自动检测是否包含特殊内容（公式/代码等），
  *   如有则自动走 Track A（拆分标注）或 Track B（块级锚点）
  */
-export function registerContextMenu(plugin: MarkVaultPlugin): void {
+export function registerContextMenu(plugin: MarkVaultPluginInterface): void {
   plugin.registerEvent(
     plugin.app.workspace.on('editor-menu', (menu: Menu, editor: Editor, view: MarkdownView) => {
       const selection = editor.getSelection();
@@ -242,7 +256,7 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
  * 用于右键菜单 "Annotate" 选项
  */
 export async function createAnnotationWithNote(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
 ): Promise<Annotation | null> {
@@ -295,7 +309,7 @@ export async function createAnnotationWithNote(
  * 一键创建常用标注类型，大幅减少重复操作。
  */
 export async function createAnnotationFromTemplate(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   template: AnnotationTemplate,
@@ -346,7 +360,7 @@ export async function createAnnotationFromTemplate(
  * 1. 扫描选区上下文 → 2. 路由选择 → 3. 写入 Markdown + AnnotationStore
  */
 export async function createAnnotation(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -380,7 +394,7 @@ export async function createAnnotation(
  * 纯文本标注 — 原逻辑（单个 <mark> 包裹）
  */
 async function createSimpleAnnotation(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -459,7 +473,7 @@ async function createSimpleAnnotation(
  * - CM6 用 spanRanges 精确高亮文本片段，特殊内容保持原样
  */
 async function createSpanAnnotation(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -562,7 +576,7 @@ async function createSpanAnnotation(
  * 内容原样保留，编辑模式用 CM6 layer 覆盖高亮，阅读模式遍历 DOM 节点加 class。
  */
 async function createRegionAnnotation(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -656,7 +670,7 @@ async function createRegionAnnotation(
  * 尝试检测光标所在行的块级元素类型
  */
 async function createBlockAnnotationFromSelection(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -673,79 +687,9 @@ async function createBlockAnnotationFromSelection(
   return null;
 }
 
-/**
- * 如果一行是列表项，返回它的标记前缀（含前导空格和标记后的空格）
- * 以及用于子内容的缩进空格串。
- */
-export function getListItemPrefix(line: string): { marker: string; childIndent: string } | null {
-  const m = line.match(/^(\s*)((?:[-*+])|(?:\d+\.))\s/);
-  if (!m) return null;
-  const leading = m[1];
-  const markerBody = m[2] + ' ';
-  return { marker: m[0], childIndent: leading + ' '.repeat(markerBody.length) };
-}
-
-/**
- * 为列表项目标计算 start / end 锚点应该使用的缩进。
- * start 锚点放在前一个同层或外层列表项的子内容位置，
- * end 锚点放在当前列表项的子内容位置。
- */
-export function getBlockAnchorPrefixesForListItem(
-  lines: string[],
-  targetLine: number,
-): { startAnchorPrefix: string; endAnchorPrefix: string } {
-  const targetLineText = lines[targetLine] ?? '';
-  const targetListPrefix = getListItemPrefix(targetLineText);
-  if (!targetListPrefix) return { startAnchorPrefix: '', endAnchorPrefix: '' };
-
-  const targetLeadingSpaces = (targetLineText.match(/^(\s*)/)?.[1] ?? '').length;
-  let startAnchorPrefix = '';
-
-  // 向上找到最近一个级别不比目标更深的列表项，作为 start 锚点的依附对象
-  for (let i = targetLine - 1; i >= 0; i--) {
-    const prevPrefix = getListItemPrefix(lines[i]);
-    if (!prevPrefix) continue;
-    const prevLeadingSpaces = (lines[i].match(/^(\s*)/)?.[1] ?? '').length;
-    if (prevLeadingSpaces <= targetLeadingSpaces) {
-      startAnchorPrefix = prevPrefix.childIndent;
-      break;
-    }
-  }
-
-  return { startAnchorPrefix, endAnchorPrefix: targetListPrefix.childIndent };
-}
-
-/**
- * 如果 region 起点/终点落在列表项的行首，将锚点后移到 marker 之后（起点）
- * 或前移到上一行末尾（终点），避免 %%...%% 锚点拆断列表结构。
- */
-function offsetToLineCh(content: string, offset: number): { line: number; ch: number } {
-  const before = content.substring(0, offset);
-  const line = before.split('\\n').length - 1;
-  const lastNewline = before.lastIndexOf('\\n');
-  const ch = offset - lastNewline - 1;
-  return { line, ch };
-}
-
-export function adjustRegionStartOffsetForListItem(content: string, offset: number): number {
-  const { line, ch } = offsetToLineCh(content, offset);
-  const lines = content.split('\\n');
-  const prefix = getListItemPrefix(lines[line] ?? '');
-  if (prefix && ch === 0) {
-    return offset + prefix.marker.length;
-  }
-  return offset;
-}
-
-export function adjustRegionEndOffsetForListItem(content: string, offset: number): number {
-  const { line, ch } = offsetToLineCh(content, offset);
-  const lines = content.split('\\n');
-  const prefix = getListItemPrefix(lines[line] ?? '');
-  if (prefix && ch === 0 && offset > 0) {
-    return offset - 1;
-  }
-  return offset;
-}
+// BUG-15 FIXED: getListItemPrefix, getBlockAnchorPrefixesForListItem,
+// offsetToLineCh, adjustRegionStartOffsetForListItem, adjustRegionEndOffsetForListItem
+// 已提取到 ./list-utils.ts 并修复 \\n 字面量 bug（现在是真正的换行符 \n）
 
 /**
  * 块级锚点标注 — Track B
@@ -754,7 +698,7 @@ export function adjustRegionEndOffsetForListItem(content: string, offset: number
  * CM6 装饰器和 PostProcessor 检测锚点后给中间块添加视觉效果。
  */
 async function createBlockAnnotation(
-  plugin: MarkVaultPlugin,
+  plugin: MarkVaultPluginInterface,
   editor: Editor,
   view: MarkdownView,
   type: AnnotationType,
@@ -838,7 +782,7 @@ async function createBlockAnnotation(
 /**
  * 注册命令面板命令
  */
-export function registerCommands(plugin: MarkVaultPlugin): void {
+export function registerCommands(plugin: MarkVaultPluginInterface): void {
   const defaultColor = plugin.settings.defaultHighlightColor;
 
   // 高亮命令

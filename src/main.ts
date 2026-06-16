@@ -1,5 +1,6 @@
 import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
+import type { MarkVaultPluginInterface } from './utils/plugin-interface';
 import { DEFAULT_SETTINGS, RelationSchema } from './types/annotation';
 import { ActiveAnnotationState } from './plugin/active-state';
 import { AnnotationCacheManager } from './plugin/cache-manager';
@@ -51,7 +52,7 @@ import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeProcessor } from './plugin/reading-processor';
 import { AnnotationSearchEngine } from './search/search-engine';
 
-export default class MarkVaultPlugin extends Plugin {
+export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginInterface {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
   /** v4.3: 关系类型 Schema 实例 — 从 settings 动态构建 */
   relationSchema: RelationSchema = new RelationSchema(DEFAULT_SETTINGS.customRelationTypes);

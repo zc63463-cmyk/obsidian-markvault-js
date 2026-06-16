@@ -72,8 +72,9 @@ export function requestRegionLayerRedraw(): void {
       activeEditorView.dispatch({
         effects: [regionCacheUpdatedEffect.of(undefined)],
       });
-    } catch {
+    } catch (err) {
       // view 可能已销毁，清除过期引用
+      console.debug('MarkVault: regionLayer redraw dispatch failed, view likely destroyed', err);
       activeEditorView = null;
     }
   }
@@ -98,8 +99,9 @@ function resolveFilePath(): string | null {
   if (filePathResolver) {
     try {
       return filePathResolver();
-    } catch {
+    } catch (err) {
       // fallback to DOM
+      console.debug('MarkVault: filePathResolver failed, falling back to DOM', err);
     }
   }
   return null;
@@ -121,8 +123,9 @@ function getFilePathFromView(view: EditorView): string | null {
       const pathAttr = (leafEl as HTMLElement).getAttribute('data-path');
       if (pathAttr) return pathAttr;
     }
-  } catch {
-    // ignore
+  } catch (err) {
+    // ignore — DOM queries can fail if view is being destroyed
+    console.debug('MarkVault: DOM path extraction failed', err);
   }
   return null;
 }
@@ -698,8 +701,9 @@ class MarkVaultDecorator implements PluginValue {
             }),
           });
         }
-      } catch {
+      } catch (err) {
         // 忽略 line 解析异常
+        console.debug('MarkVault: region block line parse error', err);
       }
     }
 
@@ -951,8 +955,9 @@ class MarkVaultDecorator implements PluginValue {
           colorHex,
           note: attrs.note || '',
         });
-      } catch {
+      } catch (err) {
         // 跳过解析失败的标签
+        console.debug('MarkVault: failed to parse <mark> tag, skipping', err);
       }
     }
 

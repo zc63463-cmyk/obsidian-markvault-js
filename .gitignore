@@ -2,3 +2,8 @@ node_modules/
 main.js
 main.js.map
 .DS_Store
+# Agent workspace directories (not part of the plugin)
+.codebuddy/
+.workbuddy/
+# Build temp
+tmp/

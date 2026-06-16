@@ -4,6 +4,7 @@
 
 import { AnnotationStore } from '../src/db/annotation-store';
 import { FileEncoder } from '../src/db/file-encoder';
+import { stripExtraFields } from '../src/db/strip-fields';
 
 // ─── Mock DataAdapter ──────────────────────────────────
 
@@ -618,8 +619,6 @@ async function runTests() {
   });
 
   await test('P1: _stripExtraFields preserves endLine, relations.invalidAt, relations.source', async () => {
-    // @ts-expect-error accessing private method
-    const strip = AnnotationStore._stripExtraFields;
     const ann = {
       uuid: 'ep1', filePath: 'test.md', type: 'highlight' as const, color: 'yellow' as const,
       text: 'test', note: '', tags: [],
@@ -634,7 +633,7 @@ async function runTests() {
       motivation: 'classifying' as const,
       schemaVersion: 2,
     } as any;
-    const clean = strip(ann);
+    const clean = stripExtraFields(ann);
     if (clean.endLine !== 5) throw new Error('endLine not preserved');
     if (clean.relations?.length !== 2) throw new Error('relations not preserved');
     if (clean.relations?.[0]?.source !== 'manual') throw new Error('relation.source not preserved');
