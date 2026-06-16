@@ -20,7 +20,7 @@ import { annotationStore } from '../../db/annotation-store';
 import { updateAnnotation, addRelation } from '../../db/annotation-repo';
 import { updateMarkTag, updateBlockAnchor, updateSpanAnchor } from '../../core/annotation-parser';
 import type MarkVaultPlugin from '../../main';
-import { RelationSchema } from '../../types/annotation';
+import { RelationSchema, SEMANTIC_GROUPS } from '../../types/annotation';
 import type { Annotation, AnnotationRelation } from '../../types/annotation';
 import { buildGraphData, type GraphNode, type GraphLink } from './graph-data-builder';
 import type { GraphFilter } from './graph-types';
@@ -42,17 +42,6 @@ const DEFAULT_FILTER: GraphFilter = {
 
 /** v5.11: 被动关系 chip 的灰色（语义化调色板伴生，与 PASSIVE_COLOR 同色系） */
 const PASSIVE_CHIP_COLOR = '#9CA3AF';
-
-/** v5.11: 语义分组 — 芯片按维度归类，组间分隔 */
-const SEMANTIC_GROUPS: { label: string; types: string[] }[] = [
-  { label: 'Taxonomic',   types: ['generalizes', 'specializes', 'part-of'] },
-  { label: 'Argumentative', types: ['proves', 'refutes', 'contrasts'] },
-  { label: 'Expositive',  types: ['elaborates', 'exemplifies', 'illustrates'] },
-  { label: 'Referential', types: ['references', 'applies'] },
-  { label: 'Dynamic',     types: ['enables', 'causes', 'precedes'] },
-  { label: 'Structural',  types: ['associates', 'supplements'] },
-  { label: 'Passive',     types: ['isAppliedBy', 'isReferencedBy', 'isProvedBy', 'isRefutedBy', 'isElaboratedBy', 'isExemplifiedBy', 'isIllustratedBy', 'isCausedBy', 'isEnabledBy', 'follows', 'contains'] },
-];
 
 /** force-graph 实例类型 — ReturnType<typeof ForceGraph> 会返回一个函数类型 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

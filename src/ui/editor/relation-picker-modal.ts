@@ -15,21 +15,13 @@
 import { Modal, App, Menu } from 'obsidian';
 import type { AnnotationRelation, RelationType, AnnotationFilter, AnnotationType, AnnotationMotivation, MasteryLevel } from '../../types/annotation';
 import type { RelationSchema } from '../../types/annotation';
-import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS } from '../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS, SEMANTIC_GROUPS } from '../../types/annotation';
 import type { AnnotationSearchEngine } from '../../search/search-engine';
 import type { SearchResult } from '../../search/types';
 import { getGroupNames, getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 
-/** v5.12: 语义分组 — 关系类型芯片按维度归类，与图谱工具栏一致 */
-const SEMANTIC_GROUPS: { label: string; types: string[] }[] = [
-  { label: 'Taxonomic',     types: ['generalizes', 'specializes', 'part-of'] },
-  { label: 'Argumentative', types: ['proves', 'refutes', 'contrasts'] },
-  { label: 'Expositive',    types: ['elaborates', 'exemplifies', 'illustrates'] },
-  { label: 'Referential',   types: ['references', 'applies'] },
-  { label: 'Dynamic',       types: ['enables', 'causes', 'precedes'] },
-  { label: 'Structural',    types: ['associates', 'supplements'] },
-];
+// v5.12: SEMANTIC_GROUPS 已提取到 annotation.ts 作为共享常量
 
 /** RelationPicker 的回调参数 */
 export interface RelationPickResult {

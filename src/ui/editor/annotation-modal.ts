@@ -563,9 +563,15 @@ export class AnnotationModal extends Modal {
       cls: isInvalidated ? 'markvault-modal-relation-row markvault-relation-invalidated' : 'markvault-modal-relation-row',
     });
 
-    // 关系类型标签 — v4.3: 从 Schema 动态获取
+    // v5.12: 关系类型标签 — dot 色块 + 文字
     const typeLabel = this.plugin.getRelationSchema().getLabel(rel.type);
-    row.createSpan({ text: `${typeLabel} →`, cls: 'markvault-modal-relation-type' });
+    const typeColor = this.plugin.getRelationSchema().getConfig(rel.type)?.color || '#78716C';
+    const typeSpan = row.createSpan({ cls: 'markvault-modal-relation-type' });
+    typeSpan.createSpan({
+      cls: 'markvault-modal-relation-dot',
+      attr: { style: `background: ${typeColor}` },
+    });
+    typeSpan.createSpan({ text: typeLabel });
 
     // 目标 UUID（截断显示）
     const shortUuid = rel.targetUuid.length > 8

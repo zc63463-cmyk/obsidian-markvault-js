@@ -247,6 +247,17 @@ export const DEFAULT_RELATION_TYPE_CONFIGS: RelationTypeConfig[] = [
   { id: 'contains',         label: '包含',     reverseId: 'part-of',      isSymmetric: false, isBuiltIn: true, isActive: false },
 ];
 
+/** v5.12: 语义分组 — 关系类型按六维归类，用于 UI 芯片分组渲染 */
+export const SEMANTIC_GROUPS: { label: string; types: string[] }[] = [
+  { label: 'Taxonomic',     types: ['generalizes', 'specializes', 'part-of'] },
+  { label: 'Argumentative', types: ['proves', 'refutes', 'contrasts'] },
+  { label: 'Expositive',    types: ['elaborates', 'exemplifies', 'illustrates'] },
+  { label: 'Referential',   types: ['references', 'applies'] },
+  { label: 'Dynamic',       types: ['enables', 'causes', 'precedes'] },
+  { label: 'Structural',    types: ['associates', 'supplements'] },
+  { label: 'Passive',       types: ['isAppliedBy', 'isReferencedBy', 'isProvedBy', 'isRefutedBy', 'isElaboratedBy', 'isExemplifiedBy', 'isIllustratedBy', 'isCausedBy', 'isEnabledBy', 'follows', 'contains'] },
+];
+
 /**
  * v4.3: 关系类型 Schema — 运行时查询入口
  *

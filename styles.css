@@ -1715,9 +1715,21 @@
 }
 
 .markvault-modal-relation-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--interactive-accent);
   font-weight: 500;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* v5.12: 关系类型颜色圆点 */
+.markvault-modal-relation-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   flex-shrink: 0;
 }
 
