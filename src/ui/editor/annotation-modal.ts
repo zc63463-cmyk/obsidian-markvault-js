@@ -1252,31 +1252,11 @@ export class AnnotationModal extends Modal {
       // 验证内容确实发生了变化
       if (newContent !== content) {
         this.plugin.modifyGuard.acquire(this.annotation.filePath);
-        try {
-          await this.app.vault.modify(file, newContent);
-          console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
-        } catch (mdErr) {
-          // 🔧 P0 修复：MD 写入失败，回滚 DB
-          console.error(`MarkVault modal: MD update failed, rolling back DB for ${this.annotation.uuid}`, mdErr);
-          await updateAnnotation(this.annotation.uuid, {
-            note: originalNote,
-            tags: originalTags,
-            color: originalColor,
-            type: originalType,
-            fields: originalFields,
-            alias: originalAlias, // v5.3
-          });
-          // 恢复内存中的 annotation 引用
-          this.annotation.note = originalNote;
-          this.annotation.tags = originalTags;
-          this.annotation.color = originalColor;
-          this.annotation.type = originalType;
-          this.annotation.fields = originalFields;
-          this.annotation.alias = originalAlias; // v5.3
-          throw mdErr; // 重新抛出，让外部感知
-        } finally {
-          this.plugin.modifyGuard.release(this.annotation.filePath);
-        }
+        // 🔧 B-2 修复：使用 vault.process 原子读写，替代 vault.modify + try-catch-rollback
+        // vault.process 保证：回调抛错 → MD 不变；回调成功 → MD 已更新
+        await this.app.vault.process(file, () => newContent);
+        console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
+        this.plugin.modifyGuard.release(this.annotation.filePath);
       } else {
         console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
       }
