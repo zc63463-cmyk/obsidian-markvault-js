@@ -1,6 +1,9 @@
 import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
 import { DEFAULT_SETTINGS, RelationSchema } from './types/annotation';
+import { ActiveAnnotationState } from './plugin/active-state';
+import { AnnotationCacheManager } from './plugin/cache-manager';
+import { AnnotationSyncEngine } from './plugin/sync-engine';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
 import { MARKVAULT_GRAPH_VIEW_TYPE, RelationGraphView } from './ui/graph/RelationGraphView';
 import { registerContextMenu, registerCommands, getBlockAnchorPrefixesForListItem, adjustRegionStartOffsetForListItem, adjustRegionEndOffsetForListItem } from './ui/editor/context-menu';
@@ -56,8 +59,8 @@ export default class MarkVaultPlugin extends Plugin {
   /** v4.3 Phase 2: 关系图谱视图 */
   private graphView: RelationGraphView | null = null;
 
-  // 当前活跃文件的路径，用于偏移修正
-  private activeFilePath: string | null = null;
+  // 当前活跃文件的路径，用于偏移修正（SyncEngine 需要读写）
+  activeFilePath: string | null = null;
 
   // 🆕 防重入保护：当插件自身在修改文件时（创建标注、保存批注），
   // 阻止 onFileOpen() 重新触发 syncFromMarkdown()，避免竞态条件覆盖数据
@@ -65,30 +68,18 @@ export default class MarkVaultPlugin extends Plugin {
   public modifyGuard = new ModifyGuard(3000);
 
   // 🆕 防重入扩展：记录正在编辑的标注 uuid 集合
-  // 当用户在 Modal 中编辑标注时，即使 modifyGuard 已释放，
-  // 也要保护这些标注不被 syncFromMarkdown 覆盖
-  private _activeAnnotationUuids = new Set<string>();
+  // 委托给 ActiveAnnotationState 模块管理
+  readonly activeState = new ActiveAnnotationState();
 
-  // 🆕 同步维护的活跃文件路径集合，避免 onFileOpen 中异步查询 DB
-  private _activeAnnotationFilePaths = new Set<string>();
+  // 🆕 缓存管理：委托给 AnnotationCacheManager 模块
+  readonly cacheManager!: AnnotationCacheManager;
 
-  // 🆕 uuid → filePath 反向映射，用于精确维护 _activeAnnotationFilePaths
-  private _activeAnnotationUuidToFilePath = new Map<string, string>();
-
-  // 🆕 当前打开的 AnnotationModal 实例（按 uuid 索引）
-  // 用于在文件被删除/重命名时自动关闭对应 Modal
-  private _activeAnnotationModals = new Map<string, AnnotationModal>();
+  // 🆕 同步引擎：委托给 AnnotationSyncEngine 模块
+  readonly syncEngine!: AnnotationSyncEngine;
 
   // 🆕 阅读模式相关模块
   private readingToolbar: ReadingModeToolbar | null = null;
   private readingClickDelegate: ReadingModeClickDelegate | null = null;
-
-  // 🆕 冷却期：文件最近被插件修改过，跳过短时间内重复的 onFileOpen sync
-  // 防止 vault.modify 后异步触发的 file-open 事件重复执行昂贵的全量同步
-  private _syncCooldown: Map<string, number> = new Map();
-
-  // 🆕 侧边栏刷新去重标志，避免 onFileOpen 高频触发时产生刷新堆积
-  private _pendingSidebarRefresh = false;
 
   // 🆕 AnnotationStore 是否初始化成功
   private _storeReady = false;
@@ -116,236 +107,84 @@ export default class MarkVaultPlugin extends Plugin {
 
   /** 注册一个标注为"正在编辑"状态，防止被 sync 覆盖 */
   public markAnnotationActive(uuid: string, filePath?: string) {
-    this._activeAnnotationUuids.add(uuid);
-    if (filePath) {
-      this._activeAnnotationUuidToFilePath.set(uuid, filePath);
-      this._activeAnnotationFilePaths.add(filePath);
-    }
+    this.activeState.markAnnotationActive(uuid, filePath);
   }
 
   /** 取消标注的"正在编辑"状态 */
   public unmarkAnnotationActive(uuid: string, filePath?: string) {
-    this._activeAnnotationUuids.delete(uuid);
-
-    // 精确维护文件路径集合：只有当该文件下没有其他活跃标注时才移除
-    const storedPath = this._activeAnnotationUuidToFilePath.get(uuid);
-    this._activeAnnotationUuidToFilePath.delete(uuid);
-
-    const targetPath = storedPath ?? filePath;
-    if (targetPath) {
-      let hasOtherActive = false;
-      for (const fp of this._activeAnnotationUuidToFilePath.values()) {
-        if (fp === targetPath) {
-          hasOtherActive = true;
-          break;
-        }
-      }
-      if (!hasOtherActive) {
-        this._activeAnnotationFilePaths.delete(targetPath);
-      }
-    }
+    this.activeState.unmarkAnnotationActive(uuid, filePath);
   }
 
   /** 检查一个标注是否正在被编辑 */
   public isAnnotationActive(uuid: string): boolean {
-    return this._activeAnnotationUuids.has(uuid);
+    return this.activeState.isAnnotationActive(uuid);
   }
 
   /** 检查某个文件是否有正在编辑的标注（同步，无需查询 DB） */
   public isFileEditing(filePath: string): boolean {
-    return this._activeAnnotationFilePaths.has(filePath);
+    return this.activeState.isFileEditing(filePath);
   }
 
   /** 注册当前打开的 AnnotationModal */
   public registerActiveAnnotationModal(uuid: string, modal: AnnotationModal): void {
-    this._activeAnnotationModals.set(uuid, modal);
+    this.activeState.registerActiveAnnotationModal(uuid, modal);
   }
 
   /** 注销已关闭的 AnnotationModal */
   public unregisterActiveAnnotationModal(uuid: string): void {
-    this._activeAnnotationModals.delete(uuid);
+    this.activeState.unregisterActiveAnnotationModal(uuid);
   }
 
   /** 关闭指定文件上所有打开的 AnnotationModal */
   public closeActiveModalsForFile(filePath: string): void {
-    for (const [uuid, modal] of this._activeAnnotationModals) {
-      const fp = this._activeAnnotationUuidToFilePath.get(uuid);
-      if (fp === filePath) {
-        try {
-          modal.close();
-        } catch (err) {
-          console.error('MarkVault: failed to close active modal for deleted file', uuid, err);
-        }
-      }
-    }
+    this.activeState.closeActiveModalsForFile(filePath);
   }
 
-  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync（30s 冷却） */
+  /** 标记文件数据已一致，跳过 onFileOpen 的重复 sync（委托给 SyncEngine） */
   public markFileSynced(filePath: string): void {
-    this._syncCooldown.set(filePath, Date.now());
+    this.syncEngine.markFileSynced(filePath);
   }
 
   /**
-   * 更新 span / block / region 标注缓存（供 CM6 装饰器使用）
-   * 从 DB 加载指定文件的 span/block/region 标注数据到缓存
+   * 更新 span / block 标注缓存（委托给 CacheManager）
    */
   public async updateSpanCache(filePath: string): Promise<void> {
-    try {
-      const annotations = await annotationStore.getAnnotationsForFile(filePath);
-
-      const spanAnnotations = annotations.filter(a => a.kind === 'span' && a.spanRanges && a.spanRanges.length > 0);
-      const spanData: SpanAnnotationData[] = spanAnnotations.map(a => ({
-        uuid: a.uuid,
-        type: a.type,
-        color: a.color,
-        anchorLine: a.anchorLine ?? a.startLine,
-        spanRanges: a.spanRanges!,
-        note: a.note,
-      }));
-      updateSpanCacheForFile(filePath, spanData);
-
-      const blockAnnotations = annotations.filter(a => a.kind === 'block' && a.targetLine !== undefined);
-      const blockData: BlockAnnotationData[] = blockAnnotations.map(a => ({
-        uuid: a.uuid,
-        type: a.type,
-        color: a.color,
-        targetLine: a.targetLine ?? a.startLine,
-        note: a.note,
-      }));
-      updateBlockCacheForFile(filePath, blockData);
-    } catch (err) {
-      console.error('MarkVault: updateSpanCache error', err);
-    }
+    return this.cacheManager.updateSpanCache(filePath);
   }
 
   /**
-   * 更新 region 标注缓存（供 CM6 layer 使用）
-   * 🔧 BUG-5.1 修复：缓存更新后强制 CM6 layer 重绘，解决异步缓存竞态
+   * 更新 region 标注缓存（委托给 CacheManager）
    */
   public async updateRegionCache(filePath: string): Promise<void> {
-    try {
-      const annotations = await annotationStore.getAnnotationsForFile(filePath);
-      const regionAnnotations = annotations.filter(a => a.kind === 'region');
-      const regionData: RegionAnnotationData[] = regionAnnotations.map(a => ({
-        uuid: a.uuid,
-        type: a.type,
-        color: a.color,
-        startOffset: a.startOffset,
-        endOffset: a.endOffset,
-        note: a.note,
-      }));
-      updateRegionCacheForFile(filePath, regionData);
-      // 缓存已更新，通知 CM6 region layer 重新渲染
-      requestRegionLayerRedraw();
-    } catch (err) {
-      console.error('MarkVault: updateRegionCache error', err);
-    }
+    return this.cacheManager.updateRegionCache(filePath);
   }
 
   /**
-   * 🔧 BUG-5.1 修复：立即同步更新 region 缓存（预填充）
-   *
-   * 在 editor.replaceSelection() 之前调用，确保 CM6 layer 首次渲染时
-   * 就能看到新创建的 region 标注数据，避免异步缓存竞态导致 layer 为空。
-   *
-   * @param filePath 文件路径
-   * @param newAnnotation 即将创建的标注对象（尚未写入 DB）
+   * 立即同步更新 region 缓存（委托给 CacheManager）
    */
   public updateRegionCacheImmediately(filePath: string, newAnnotation: Annotation): void {
-    try {
-      // 读取当前缓存
-      const existingData = getRegionCacheForFile(filePath);
-      const newData: RegionAnnotationData[] = [
-        ...existingData,
-        {
-          uuid: newAnnotation.uuid,
-          type: newAnnotation.type,
-          color: newAnnotation.color,
-          startOffset: newAnnotation.startOffset,
-          endOffset: newAnnotation.endOffset,
-          note: newAnnotation.note,
-        },
-      ];
-      updateRegionCacheForFile(filePath, newData);
-      // 预填充后也通知 CM6 重绘
-      requestRegionLayerRedraw();
-    } catch (err) {
-      // 预填充失败不影响主流程，updateRegionCache 会随后修正
-      console.warn('MarkVault: updateRegionCacheImmediately failed (will be corrected by updateRegionCache)', err);
-    }
+    this.cacheManager.updateRegionCacheImmediately(filePath, newAnnotation);
   }
 
   /**
-   * 🔧 BUG-5.3 修复：立即同步更新 block 缓存（预填充）
-   *
-   * 在 editor.replaceRange() 之前调用，确保 CM6 decoration plugin 首次渲染时
-   * 就能看到新创建的 block 标注数据，避免异步缓存竞态导致行装饰缺失。
-   *
-   * @param filePath 文件路径
-   * @param newAnnotation 即将创建的标注对象（尚未写入 DB）
+   * 立即同步更新 block 缓存（委托给 CacheManager）
    */
+  public updateBlockCacheImmediately(filePath: string, newAnnotation: Annotation): void {
+    this.cacheManager.updateBlockCacheImmediately(filePath, newAnnotation);
+  }
+
   /**
-   * 在编辑模式下选中 region 的内容范围，触发 Obsidian 原生选区（外部选框）。
-   *
-   * 编辑模式下 region 不渲染自定义背景/边框，视觉反馈完全通过原生 selection 完成。
+   * 在编辑模式下选中 region 的内容范围（委托给 CacheManager）
    */
   public selectRegionInEditor(annotation: Annotation): boolean {
-    if (annotation.kind !== 'region') return false;
-
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || !view.file || view.file.path !== annotation.filePath) return false;
-    if (view.getMode() === 'preview') return false;
-
-    const editor = view.editor;
-    const content = editor.getValue();
-
-    const startRegex = new RegExp(`%%markvault-region:${annotation.uuid}:([^:%]+):([^:%]+):start:[^%]*%%`);
-    const endRegex = new RegExp(`%%markvault-region:${annotation.uuid}:([^:%]+):([^:%]+):end:[^%]*%%`);
-
-    const startMatch = content.match(startRegex);
-    const endMatch = content.match(endRegex);
-    if (!startMatch || !endMatch) return false;
-
-    const startOffset = startMatch.index! + startMatch[0].length;
-    const endOffset = endMatch.index!;
-    if (startOffset >= endOffset) return false;
-
-    try {
-      const from = editor.offsetToPos(startOffset);
-      const to = editor.offsetToPos(endOffset);
-      editor.setSelection(from, to);
-      editor.scrollIntoView({ from, to }, true);
-      return true;
-    } catch (err) {
-      console.error('MarkVault: selectRegionInEditor error', err);
-      return false;
-    }
-  }
-
-  public updateBlockCacheImmediately(filePath: string, newAnnotation: Annotation): void {
-    try {
-      // 读取当前缓存
-      const existingData = getBlockCacheForFile(filePath);
-      const newData: BlockAnnotationData[] = [
-        ...existingData,
-        {
-          uuid: newAnnotation.uuid,
-          type: newAnnotation.type,
-          color: newAnnotation.color,
-          targetLine: newAnnotation.targetLine ?? newAnnotation.startLine,
-          note: newAnnotation.note,
-        },
-      ];
-      updateBlockCacheForFile(filePath, newData);
-      // 预填充后通知 CM6 重绘（decoration plugin 也会读 block 缓存）
-      requestRegionLayerRedraw();
-    } catch (err) {
-      // 预填充失败不影响主流程，updateSpanCache 会随后修正
-      console.warn('MarkVault: updateBlockCacheImmediately failed (will be corrected by updateSpanCache)', err);
-    }
+    return this.cacheManager.selectRegionInEditor(annotation);
   }
 
   async onload() {
+    // 初始化子模块（需要 this 引用）
+    (this as any).cacheManager = new AnnotationCacheManager(this.app);
+    (this as any).syncEngine = new AnnotationSyncEngine(this);
+
     console.log('MarkVault: loading plugin...');
 
     // ── 设置加载（最先执行，后续功能依赖设置） ──────────
@@ -488,38 +327,7 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       this.registerEvent(
         this.app.vault.on('delete', async (file) => {
-          if (file instanceof TFile && file.extension === 'md') {
-            console.log(`MarkVault: file deleted — cleaning up annotations for "${file.path}"`);
-            try {
-              // 如果当前活跃文件是被删除文件，清空引用
-              if (this.activeFilePath === file.path) {
-                this.activeFilePath = null;
-              }
-
-              // 关闭该文件上所有打开的 AnnotationModal
-              this.closeActiveModalsForFile(file.path);
-
-              // 清理该文件的活跃标注保护状态
-              const activeUuids = Array.from(this._activeAnnotationUuids);
-              for (const uuid of activeUuids) {
-                if (this._activeAnnotationUuidToFilePath.get(uuid) === file.path) {
-                  this.unmarkAnnotationActive(uuid, file.path);
-                }
-              }
-
-              const deletedCount = await annotationStore.deleteAnnotationsForFile(file.path);
-              clearSpanCacheForFile(file.path);
-              await this.refreshSidebar();
-
-              if (deletedCount > 0) {
-                new Notice(`Cleaned up ${deletedCount} annotations for deleted file`, 4000);
-              }
-              console.log(`MarkVault: annotations cleaned up for deleted file "${file.path}" (${deletedCount})`);
-            } catch (err) {
-              console.error('MarkVault: failed to clean up annotations for deleted file', file.path, err);
-              new Notice('Failed to clean up annotations for deleted file', 5000);
-            }
-          }
+          await this.syncEngine.handleFileDelete(file);
         }),
       );
     } catch (err) {
@@ -530,46 +338,7 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       this.registerEvent(
         this.app.vault.on('rename', async (file, oldPath) => {
-          if (file instanceof TFile && file.extension === 'md') {
-            console.log(`MarkVault: file renamed "${oldPath}" → "${file.path}"`);
-            try {
-              // 关闭旧文件上打开的 Modal，避免保存时路径错误
-              this.closeActiveModalsForFile(oldPath);
-
-              await annotationStore.renameAnnotationsForFile(oldPath, file.path);
-
-              // 如果当前活跃文件就是被重命名的文件，更新 activeFilePath
-              if (this.activeFilePath === oldPath) {
-                this.activeFilePath = file.path;
-              }
-
-              // 🔧 审计修复：更新活跃标注的 uuid→filePath 映射
-              for (const [uuid, fp] of this._activeAnnotationUuidToFilePath) {
-                if (fp === oldPath) {
-                  this._activeAnnotationUuidToFilePath.set(uuid, file.path);
-                }
-              }
-
-              // 🔧 审计修复：更新 _activeAnnotationFilePaths，防止 Modal 编辑保护失效
-              if (this._activeAnnotationFilePaths.has(oldPath)) {
-                this._activeAnnotationFilePaths.delete(oldPath);
-                this._activeAnnotationFilePaths.add(file.path);
-              }
-
-              // 🔧 审计修复：更新 _syncCooldown 中的冷却条目
-              const cooldownTime = this._syncCooldown.get(oldPath);
-              if (cooldownTime !== undefined) {
-                this._syncCooldown.delete(oldPath);
-                this._syncCooldown.set(file.path, cooldownTime);
-              }
-
-              await this.refreshSidebar();
-              new Notice(`Annotations migrated for renamed file`, 4000);
-              console.log(`MarkVault: annotations migrated for renamed file`);
-            } catch (err) {
-              console.error('MarkVault: failed to migrate annotations for renamed file', oldPath, '→', file.path, err);
-            }
-          }
+          await this.syncEngine.handleFileRename(file, oldPath);
         }),
       );
     } catch (err) {
@@ -581,31 +350,7 @@ export default class MarkVaultPlugin extends Plugin {
     try {
       this.registerEvent(
         this.app.workspace.on('active-leaf-change', async () => {
-          // 🔧 BUG-5.1 修复：注入当前活跃的 EditorView，用于 region 缓存更新后强制 layer 重绘
-          const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-          if (activeView && activeView.editor) {
-            // Obsidian 的 Editor 对象可能包含 CM6 EditorView
-            const cmView = (activeView.editor as any).cm as import('@codemirror/view').EditorView | undefined;
-            setActiveEditorView(cmView || null);
-          } else {
-            setActiveEditorView(null);
-          }
-
-          const file = this.app.workspace.getActiveFile();
-          if (file instanceof TFile && file.extension === 'md') {
-            // 文件真正切换时由 file-open 处理；这里主要处理同文件不同视图切换
-            if (this.activeFilePath === file.path) {
-              try {
-                await annotationStore.ensureFileLoaded(file.path);
-                await this.updateSpanCache(file.path);
-                await this.updateRegionCache(file.path);
-                requestRegionLayerRedraw();
-                this.scheduleSidebarRefresh();
-              } catch (err) {
-                console.error('MarkVault: active-leaf-change cache refresh failed', err);
-              }
-            }
-          }
+          await this.syncEngine.handleActiveLeafChange();
         }),
       );
     } catch (err) {
@@ -861,52 +606,7 @@ export default class MarkVaultPlugin extends Plugin {
   // ─── 文件打开时同步 ────────────────────────────
 
   async onFileOpen(file: TFile) {
-    // 🔧 BUG-5.1 修复：更新活跃的 EditorView 引用
-    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (activeView && activeView.editor) {
-      const cmView = (activeView.editor as any).cm as import('@codemirror/view').EditorView | undefined;
-      setActiveEditorView(cmView || null);
-    }
-
-    // 防重入：如果当前文件正在被插件自身修改，跳过此次同步
-    if (this.modifyGuard.isLocked(file.path)) {
-      return;
-    }
-
-    // 防重入：如果有标注正在被编辑（Modal 打开中），也跳过同步
-    if (this._activeAnnotationFilePaths.has(file.path)) {
-      return;
-    }
-
-    // 冷却期检查：文件最近被插件修改过，跳过短时间内重复的 sync
-    // 大文件 vault.modify 后 Obsidian 的元数据重解析可能耗时 30s+，
-    // 期间/之后触发的 file-open 事件不应再执行昂贵的全量同步
-    const lastSync = this._syncCooldown.get(file.path);
-    if (lastSync && (Date.now() - lastSync) < 30000) {
-      return;
-    }
-
-    if (!this.settings.enableAutoSync) {
-      return;
-    }
-
-    // 🔧 P1 修复：冷却期在 sync 开始前设置，防止并发 onFileOpen
-    this._syncCooldown.set(file.path, Date.now());
-
-    // 🔧 性能修复：onFileOpen 只做轻量级同步。
-    // 分片 JSON 已在 initialize() 预加载，ensureFileLoaded 只读单文件分片；
-    // 全量 syncFromMarkdown + recoverAndSyncOffsets + upgradeMarkdownAnnotations
-    // 改由 rebuildDatabase 命令手动触发，避免大文件打开/修改后阻塞 UI 40s+。
-    try {
-      await annotationStore.ensureFileLoaded(file.path);
-      await this.updateSpanCache(file.path);
-      await this.updateRegionCache(file.path);
-
-      // 刷新侧边栏调度到下一帧，避免阻塞当前事件循环并去重
-      this.scheduleSidebarRefresh();
-    } catch (err) {
-      console.error('MarkVault: error in lightweight file open sync', file.path, err);
-    }
+    return this.syncEngine.onFileOpen(file);
   }
 
   /**
@@ -924,265 +624,12 @@ export default class MarkVaultPlugin extends Plugin {
     spansRecovered: number;
     failed: number;
   }> {
-    if (!this._storeReady) {
-      throw new Error('MarkVault: annotation database not initialized');
-    }
-
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile)) {
-      throw new Error(`MarkVault: file not found: ${filePath}`);
-    }
-
-    // 防重入：文件正在被插件修改或 Modal 编辑中时跳过
-    if (this.modifyGuard.isLocked(filePath)) {
-      throw new Error('MarkVault: file is currently being modified by the plugin');
-    }
-    if (this._activeAnnotationFilePaths.has(filePath)) {
-      throw new Error('MarkVault: an annotation modal is open for this file');
-    }
-
-    let added = 0;
-    let updated = 0;
-    let inlineRecovered = 0;
-    let blocksRecovered = 0;
-    let spansRecovered = 0;
-    let failed = 0;
-
-    this.modifyGuard.acquire(filePath);
-    try {
-      const content = await this.app.vault.read(file);
-
-      // 1. 元数据同步
-      const syncResult = await syncFromMarkdown(content, filePath);
-      added = syncResult.added;
-      updated = syncResult.updated;
-
-      // 2. 行内标注偏移恢复
-      const plainText = getPlainTextForOffsetRecovery(content);
-      const inlineAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
-        (a) => !a.kind || a.kind === 'inline',
-      );
-
-      if (inlineAnnotations.length > 0 && plainText.length > 0) {
-        const recoverResults = batchRecoverOffsets(plainText, inlineAnnotations);
-        for (const r of recoverResults) {
-          const ann = inlineAnnotations.find((a) => a.uuid === r.uuid);
-          if (!ann) continue;
-
-          const offsetChanged = r.startOffset !== ann.startOffset || r.endOffset !== ann.endOffset;
-          if (offsetChanged) {
-            const { contextBefore, contextAfter } = extractContextFromContent(
-              plainText,
-              r.startOffset,
-              ann.text,
-              this.settings.contextWindowSize,
-            );
-            await annotationStore.updateAnnotation(r.uuid, {
-              startOffset: r.startOffset,
-              endOffset: r.endOffset,
-              contextBefore,
-              contextAfter,
-            });
-            inlineRecovered++;
-          }
-        }
-        failed += inlineAnnotations.length - recoverResults.length;
-      }
-
-      // 3. block / span 目标位置恢复
-      const blockSpanAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
-        (a) => a.kind === 'block' || a.kind === 'span',
-      );
-
-      if (blockSpanAnnotations.length > 0) {
-        const lines = content.split('\n');
-        const anchors = parseBlockAnchors(content);
-        const anchorByUuid = new Map(anchors.map((a) => [a.uuid, a]));
-        const doubleRanges = new Map<string, ReturnType<typeof findBlockDoubleAnchorRange>>();
-        for (const ann of blockSpanAnnotations) {
-          if (ann.kind !== 'block') continue;
-          const range = findBlockDoubleAnchorRange(content, ann.uuid);
-          if (range) doubleRanges.set(ann.uuid, range);
-        }
-
-        for (const ann of blockSpanAnnotations) {
-          const anchor = anchorByUuid.get(ann.uuid);
-          const doubleRange = doubleRanges.get(ann.uuid);
-
-          if (!anchor && !doubleRange) {
-            // Markdown 中已找不到该锚点，无法自动恢复
-            failed++;
-            continue;
-          }
-
-          if (ann.kind === 'block') {
-            // 优先使用新的双锚点范围进行精确恢复
-            if (doubleRange) {
-              const changed =
-                doubleRange.targetLine !== ann.targetLine ||
-                doubleRange.anchorLine !== ann.anchorLine ||
-                doubleRange.startLine !== ann.startLine ||
-                doubleRange.endLine !== ann.endLine ||
-                doubleRange.text !== ann.text;
-              if (changed) {
-                await annotationStore.updateAnnotation(ann.uuid, {
-                  targetLine: doubleRange.targetLine,
-                  anchorLine: doubleRange.anchorLine,
-                  startLine: doubleRange.startLine,
-                  endLine: doubleRange.endLine,
-                  text: doubleRange.text,
-                  blockType: ann.blockType || detectBlockTypeAtLine(lines, doubleRange.targetLine),
-                  targetHash: computeBlockSignature(lines, doubleRange.targetLine, ann.blockType) || computeSignature(doubleRange.text),
-                });
-                blocksRecovered++;
-              }
-              continue;
-            }
-
-            // 旧单锚点恢复逻辑
-            const preferredLine = ann.targetLine ?? anchor!.anchorLine + 1;
-            const currentSig = computeBlockSignature(lines, preferredLine, ann.blockType);
-
-            if (ann.targetHash && currentSig && currentSig !== ann.targetHash) {
-              const foundLine = findBlockLineBySignature(
-                lines,
-                ann.blockType || 'paragraph',
-                ann.targetHash,
-                preferredLine,
-              );
-              if (foundLine !== null) {
-                await annotationStore.updateAnnotation(ann.uuid, {
-                  targetLine: foundLine,
-                  anchorLine: anchor!.anchorLine,
-                  blockType: ann.blockType || detectBlockTypeAtLine(lines, foundLine),
-                });
-                blocksRecovered++;
-              } else {
-                failed++;
-              }
-            } else {
-              // 指纹一致或没有指纹，仅同步 anchorLine
-              if (anchor!.anchorLine !== ann.anchorLine) {
-                await annotationStore.updateAnnotation(ann.uuid, { anchorLine: anchor!.anchorLine });
-              }
-            }
-          } else if (ann.kind === 'span') {
-            // 跳过锚点行、空行、特殊围栏，找到 span 实际内容起始行
-            let actualTargetLine = anchor!.anchorLine + 1;
-            for (let i = actualTargetLine; i < lines.length; i++) {
-              const trimmed = lines[i].trim();
-              if (
-                trimmed.startsWith('%%markvault') ||
-                trimmed === '$$' ||
-                trimmed === '$$$' ||
-                trimmed.startsWith('```') ||
-                trimmed === ''
-              ) {
-                actualTargetLine = i + 1;
-                continue;
-              }
-              actualTargetLine = i;
-              break;
-            }
-
-            if (actualTargetLine < lines.length) {
-              const endLine = findSpanEndLine(lines, actualTargetLine);
-              const fullSpanText = lines.slice(actualTargetLine, endLine + 1).join('\n');
-              const currentSig = computeSpanSignature(fullSpanText);
-
-              // 如果指纹不匹配，在附近搜索
-              if (ann.targetHash && currentSig && currentSig !== ann.targetHash) {
-                const foundLine = findSpanLineBySignature(
-                  lines,
-                  ann.targetHash,
-                  actualTargetLine,
-                );
-                if (foundLine !== null) {
-                  actualTargetLine = foundLine;
-                } else {
-                  failed++;
-                  continue;
-                }
-              }
-
-              const newSpanRanges = computeSpanRanges(content, actualTargetLine, fullSpanText);
-              const changed =
-                actualTargetLine !== ann.targetLine ||
-                anchor!.anchorLine !== ann.anchorLine ||
-                JSON.stringify(newSpanRanges) !== JSON.stringify(ann.spanRanges);
-
-              if (changed) {
-                await annotationStore.updateAnnotation(ann.uuid, {
-                  targetLine: actualTargetLine,
-                  anchorLine: anchor!.anchorLine,
-                  spanRanges: newSpanRanges,
-                });
-                spansRecovered++;
-              }
-            } else {
-              failed++;
-            }
-          }
-        }
-      }
-
-      // 3.5 region 标注位置恢复
-      const regionAnnotations = (await annotationStore.getAnnotationsForFile(filePath)).filter(
-        (a) => a.kind === 'region',
-      );
-      if (regionAnnotations.length > 0) {
-        const parsedRegions = parseRegionAnnotations(content, filePath);
-        const regionByUuid = new Map(parsedRegions.map((r) => [r.uuid, r]));
-
-        for (const ann of regionAnnotations) {
-          const parsed = regionByUuid.get(ann.uuid);
-          if (!parsed) {
-            failed++;
-            continue;
-          }
-
-          const newEndLine = content.substring(0, parsed.endOffset).split('\n').length - 1;
-          const changed =
-            parsed.startOffset !== ann.startOffset ||
-            parsed.endOffset !== ann.endOffset ||
-            parsed.text !== ann.text;
-
-          if (changed) {
-            await annotationStore.updateAnnotation(ann.uuid, {
-              startOffset: parsed.startOffset,
-              endOffset: parsed.endOffset,
-              startLine: parsed.startLine,
-              endLine: newEndLine,
-              text: parsed.text,
-              targetHash: computeSpanSignature(parsed.text),
-            });
-          }
-        }
-      }
-
-      // 4. 刷新缓存与 UI
-      this.markFileSynced(filePath);
-      await this.updateSpanCache(filePath);
-      await this.updateRegionCache(filePath);
-      this.scheduleSidebarRefresh();
-    } finally {
-      this.modifyGuard.release(filePath);
-    }
-
-    return { added, updated, inlineRecovered, blocksRecovered, spansRecovered, failed };
+    return this.syncEngine.forceSyncFile(filePath);
   }
 
   /** 调度侧边栏刷新，使用 requestAnimationFrame 并去重 */
   private scheduleSidebarRefresh(): void {
-    if (this._pendingSidebarRefresh) return;
-    this._pendingSidebarRefresh = true;
-
-    requestAnimationFrame(() => {
-      this._pendingSidebarRefresh = false;
-      this.refreshSidebar().catch((err) => {
-        console.error('MarkVault: scheduled sidebar refresh failed', err);
-      });
-    });
+    this.syncEngine.scheduleSidebarRefresh();
   }
 
   // ─── 增量偏移修正 ──────────────────────────────

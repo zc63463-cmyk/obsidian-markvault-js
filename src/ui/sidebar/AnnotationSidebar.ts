@@ -12,6 +12,7 @@ import {
 import { debounce } from '../../utils/debounce';
 import { applyUnifiedFilter, hasActiveFilters } from '../../search/filter-engine';
 import { AnnotationModal } from '../editor/annotation-modal';
+import { ConfirmModal } from '../confirm-modal';
 import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { removeNativeAnnotation } from '../../core/native-annotation';
 import { removeRegionAnnotation } from '../../core/region-annotation';
@@ -632,7 +633,12 @@ export class AnnotationSidebar extends ItemView {
     const confirmMsg = totalRels > 0
       ? `Delete annotation "${baseText}..."? It has ${totalRels} relation${totalRels > 1 ? 's' : ''} that will also be removed.`
       : `Delete annotation "${baseText}..."?`;
-    const confirmed = confirm(confirmMsg);
+    const confirmed = await ConfirmModal.open(this.app, {
+      message: confirmMsg,
+      title: 'Delete Annotation',
+      okText: 'Delete',
+      dangerous: true,
+    });
     if (!confirmed) return;
 
     const plugin = this.pluginInstance;

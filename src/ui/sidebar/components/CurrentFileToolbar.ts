@@ -2,6 +2,7 @@ import { App, Notice, TFile } from 'obsidian';
 import type { Annotation } from '../../../types/annotation';
 import { getAnnotationsForFile, deleteAnnotation, addAnnotation } from '../../../db/annotation-repo';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
+import { ConfirmModal } from '../../confirm-modal';
 
 /**
  * CurrentFileToolbar —— 当前文件操作工具栏
@@ -99,9 +100,12 @@ export class CurrentFileToolbar {
     const annotations = await getAnnotationsForFile(filePath);
     if (annotations.length === 0) return;
 
-    const confirmed = confirm(
-      `Delete all ${annotations.length} annotations in "${fileName}"?\n\nThis will remove all highlights, blocks, and spans from this file.`
-    );
+    const confirmed = await ConfirmModal.open(this.host.app, {
+      message: `Delete all ${annotations.length} annotations in "${fileName}"?\n\nThis will remove all highlights, blocks, and spans from this file.`,
+      title: 'Clear All Annotations',
+      okText: 'Delete All',
+      dangerous: true,
+    });
     if (!confirmed) return;
 
     const plugin = this.host.getPluginInstance();

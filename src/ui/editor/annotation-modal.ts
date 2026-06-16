@@ -4,6 +4,7 @@ import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
 import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
+import { ConfirmModal } from '../confirm-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
 import { updateRegionAnnotation, removeRegionAnnotation } from '../../core/region-annotation';
@@ -383,7 +384,12 @@ export class AnnotationModal extends Modal {
       const confirmMsg = totalRels > 0
         ? `Delete this annotation? It has ${totalRels} relation${totalRels > 1 ? 's' : ''} that will also be removed.`
         : 'Delete this annotation?';
-      const confirmed = confirm(confirmMsg);
+      const confirmed = await ConfirmModal.open(this.app, {
+        message: confirmMsg,
+        title: 'Delete Annotation',
+        okText: 'Delete',
+        dangerous: true,
+      });
       if (confirmed) {
         await this.remove();
         this.close();

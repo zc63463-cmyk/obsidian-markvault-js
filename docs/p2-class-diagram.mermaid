@@ -1,0 +1,152 @@
+classDiagram
+    direction TB
+
+    class MarkVaultPlugin {
+        -settings: MarkVaultSettings
+        -relationSchema: RelationSchema
+        -modifyGuard: ModifyGuard
+        +activeState: ActiveAnnotationState
+        +cacheManager: AnnotationCacheManager
+        +syncEngine: AnnotationSyncEngine
+        +readingProcessor: ReadingModeProcessor
+        +isStoreReady() boolean
+        +getSearchEngine() AnnotationSearchEngine
+        +activateSidebar() void
+        +refreshSidebar() void
+        +activateGraphView() void
+        +onload() void
+        +onunload() void
+    }
+
+    class ActiveAnnotationState {
+        -_uuids: Set~string~
+        -_filePaths: Set~string~
+        -_uuidToFilePath: Map~string,string~
+        -_modals: Map~string,AnnotationModal~
+        +markActive(uuid, filePath?) void
+        +unmarkActive(uuid, filePath?) void
+        +isActive(uuid) boolean
+        +closeModalsForFile(filePath) void
+    }
+
+    class AnnotationCacheManager {
+        -plugin: MarkVaultPlugin
+        +markFileSynced(filePath) void
+        +updateSpanCache(filePath) Promise
+        +updateRegionCache(filePath) Promise
+        +selectRegionInEditor(ann) boolean
+    }
+
+    class AnnotationSyncEngine {
+        -plugin: MarkVaultPlugin
+        -_syncCooldown: Map~string,number~
+        +onFileOpen(file: TFile) Promise~void~
+        +forceSyncFile(filePath: string) Promise~SyncResult~
+        +scheduleSidebarRefresh() void
+    }
+
+    class ReadingModeProcessor {
+        -plugin: MarkVaultPlugin
+        +createPostProcessor() callback
+        +processInlineMarks(el) void
+        +processBlockAnchors(el, ctx) Promise
+        +processRegionAnnotations(el, ctx) Promise
+        +applyBlockDecoration(...) void
+        +highlightSpanFragments(...) Promise
+        +addRegionBadge(...) void
+    }
+
+    class AnnotationStore {
+        -index: IndexLayer
+        -persist: FilePersistLayer
+        -relations: RelationEngine
+        -query: QueryEngine
+        +addAnnotation(ann) Promise
+        +updateAnnotation(uuid, changes) Promise
+        +deleteAnnotation(uuid) Promise
+        +getAnnotationByUuid(uuid) Annotation
+        +getAnnotationsForFile(fp) Annotation[]
+        +getStats() AnnotationStats
+    }
+
+    class IndexLayer {
+        -_byUuid: Map
+        -_byFile: Map
+        -_byTag: Map
+        -_byField: Map~string,Map~
+        -_byRelationOut: Map
+        -_byRelationIn: Map
+        -_byGroup: Map
+        -_byMastery: Map
+        -_byMotivation: Map
+        +add(annotation) void
+        +remove(uuid) void
+        +rebuildIncomingFor(uuid) void
+    }
+
+    class FilePersistLayer {
+        -_dirtyFiles: Set~string~
+        -_loadedFiles: Set~string~
+        -_indexData: IndexData
+        +initialize() Promise
+        +shutdown() Promise
+        +ensureFileLoaded(fp) Promise
+        +flushFile(fp) Promise
+        +flushAll() Promise
+        +rebuildIndex() Promise
+    }
+
+    class RelationEngine {
+        -index: IndexLayer
+        -persist: FilePersistLayer
+        -schema: RelationSchema
+        +addRelation(source, rel) Promise
+        +removeRelation(source, target, type) Promise
+        +invalidateRelation(source, target, type) Promise
+        +cascadeDeleteRelations(ann) void
+        +cascadeUpdateRelations(uuid, old, new) void
+    }
+
+    class QueryEngine {
+        -index: IndexLayer
+        +queryByFile(fp) Annotation[]
+        +queryByType(t) Annotation[]
+        +queryByColor(c) Annotation[]
+        +searchByText(query) Annotation[]
+        +getStats() AnnotationStats
+    }
+
+    class AnnotationSearchEngine {
+        +search(query) SearchResult[]
+        +index(ann) void
+        +importIndex(snapshot) void
+        +exportIndex() object
+    }
+
+    %% ── Ownership (composition) ──
+    MarkVaultPlugin *-- ActiveAnnotationState : owns
+    MarkVaultPlugin *-- AnnotationCacheManager : owns
+    MarkVaultPlugin *-- AnnotationSyncEngine : owns
+    MarkVaultPlugin *-- ReadingModeProcessor : owns
+    AnnotationStore *-- IndexLayer : owns
+    AnnotationStore *-- FilePersistLayer : owns
+    AnnotationStore *-- RelationEngine : owns
+    AnnotationStore *-- QueryEngine : owns
+
+    %% ── Usage dependencies ──
+    MarkVaultPlugin --> AnnotationStore : uses
+    MarkVaultPlugin --> AnnotationSearchEngine : uses
+
+    AnnotationSyncEngine --> ActiveAnnotationState : reads
+    AnnotationSyncEngine --> AnnotationCacheManager : calls
+    AnnotationSyncEngine --> AnnotationStore : uses
+
+    AnnotationCacheManager --> AnnotationStore : uses
+    ReadingModeProcessor --> AnnotationStore : uses (spans)
+
+    RelationEngine --> IndexLayer : reads/writes
+    RelationEngine --> FilePersistLayer : markDirty
+    QueryEngine --> IndexLayer : reads (all)
+    FilePersistLayer --> IndexLayer : writes shards from
+
+    AnnotationSearchEngine --> AnnotationStore : reads all

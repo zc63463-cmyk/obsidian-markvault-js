@@ -2905,3 +2905,28 @@
   padding: 4px 14px;
   border-radius: 6px;
 }
+
+/* ═══════════════════════════════════════════════
+   v5.12: ConfirmModal 确认对话框
+   ═══════════════════════════════════════════════ */
+
+.markvault-confirm-message {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-normal);
+  padding: 0 0 16px 0;
+  word-break: break-word;
+}
+
+.markvault-confirm-buttons {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.markvault-confirm-buttons button {
+  font-size: 13px;
+  padding: 6px 20px;
+  border-radius: 6px;
+}

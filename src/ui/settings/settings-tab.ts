@@ -4,6 +4,7 @@ import { PRESET_COLORS, DEFAULT_SETTINGS, DEFAULT_RELATION_TYPE_CONFIGS, Relatio
 import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig } from '../../types/annotation';
 import { annotationStore } from '../../db/annotation-store';
 import { AddRelationTypeModal } from './add-relation-type-modal';
+import { ConfirmModal } from '../confirm-modal';
 
 export class MarkVaultSettingTab extends PluginSettingTab {
   plugin: MarkVaultPlugin;
@@ -494,12 +495,12 @@ export class MarkVaultSettingTab extends PluginSettingTab {
 
         let shouldCascade = false;
         if (hasActiveRelations) {
-          const choice = window.confirm(
-            `There are active relations of type "${cfg.id}".\n\n` +
-            `Click OK to also invalidate (soft-delete) those relations.\n` +
-            `Click Cancel to keep the relations as orphans (they will still appear in the graph).`
-          );
-          shouldCascade = choice;
+          shouldCascade = await ConfirmModal.open(this.app, {
+            message: `There are active relations of type "${cfg.id}".\n\nClick OK to also invalidate (soft-delete) those relations.\nClick Cancel to keep the relations as orphans (they will still appear in the graph).`,
+            title: 'Delete Relation Type',
+            okText: 'OK',
+            cancelText: 'Cancel',
+          });
         }
 
         const idx = this.plugin.settings.customRelationTypes.findIndex(t => t.id === cfg.id);

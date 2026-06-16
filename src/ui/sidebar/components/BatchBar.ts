@@ -2,6 +2,7 @@ import { App, Menu, Notice, TFile } from 'obsidian';
 import type { Annotation, AnnotationFilter } from '../../../types/annotation';
 import { PRESET_COLORS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
+import { ConfirmModal } from '../../confirm-modal';
 import {
   removeBlockAnchor,
   removeSpanAnchor,
@@ -217,7 +218,12 @@ export class BatchBar {
     const confirmMsg = totalRels > 0
       ? `Delete ${count} annotations? This will also remove ${totalRels} relation${totalRels > 1 ? 's' : ''}.`
       : `Delete ${count} annotations?`;
-    const confirmed = confirm(confirmMsg);
+    const confirmed = await ConfirmModal.open(this.host.app, {
+      message: confirmMsg,
+      title: 'Batch Delete',
+      okText: 'Delete',
+      dangerous: true,
+    });
     if (!confirmed) return;
 
     const plugin = this.host.getPluginInstance();

@@ -342,6 +342,174 @@ await test('deduplication: same source→target+type keeps non-invalidated', asy
   assert(!appliesLinks[0].isInvalidated, 'non-invalidated should win');
 });
 
+// ── P2-6: 补漏测试 ──────────────────────────
+
+// T1: curvature — 同向多类型关系应分配不同 curvature（BUG-11 回归验证）
+await test('curvature: same-direction multiple types get distinct non-zero curvature', async () => {
+  // a1 → a2 with both 'applies' and 'references' (same direction, different types)
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [
+        { targetUuid: 'a2', type: 'applies', createdAt: Date.now(), source: 'user' },
+        { targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' },
+      ],
+    }),
+    makeAnn({ uuid: 'a2' }),
+  ];
+  const result = buildGraphData(anns, defaultSchema, noFilter);
+  assertEqual(result.links.length, 2, 'should have 2 links (one per type)');
+  // Both same-direction edges need curvature > 0 to avoid visual overlap
+  const curvatures = result.links.map(l => l.curvature);
+  assert(curvatures.every(c => c > 0), 'all same-direction edges should have curvature > 0');
+  // Curvatures must be distinct so arcs don't overlap
+  assert(curvatures[0] !== curvatures[1], 'same-direction edges should have different curvature values');
+});
+
+// T1b: curvature — 双向 + 同向多类型混合场景
+await test('curvature: bidirectional with same-direction multi-type in forward direction', async () => {
+  // a1 → a2: [applies, references];  a2 → a1: [isAppliedBy]
+  // forward edges (a1→a2) should have positive curvature
+  // reverse edge (a2→a1) should have negative curvature
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [
+        { targetUuid: 'a2', type: 'applies', createdAt: Date.now(), source: 'user' },
+        { targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' },
+      ],
+    }),
+    makeAnn({
+      uuid: 'a2',
+      relations: [
+        { targetUuid: 'a1', type: 'isAppliedBy', createdAt: Date.now(), source: 'inferred' },
+      ],
+    }),
+  ];
+  const result = buildGraphData(anns, defaultSchema, noFilter);
+  assertEqual(result.links.length, 3, 'should have 3 links total');
+
+  const a1toA2 = result.links.filter(l => l.source === 'a1' && l.target === 'a2');
+  const a2toA1 = result.links.filter(l => l.source === 'a2' && l.target === 'a1');
+
+  assertEqual(a1toA2.length, 2, 'should have 2 forward links');
+  assertEqual(a2toA1.length, 1, 'should have 1 reverse link');
+
+  // Forward edges: positive curvature
+  assert(a1toA2.every(l => l.curvature > 0), 'forward edges should have positive curvature');
+  assert(a1toA2[0].curvature !== a1toA2[1].curvature, 'forward edges should have distinct curvature');
+
+  // Reverse edge: negative curvature
+  assert(a2toA1[0].curvature < 0, 'reverse edge should have negative curvature');
+});
+
+// T2: bfsReachable — 邻居深度过滤（通过 buildGraphData 间接测试）
+await test('neighbor depth: depth=1 returns focal node + direct neighbors only', async () => {
+  // a1 (focal) → a2, a1 → a3;  a2 → a4 (2 hops)
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [
+        { targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' },
+        { targetUuid: 'a3', type: 'references', createdAt: Date.now(), source: 'user' },
+      ],
+    }),
+    makeAnn({
+      uuid: 'a2',
+      relations: [{ targetUuid: 'a4', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({ uuid: 'a3' }),
+    makeAnn({ uuid: 'a4' }),
+  ];
+  const filter: GraphFilter = { ...noFilter, neighborDepth: 1, focalNodeId: 'a1' };
+  const result = buildGraphData(anns, defaultSchema, filter);
+
+  const nodeIds = result.nodes.map(n => n.id);
+  assert(nodeIds.includes('a1'), 'a1 (focal) should be present');
+  assert(nodeIds.includes('a2'), 'a2 (1 hop via a1→a2) should be present');
+  assert(nodeIds.includes('a3'), 'a3 (1 hop via a1→a3) should be present');
+  assert(!nodeIds.includes('a4'), 'a4 (2 hops away) should NOT be present');
+  assertEqual(result.nodes.length, 3, 'should have exactly 3 nodes');
+});
+
+await test('neighbor depth: depth=2 includes second-hop neighbors', async () => {
+  // a1 → a2 → a3 → a4  (chain of 4)
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [{ targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({
+      uuid: 'a2',
+      relations: [{ targetUuid: 'a3', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({
+      uuid: 'a3',
+      relations: [{ targetUuid: 'a4', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({ uuid: 'a4' }),
+  ];
+  const filter: GraphFilter = { ...noFilter, neighborDepth: 2, focalNodeId: 'a1' };
+  const result = buildGraphData(anns, defaultSchema, filter);
+
+  const nodeIds = result.nodes.map(n => n.id);
+  assert(nodeIds.includes('a1'), 'a1 should be present');
+  assert(nodeIds.includes('a2'), 'a2 (1 hop) should be present');
+  assert(nodeIds.includes('a3'), 'a3 (2 hops) should be present');
+  assert(!nodeIds.includes('a4'), 'a4 (3 hops) should NOT be present');
+  assertEqual(result.nodes.length, 3, 'should have exactly 3 nodes');
+});
+
+await test('neighbor depth: unknown focalNodeId → empty graph', async () => {
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [{ targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({ uuid: 'a2' }),
+  ];
+  const filter: GraphFilter = { ...noFilter, neighborDepth: 1, focalNodeId: 'no-such-node' };
+  const result = buildGraphData(anns, defaultSchema, filter);
+  assertEqual(result.nodes.length, 0, 'unknown focalNodeId should produce empty graph');
+  assertEqual(result.links.length, 0, 'no links when no nodes match');
+});
+
+await test('neighbor depth: depth=0 with focalNodeId → no filtering', async () => {
+  // depth=0 means no BFS limiting — behaves same as no filter
+  const anns = [
+    makeAnn({
+      uuid: 'a1',
+      relations: [{ targetUuid: 'a2', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+    makeAnn({ uuid: 'a2' }),
+  ];
+  const filter: GraphFilter = { ...noFilter, neighborDepth: 0, focalNodeId: 'a1' };
+  const result = buildGraphData(anns, defaultSchema, filter);
+  assertEqual(result.nodes.length, 2, 'depth=0 should not filter any nodes');
+  assertEqual(result.links.length, 1, 'all links should remain');
+});
+
+// T3: 邻居深度 — 双向边（BFS 视为无向图）
+await test('neighbor depth: BFS treats graph as undirected — incoming edges count as reachable', async () => {
+  // a1 has NO outgoing relations. a3 → a1 (a3 points to a1).
+  // Directed: from a1 you cannot reach anyone (no outgoing edges).
+  // Undirected (BFS): from a1 you CAN reach a3 through the reverse edge.
+  const anns = [
+    makeAnn({ uuid: 'a1' }),  // focal — no outgoing edges
+    makeAnn({
+      uuid: 'a3',
+      relations: [{ targetUuid: 'a1', type: 'references', createdAt: Date.now(), source: 'user' }],
+    }),
+  ];
+  const filter: GraphFilter = { ...noFilter, neighborDepth: 1, focalNodeId: 'a1' };
+  const result = buildGraphData(anns, defaultSchema, filter);
+
+  const nodeIds = result.nodes.map(n => n.id);
+  assert(nodeIds.includes('a1'), 'focal node a1 should be present');
+  assert(nodeIds.includes('a3'), 'a3 should be reachable via undirected BFS (incoming edge counts)');
+  assertEqual(result.nodes.length, 2, 'both nodes reachable via undirected traversal');
+});
+
 // ── 报告 ──────────────────────────
 
 console.log('\n' + '═'.repeat(60));
