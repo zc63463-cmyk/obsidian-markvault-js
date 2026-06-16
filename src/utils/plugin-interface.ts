@@ -1,6 +1,6 @@
 import type { ModifyGuard } from './modify-guard';
 import type { AnnotationModal } from '../ui/editor/annotation-modal';
-import type { Annotation, MarkVaultSettings } from '../types/annotation';
+import type { Annotation, MarkVaultSettings, RelationSchema } from '../types/annotation';
 import type { AnnotationSearchEngine } from '../search/search-engine';
 
 /**
@@ -56,4 +56,7 @@ export interface MarkVaultPluginInterface {
 
   /** 获取搜索引擎实例（供 RelationPicker 等使用） */
   getSearchEngine(): AnnotationSearchEngine;
+
+  /** v4.3: 获取关系类型 Schema 实例 */
+  getRelationSchema(): RelationSchema;
 }

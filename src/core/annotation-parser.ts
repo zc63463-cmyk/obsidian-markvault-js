@@ -78,6 +78,7 @@ function parseMarkVaultAnnotations(
       kind: 'inline', // 🔧 标记为行内标注
       groupUuid: attrs.groupUuid, // 🔧 保留组 ID
       fields: attrs.fields ? decodeFields(attrs.fields) : undefined,
+      alias: attrs.alias || undefined, // v5.3: 图谱显示别名
       _source: 'markdown',
     });
   }
@@ -119,6 +120,7 @@ function parseHighlightrAnnotations(
     const lineCount = content.substring(0, startOffset).split('\n').length;
 
     results.push({
+      schemaVersion: 1,
       uuid: generateId(),
       filePath,
       type: 'highlight',
@@ -161,6 +163,7 @@ function parsePlainMarkAnnotations(
     const lineCount = content.substring(0, startOffset).split('\n').length;
 
     results.push({
+      schemaVersion: 1,
       uuid: generateId(),
       filePath,
       type: 'highlight',
@@ -259,6 +262,11 @@ export function buildMarkTag(annotation: Annotation, groupUuid?: string): string
     }
   }
 
+  // v5.3: 写入 data-alias 属性（图谱显示别名）
+  if (annotation.alias) {
+    attrs.push(`data-alias="${escapeAttr(annotation.alias)}"`);
+  }
+
   return `<mark ${attrs.join(' ')}>${annotation.text}</mark>`;
 }
 
@@ -288,7 +296,7 @@ export function removeMarkTag(content: string, uuid: string): { content: string;
 export function updateMarkTag(
   content: string,
   uuid: string,
-  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type'>> & { fields?: string },
+  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type' | 'alias'>> & { fields?: string },
 ): string {
   const regex = new RegExp(
     `(<mark\\s+[^>]*data-uuid="${escapeRegex(uuid)}"[^>]*>)([\\s\\S]*?)(<\\/mark>)`,
@@ -374,6 +382,21 @@ export function updateMarkTag(
       }
     }
 
+    // v5.3: 更新 alias
+    if (updates.alias !== undefined) {
+      if (updates.alias) {
+        // 有 alias 值 → 写入/替换 data-alias 属性
+        if (/data-alias="/.test(newOpenTag)) {
+          newOpenTag = newOpenTag.replace(/data-alias="[^"]*"/, `data-alias="${escapeAttr(updates.alias)}"`);
+        } else {
+          newOpenTag = newOpenTag.replace(/>$/, ` data-alias="${escapeAttr(updates.alias)}">`);
+        }
+      } else {
+        // alias 为空字符串 → 移除 data-alias 属性
+        newOpenTag = newOpenTag.replace(/\s*data-alias="[^"]*"/, '');
+      }
+    }
+
     return `${newOpenTag}${innerText}${closeTag}`;
   });
 }
@@ -395,19 +418,23 @@ function escapeRegex(s: string): string {
 // ─── Track B: 块级锚点标注 ──────────────────────────────
 
 /**
- * 块级标注锚点格式：%%markvault:uuid:type:color:note%%
+ * 块级标注锚点格式：%%markvault:uuid:type:color:alias:note%%
  *
  * 使用 Obsidian 原生注释语法 %%...%%，阅读模式下不可见。
  * 锚点紧贴在目标块上方，CM6/PostProcessor 检测锚点后
  * 给下方内容块添加装饰效果。
  *
+ * v5.3: 新增 alias 段（在 color 和 note 之间），用 _ 表示空值
+ *
  * 示例：
  * ```markdown
- * %%markvault:abc-123:highlight:yellow:重要公式%%
+ * %%markvault:abc-123:highlight:yellow:欧拉公式:重要公式%%
  * $$
  * \int_0^1 f(x)dx
  * $$
  * ```
+ *
+ * 向后兼容：旧格式 %%markvault:uuid:type:color:note%% 仍可解析（alias 默认为空）
  */
 
 /** 锚点字段中的冒号转义（因为冒号是分隔符） */
@@ -422,27 +449,34 @@ function decodeAnchorField(s: string): string {
 
 /**
  * 生成块级标注锚点字符串
+ * v5.3: 新增 alias 段，格式 %%markvault:uuid:type:color:alias:note%%
+ * alias 为空时写入 _ 占位符，保持冒号对齐和向后兼容
  */
 export function buildBlockAnchor(annotation: {
   uuid: string;
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
 }): string {
-  return `%%markvault:${annotation.uuid}:${annotation.type}:${annotation.color}:${escapeAnchorField(annotation.note || '')}%%`;
+  const aliasField = annotation.alias ? escapeAnchorField(annotation.alias) : '_';
+  return `%%markvault:${annotation.uuid}:${annotation.type}:${annotation.color}:${aliasField}:${escapeAnchorField(annotation.note || '')}%%`;
 }
 
 /**
  * 生成 span 标注锚点字符串（方案C）
  * 使用 markvault-span: 前缀区分于 block 标注的 markvault: 前缀
+ * v5.3: 新增 alias 段，格式 %%markvault-span:uuid:type:color:alias:note%%
  */
 export function buildSpanAnchor(annotation: {
   uuid: string;
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
 }): string {
-  return `%%markvault-span:${annotation.uuid}:${annotation.type}:${annotation.color}:${escapeAnchorField(annotation.note || '')}%%`;
+  const aliasField = annotation.alias ? escapeAnchorField(annotation.alias) : '_';
+  return `%%markvault-span:${annotation.uuid}:${annotation.type}:${annotation.color}:${aliasField}:${escapeAnchorField(annotation.note || '')}%%`;
 }
 
 // ─── Track B-v2: Block 双锚点标注 ─────────────────────────
@@ -610,6 +644,7 @@ export interface ParsedBlockAnchor {
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;    // v5.3: 图谱别名（从锚点解析）
   /** 锚点在全文中的字符偏移 */
   anchorOffset: number;
   /** 锚点所在行号（0-based） */
@@ -621,39 +656,71 @@ export interface ParsedBlockAnchor {
 /**
  * 从 Markdown 内容中解析所有块级标注锚点
  * 支持 %%markvault:...%% (block) 和 %%markvault-span:...%% (span) 两种格式
+ *
+ * v5.3: 新格式含 alias 段 %%markvault:uuid:type:color:alias:note%%
+ *       旧格式无 alias 段 %%markvault:uuid:type:color:note%% 仍可解析（alias 默认为空）
  */
 export function parseBlockAnchors(content: string): ParsedBlockAnchor[] {
   const results: ParsedBlockAnchor[] = [];
 
-  // 1. 解析 block 格式：%%markvault:uuid:type:color:note%%
-  // 🔧 修复：note 段可选，支持 %%markvault:uuid:type:color%% (无冒号) 和 %%markvault:uuid:type:color:%% (空note)
-  const blockRegex = /%%markvault:([^:%]+):([^:%]+):([^:%]+)(?::([^%]*))?%%/g;
+  // 1. 解析 block 格式
+  // v5.3 新格式: %%markvault:uuid:type:color:alias:note%% (6段)
+  // 旧格式: %%markvault:uuid:type:color:note%% (4-5段, 无 alias)
+  // 使用统一正则匹配，根据段数区分
+  const blockRegex = /%%markvault:([^:%]+):([^:%]+):([^:%]+)(?::([^:%]*))?(?::([^%]*))?%%/g;
   let match: RegExpExecArray | null;
   while ((match = blockRegex.exec(content)) !== null) {
     const anchorOffset = match.index;
     const lineCount = content.substring(0, anchorOffset).split('\n').length;
+    // match[4] 和 match[5] 的存在取决于段数
+    // 旧格式 (4段): match[1]=uuid, match[2]=type, match[3]=color, match[4]=note, match[5]=undefined
+    // 新格式 (6段): match[1]=uuid, match[2]=type, match[3]=color, match[4]=alias, match[5]=note
+    const hasAliasSegment = match[5] !== undefined;
+    let alias: string | undefined;
+    let note: string;
+    if (hasAliasSegment) {
+      // 新格式: match[4]=alias, match[5]=note
+      const rawAlias = match[4];
+      alias = (rawAlias && rawAlias !== '_') ? decodeAnchorField(rawAlias) : undefined;
+      note = match[5] ? decodeAnchorField(match[5]) : '';
+    } else {
+      // 旧格式: match[4]=note, 无 alias
+      note = match[4] ? decodeAnchorField(match[4]) : '';
+    }
     results.push({
       uuid: match[1],
       type: match[2] as AnnotationType,
       color: match[3],
-      note: match[4] ? decodeAnchorField(match[4]) : '',
+      note,
+      alias,
       anchorOffset,
       anchorLine: lineCount - 1,
       anchorKind: 'block',
     });
   }
 
-  // 2. 解析 span 格式：%%markvault-span:uuid:type:color:note%%
-  // 🔧 修复：note 段可选，同上
-  const spanRegex = /%%markvault-span:([^:%]+):([^:%]+):([^:%]+)(?::([^%]*))?%%/g;
+  // 2. 解析 span 格式
+  // 同样支持新格式（含 alias）和旧格式
+  const spanRegex = /%%markvault-span:([^:%]+):([^:%]+):([^:%]+)(?::([^:%]*))?(?::([^%]*))?%%/g;
   while ((match = spanRegex.exec(content)) !== null) {
     const anchorOffset = match.index;
     const lineCount = content.substring(0, anchorOffset).split('\n').length;
+    const hasAliasSegment = match[5] !== undefined;
+    let alias: string | undefined;
+    let note: string;
+    if (hasAliasSegment) {
+      const rawAlias = match[4];
+      alias = (rawAlias && rawAlias !== '_') ? decodeAnchorField(rawAlias) : undefined;
+      note = match[5] ? decodeAnchorField(match[5]) : '';
+    } else {
+      note = match[4] ? decodeAnchorField(match[4]) : '';
+    }
     results.push({
       uuid: match[1],
       type: match[2] as AnnotationType,
       color: match[3],
-      note: match[4] ? decodeAnchorField(match[4]) : '',
+      note,
+      alias,
       anchorOffset,
       anchorLine: lineCount - 1,
       anchorKind: 'span',
@@ -709,6 +776,7 @@ export function removeAnyAnchor(content: string, uuid: string, kind?: string): s
 /**
  * 更新 Markdown 内容中指定 uuid 的块级锚点属性
  * 优先尝试新的双锚点格式，找不到则回退到旧单锚点格式。
+ * v5.3: 支持 alias 字段的更新
  */
 export function updateBlockAnchor(
   content: string,
@@ -717,6 +785,7 @@ export function updateBlockAnchor(
     type: AnnotationType;
     color: string;
     note: string;
+    alias?: string;
   }>,
 ): string {
   const range = findBlockDoubleAnchorRange(content, uuid);
@@ -724,6 +793,7 @@ export function updateBlockAnchor(
     const type = updates.type || range.type;
     const color = updates.color || range.color;
     const note = updates.note !== undefined ? updates.note : range.note;
+    // v5.3: 双锚点暂不支持 alias 段（双锚点格式未扩展），保留原有逻辑
     const startAnchor = buildBlockAnchorStart({ uuid, type, color, note });
     const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note });
     return (
@@ -735,20 +805,40 @@ export function updateBlockAnchor(
     );
   }
 
-  // 🔧 修复：支持无 note 段的格式 %%markvault:uuid:type:color%%
-  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^%]*))?%%`);
+  // v5.3: 匹配新格式（含 alias 段）或旧格式（无 alias 段），统一更新为新格式
+  // 新格式: %%markvault:uuid:type:color:alias:note%%
+  // 旧格式: %%markvault:uuid:type:color:note%%
+  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^:%]*))?(?::([^%]*))?%%`);
 
-  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string | undefined) => {
+  return content.replace(regex, (_full, oldType: string, oldColor: string, g3: string | undefined, g4: string | undefined) => {
     const type = updates.type || oldType;
     const color = updates.color || oldColor;
-    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : (oldNote || '');
-    // 始终写入 note 段（即使为空），保持格式一致性
-    return `%%markvault:${uuid}:${type}:${color}:${note}%%`;
+
+    // 判断匹配到的是新格式还是旧格式
+    const isNewFormat = g4 !== undefined;
+    let oldAlias: string | undefined;
+    let oldNote: string;
+    if (isNewFormat) {
+      // 新格式: g3=alias, g4=note
+      oldAlias = (g3 && g3 !== '_') ? decodeAnchorField(g3) : undefined;
+      oldNote = g4 ? decodeAnchorField(g4) : '';
+    } else {
+      // 旧格式: g3=note, 无 alias
+      oldNote = g3 ? decodeAnchorField(g3) : '';
+    }
+
+    const note = updates.note !== undefined ? updates.note : oldNote;
+    const alias = updates.alias !== undefined ? updates.alias : oldAlias;
+    const aliasField = alias ? escapeAnchorField(alias) : '_';
+
+    // 始终输出新格式（含 alias 段）
+    return `%%markvault:${uuid}:${type}:${color}:${aliasField}:${escapeAnchorField(note)}%%`;
   });
 }
 
 /**
  * 更新 Markdown 内容中指定 uuid 的 span 锚点属性
+ * v5.3: 支持 alias 字段的更新
  */
 export function updateSpanAnchor(
   content: string,
@@ -757,21 +847,37 @@ export function updateSpanAnchor(
     type: AnnotationType;
     color: string;
     note: string;
+    alias?: string;
   }>,
 ): string {
-  // 🔧 修复：支持无 note 段的格式 %%markvault-span:uuid:type:color%%
-  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^%]*))?%%`);
+  // v5.3: 匹配新格式或旧格式，统一更新为新格式
+  const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^:%]*))?(?::([^%]*))?%%`);
 
-  return content.replace(regex, (_full, oldType: string, oldColor: string, oldNote: string | undefined) => {
+  return content.replace(regex, (_full, oldType: string, oldColor: string, g3: string | undefined, g4: string | undefined) => {
     const type = updates.type || oldType;
     const color = updates.color || oldColor;
-    const note = updates.note !== undefined ? escapeAnchorField(updates.note) : (oldNote || '');
-    return `%%markvault-span:${uuid}:${type}:${color}:${note}%%`;
+
+    const isNewFormat = g4 !== undefined;
+    let oldAlias: string | undefined;
+    let oldNote: string;
+    if (isNewFormat) {
+      oldAlias = (g3 && g3 !== '_') ? decodeAnchorField(g3) : undefined;
+      oldNote = g4 ? decodeAnchorField(g4) : '';
+    } else {
+      oldNote = g3 ? decodeAnchorField(g3) : '';
+    }
+
+    const note = updates.note !== undefined ? updates.note : oldNote;
+    const alias = updates.alias !== undefined ? updates.alias : oldAlias;
+    const aliasField = alias ? escapeAnchorField(alias) : '_';
+
+    return `%%markvault-span:${uuid}:${type}:${color}:${aliasField}:${escapeAnchorField(note)}%%`;
   });
 }
 
 /**
  * 更新任意类型的锚点（block 或 span），根据 kind 自动选择
+ * v5.3: 支持 alias 字段更新
  */
 export function updateAnyAnchor(
   content: string,
@@ -780,6 +886,7 @@ export function updateAnyAnchor(
     type: AnnotationType;
     color: string;
     note: string;
+    alias?: string;
   }>,
   kind?: string,
 ): string {
@@ -883,6 +990,7 @@ export function parseAllAnnotationsFromMarkdown(
       anchorLine: anchor.anchorLine,
       spanRanges,
       targetHash,
+      alias: anchor.alias,  // v5.3: 从锚点解析的 alias
       _source: 'markdown' as const,
     };
   });

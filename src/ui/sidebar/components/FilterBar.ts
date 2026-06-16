@@ -219,6 +219,28 @@ export class FilterBar {
       this.host.filter.needsCorrection = this.host.filter.needsCorrection ? undefined : true;
       await this.host.refreshListOnly();
     });
+
+    // v4.1: Motivation 语义过滤
+    const motBtn = metaRow.createEl('button', {
+      text: this.host.filter.motivation && this.host.filter.motivation !== 'all' ? '🎯' : '🎯',
+      cls: `markvault-filter-btn ${this.host.filter.motivation && this.host.filter.motivation !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by motivation (annotation intent)' },
+    });
+    motBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.host.filter.motivation || this.host.filter.motivation === 'all')
+          .onClick(async () => { this.host.filter.motivation = 'all'; await this.host.refreshListOnly(); });
+      });
+      for (const m of ['highlighting', 'commenting', 'questioning', 'editing', 'bookmarking'] as const) {
+        const labels: Record<string, string> = { highlighting: '🖍️ Highlighting', commenting: '💬 Commenting', questioning: '❓ Questioning', editing: '✏️ Editing', bookmarking: '🔖 Bookmarking' };
+        menu.addItem((item) => {
+          item.setTitle(labels[m] || m).setChecked(this.host.filter.motivation === m)
+            .onClick(async () => { this.host.filter.motivation = m as any; await this.host.refreshListOnly(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: motBtn.getBoundingClientRect().left, clientY: motBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
   }
 
   private showAddFieldFilterMenu(anchor: HTMLElement, fieldKeys: string[]) {

@@ -16,6 +16,7 @@ import {
   addAnnotation,
   updateAnnotation,
   queryAnnotations,
+  getRelations,
 } from '../../../db/annotation-repo';
 
 /**
@@ -205,7 +206,18 @@ export class BatchBar {
 
   private async handleBatchDelete() {
     if (this.host.selectedUuids.size === 0) return;
-    const confirmed = confirm(`Delete ${this.host.selectedUuids.size} annotations?`);
+    const count = this.host.selectedUuids.size;
+
+    // 🔧 v5.1: 统计涉及的关联关系数量
+    let totalRels = 0;
+    for (const uuid of this.host.selectedUuids) {
+      const rels = getRelations(uuid);
+      totalRels += rels.outgoing.length + rels.incoming.length;
+    }
+    const confirmMsg = totalRels > 0
+      ? `Delete ${count} annotations? This will also remove ${totalRels} relation${totalRels > 1 ? 's' : ''}.`
+      : `Delete ${count} annotations?`;
+    const confirmed = confirm(confirmMsg);
     if (!confirmed) return;
 
     const plugin = this.host.getPluginInstance();

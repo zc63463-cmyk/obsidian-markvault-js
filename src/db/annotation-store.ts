@@ -3,6 +3,7 @@ import type {
   Annotation,
   AnnotationFilter,
   AnnotationFlag,
+  AnnotationMotivation,
   AnnotationRelation,
   AnnotationStats,
   BatchUpdateItem,
@@ -13,6 +14,7 @@ import type {
   ReviewPriority,
   StoreMeta,
 } from '../types/annotation';
+import { RelationSchema, DEFAULT_RELATION_TYPE_CONFIGS } from '../types/annotation';
 import { FileEncoder } from './file-encoder';
 import { applyUnifiedFilter } from '../search/filter-engine';
 
@@ -64,6 +66,10 @@ export class AnnotationStore {
   /** reviewPriority → Set<uuid>，按复习优先级索引 */
   private _byReviewPriority: Map<string, Set<string>> = new Map();
 
+  // v4.1: Motivation 语义索引
+  /** motivation → Set<uuid>，按标注意图索引 */
+  private _byMotivation: Map<string, Set<string>> = new Map();
+
   // ─── 其他内部状态 ───────────────────────────────────────
   /** 需要写回的文件集合 */
   private _dirtyFiles: Set<string> = new Set();
@@ -94,6 +100,12 @@ export class AnnotationStore {
   /** 索引是否需要写回 */
   private _indexDirty: boolean = false;
 
+  /** 索引写入互斥锁 — 防止并发 flush 竞态 */
+  private _indexWriting: boolean = false;
+
+  /** meta 写入互斥锁 */
+  private _metaWriting: boolean = false;
+
   /** 元数据 */
   private _meta: StoreMeta = {
     schemaVersion: 1,
@@ -106,6 +118,9 @@ export class AnnotationStore {
 
   /** 是否已完成初始化 */
   private _initialized: boolean = false;
+
+  /** v4.3: 关系类型 Schema — 默认从内置配置构建，插件加载后可注入自定义配置 */
+  private _relationSchema: RelationSchema = new RelationSchema(DEFAULT_RELATION_TYPE_CONFIGS);
 
   constructor() {
     // 默认构造，使用 initAnnotationStore() 设置 vault
@@ -296,6 +311,27 @@ export class AnnotationStore {
   }
 
   /**
+   * v4.3: 注入关系类型 Schema。
+   * 插件加载设置后调用，使 Store 使用自定义关系类型配置。
+   */
+  setRelationSchema(schema: RelationSchema): void {
+    this._relationSchema = schema;
+  }
+
+  /**
+   * P4: 标记指定文件为 dirty（公开 API，供 Settings Tab 等外部模块调用）。
+   *
+   * 当 Schema 变更导致标注数据与 Schema 不匹配时，需确保这些文件
+   * 在关闭前被写回持久化。此方法是 _markDirty 的公开封装。
+   */
+  markFileDirty(filePath: string): void {
+    // 仅标记已加载的文件（未加载文件不存在需要写回的脏数据）
+    if (this._loadedFiles.has(filePath)) {
+      this._markDirty(filePath);
+    }
+  }
+
+  /**
    * 获取指定文件的所有标注，按 startOffset 排序。
    */
   getAnnotationsForFile(filePath: string): Annotation[] {
@@ -331,6 +367,11 @@ export class AnnotationStore {
   async addAnnotation(annotation: Annotation): Promise<void> {
     this._assertInitialized();
 
+    // v4.1: 确保 schemaVersion 有默认值（向后兼容旧数据）
+    if (!annotation.schemaVersion) {
+      annotation.schemaVersion = 1;
+    }
+
     // 确保文件已加载
     await this.ensureFileLoaded(annotation.filePath);
 
@@ -359,6 +400,16 @@ export class AnnotationStore {
     const oldAnn = this._byUuid.get(uuid);
     if (!oldAnn) {
       throw new Error(`Annotation not found: ${uuid}`);
+    }
+
+    // 🔧 Round 6 P2: 防御 changes.relations 路径
+    // 如果调用方直接替换 relations 数组，需要先级联清理旧关系的反向数据。
+    // 当前所有关系修改走 addRelation/removeRelation/invalidateRelation/restoreRelation，
+    // 但 updateAnnotation 是公开 API，未来可能被直接调用。
+    // 防御策略：遍历即将被替换掉的旧关系，清理伙伴标注上的反向关系数据，
+    // 然后为新关系中的正向条目自动补建反向关系（与 addRelation 行为一致）。
+    if (changes.relations !== undefined && oldAnn.relations) {
+      this._cascadeUpdateRelations(uuid, oldAnn.relations, changes.relations);
     }
 
     // 移除旧索引
@@ -433,6 +484,11 @@ export class AnnotationStore {
     if (!ann) return;
 
     const filePath = ann.filePath;
+
+    // 🔧 Round 6 P1: 删除标注前，级联清理伙伴标注上的反向关系数据
+    // _removeFromIndex 只清理索引结构，不清理伙伴标注的 .relations 数组
+    // 如果不在此清理，伙伴标注会保留指向已删除标注的悬空关系
+    this._cascadeDeleteRelations(ann);
 
     // 移除索引（_removeFromIndex 会同步更新 _byFile 等倒排索引）
     this._removeFromIndex(uuid);
@@ -589,6 +645,8 @@ export class AnnotationStore {
     let needsCorrection = 0;
     const byMastery: Record<string, number> = {};
     const byReviewPriority: Record<string, number> = {};
+    const byMotivation: Record<string, number> = {};
+    let withAlias = 0;  // v5.3: 图谱别名统计
 
     for (const a of annotations) {
       byType[a.type] = (byType[a.type] || 0) + 1;
@@ -596,8 +654,11 @@ export class AnnotationStore {
       if (a.note && a.note.trim()) withNotes++;
       if (a.tags.length > 0) withTags++;
       if (a.fields && Object.keys(a.fields).length > 0) withFields++;
-      if (a.relations && a.relations.length > 0) withRelations++;
+      // v4.2: 只计算有效关系（与 filter-engine 保持一致）
+      if (a.relations && a.relations.some(r => !r.invalidAt)) withRelations++;
       if (a.groups && a.groups.length > 0) withGroups++;
+      if (a.motivation) byMotivation[a.motivation] = (byMotivation[a.motivation] || 0) + 1;
+      if (a.alias && a.alias.trim()) withAlias++;  // v5.3: 有别名的标注计数
       if (a.flags) {
         withFlags++;
         if (a.flags.mastery) byMastery[a.flags.mastery] = (byMastery[a.flags.mastery] || 0) + 1;
@@ -609,6 +670,7 @@ export class AnnotationStore {
     return {
       total: annotations.length, byType, byColor, withNotes, withTags, withFields,
       withRelations, withGroups, withFlags, byMastery, byReviewPriority, needsCorrection,
+      byMotivation, withAlias,
     };
   }
 
@@ -702,6 +764,11 @@ export class AnnotationStore {
 
   /**
    * 强制写回单个文件的脏数据。
+   *
+   * 注意：跨文件 addRelation 会触发多个文件的 _markDirty，
+   * 导致多个 debounce timer 并发调用此方法。
+   * _writeIndexFile / _writeMetaFile 内部有互斥锁保护，
+   * 确保并发调用不会导致竞态。
    */
   async flushFile(filePath: string): Promise<void> {
     // 清除该文件的防抖计时器
@@ -717,9 +784,12 @@ export class AnnotationStore {
     }
 
     // 如果索引也需要写回，一并处理
+    // 先原子地取走 dirty 标记，防止并发 flush 重复写入
     if (this._indexDirty) {
-      await this._writeIndexFile();
       this._indexDirty = false;
+      await this._writeIndexFile();
+      // _writeIndexFile 内部有互斥锁，如果写入期间又有新的修改，
+      // 锁释放后 _indexDirty 会被再次设为 true，由下一次 flush 处理
     }
   }
 
@@ -744,8 +814,8 @@ export class AnnotationStore {
     this._meta.lastSyncAt = Date.now();
 
     // 写回索引（无论是否 dirty，flushAll 都保证索引落盘）
-    await this._writeIndexFile();
     this._indexDirty = false;
+    await this._writeIndexFile();
     await this._writeMetaFile();
   }
 
@@ -861,6 +931,16 @@ export class AnnotationStore {
     } catch (err) {
       // 文件可能不存在，忽略；其他错误记录日志
       console.warn(`MarkVault: failed to remove shard ${shardPath}`, err);
+    }
+
+    // 🔧 Round 6 P1: 级联清理伙伴标注上的反向关系数据
+    // 必须在 _removeFromIndex 之前执行，因为 _removeFromIndex 会清理索引
+    // 而级联清理需要通过索引查找伙伴标注
+    for (const uuid of uuidSet) {
+      const ann = this._byUuid.get(uuid);
+      if (ann) {
+        this._cascadeDeleteRelations(ann);
+      }
     }
 
     // 逐个移除索引和标注
@@ -1063,8 +1143,19 @@ export class AnnotationStore {
    * 添加标注间关联。
    * 只在源标注的 relations 中添加出边，入边索引自动维护。
    */
+  /**
+   * 添加标注间关联。
+   * v4.2: 双向自动维护 — 同时在目标标注上创建反向关系。
+   * 参考 AnyType 的声明/值分离模式：用户只需创建 A→B，
+   * 系统自动在 B 上创建 B→A（反向类型）。
+   */
   async addRelation(sourceUuid: string, relation: AnnotationRelation): Promise<void> {
     this._assertInitialized();
+
+    // 🔧 P1-1: 拦截自关系（A→A 无意义且会导致索引环）
+    if (sourceUuid === relation.targetUuid) {
+      throw new Error(`Self-relation is not allowed: ${sourceUuid}`);
+    }
 
     const ann = this._byUuid.get(sourceUuid);
     if (!ann) {
@@ -1072,32 +1163,124 @@ export class AnnotationStore {
     }
 
     // 检查目标标注是否存在
-    if (!this._byUuid.has(relation.targetUuid)) {
+    const targetAnn = this._byUuid.get(relation.targetUuid);
+    if (!targetAnn) {
       throw new Error(`Target annotation not found: ${relation.targetUuid}`);
     }
 
-    // 检查重复关联
-    if (ann.relations?.some(r => r.targetUuid === relation.targetUuid && r.type === relation.type)) {
+    // 初始化 relations 数组
+    if (!ann.relations) ann.relations = [];
+
+    // ── P1 去重增强：复用已失效条目 ──
+    // 优先查找已存在的有效关系（幂等拦截，但允许 source 升级）
+    const existingActive = ann.relations.find(
+      r => r.targetUuid === relation.targetUuid
+        && r.type === relation.type
+        && !r.invalidAt
+    );
+    if (existingActive) {
+      // 🔧 P1-3: 允许 source 升级（如 inferred → manual），但幂等于同 source
+      if (relation.source && relation.source !== existingActive.source) {
+        const sourcePriority: Record<string, number> = { manual: 4, template: 3, imported: 2, inferred: 1 };
+        const newPriority = sourcePriority[relation.source] ?? 0;
+        const oldPriority = sourcePriority[existingActive.source ?? ''] ?? 0;
+        if (newPriority > oldPriority) {
+          existingActive.source = relation.source;
+          if (relation.note) existingActive.note = relation.note;
+          this._markDirty(ann.filePath);
+        }
+      }
+      return; // 已存在有效关系，幂等
+    }
+
+    // 查找已失效的同类型关系（复用而非新建）
+    const existingInvalidated = ann.relations.find(
+      r => r.targetUuid === relation.targetUuid
+        && r.type === relation.type
+        && r.invalidAt
+    );
+
+    if (existingInvalidated) {
+      // 复用：清除 invalidAt，更新 note/source（如果有新的）
+      existingInvalidated.invalidAt = undefined;
+      if (relation.note) existingInvalidated.note = relation.note;
+      if (relation.source) existingInvalidated.source = relation.source;
+    } else {
+      // 新建：推入新条目 + 增量索引（P1: 避免 _removeFromIndex 破坏第三方入边）
+      ann.relations.push(relation);
+      let fwdOutSet = this._byRelationOut.get(sourceUuid);
+      if (!fwdOutSet) {
+        fwdOutSet = new Set();
+        this._byRelationOut.set(sourceUuid, fwdOutSet);
+      }
+      fwdOutSet.add(`${relation.targetUuid}:${relation.type}`);
+      let fwdInSet = this._byRelationIn.get(relation.targetUuid);
+      if (!fwdInSet) {
+        fwdInSet = new Set();
+        this._byRelationIn.set(relation.targetUuid, fwdInSet);
+      }
+      fwdInSet.add(`${sourceUuid}:${relation.type}`);
+    }
+    this._markDirty(ann.filePath);
+
+    // ── 2. v4.2 P1: 自动创建/恢复反向关系 B→A ──
+    const reverseType = this._relationSchema.getReverse(relation.type);
+    if (!reverseType) {
+      // 🔧 P1-4: 未注册类型（Schema 中无 reverse 映射）
+      // 不抛错（允许自定义类型），但仅创建单向关系，不自动生成反向
+      this._markDirty(ann.filePath);
+      return;
+    }
+
+    if (!targetAnn.relations) targetAnn.relations = [];
+
+    // 检查反向关系中是否有已失效的可复用条目
+    const existingReverseInvalidated = targetAnn.relations.find(
+      r => r.targetUuid === sourceUuid
+        && r.type === reverseType
+        && r.invalidAt
+    );
+
+    if (existingReverseInvalidated) {
+      // 复用：清除反向关系的 invalidAt
+      existingReverseInvalidated.invalidAt = undefined;
+      this._markDirty(targetAnn.filePath);
+      return;
+    }
+
+    // 检查是否已有有效的反向关系
+    const reverseActive = targetAnn.relations.some(
+      r => r.targetUuid === sourceUuid && r.type === reverseType && !r.invalidAt
+    );
+    if (reverseActive) {
       return; // 已存在，幂等
     }
 
-    // 移除旧索引
-    this._removeFromIndex(sourceUuid);
-
-    // 添加关联
-    if (!ann.relations) {
-      ann.relations = [];
+    // 新建反向关系（增量索引）
+    targetAnn.relations.push({
+      targetUuid: sourceUuid,
+      type: reverseType,
+      createdAt: relation.createdAt,
+      source: 'inferred',
+    });
+    let outSet = this._byRelationOut.get(relation.targetUuid);
+    if (!outSet) {
+      outSet = new Set();
+      this._byRelationOut.set(relation.targetUuid, outSet);
     }
-    ann.relations.push(relation);
-
-    // 重建索引
-    this._addToIndex(ann);
-
-    this._markDirty(ann.filePath);
+    outSet.add(`${sourceUuid}:${reverseType}`);
+    let inSet = this._byRelationIn.get(sourceUuid);
+    if (!inSet) {
+      inSet = new Set();
+      this._byRelationIn.set(sourceUuid, inSet);
+    }
+    inSet.add(`${relation.targetUuid}:${reverseType}`);
+    this._markDirty(targetAnn.filePath);
   }
 
   /**
-   * 移除标注间关联。
+   * 移除标注间关联（物理删除）。
+   * v4.2: 同时删除反向关系。
    */
   async removeRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
     this._assertInitialized();
@@ -1108,25 +1291,172 @@ export class AnnotationStore {
     const idx = ann.relations.findIndex(r => r.targetUuid === targetUuid && r.type === type);
     if (idx === -1) return;
 
-    // 移除旧索引
-    this._removeFromIndex(sourceUuid);
-
-    // 移除关联
+    // P1: 增量删除正向关系 + 索引清理（避免 _removeFromIndex 破坏第三方入边）
     ann.relations.splice(idx, 1);
     if (ann.relations.length === 0) {
       delete ann.relations;
     }
 
-    // 重建索引
-    this._addToIndex(ann);
-
+    // 增量清理出边索引
+    const fwdOutSet = this._byRelationOut.get(sourceUuid);
+    if (fwdOutSet) {
+      fwdOutSet.delete(`${targetUuid}:${type}`);
+      if (fwdOutSet.size === 0) this._byRelationOut.delete(sourceUuid);
+    }
+    // 增量清理入边索引
+    const fwdInSet = this._byRelationIn.get(targetUuid);
+    if (fwdInSet) {
+      fwdInSet.delete(`${sourceUuid}:${type}`);
+      if (fwdInSet.size === 0) this._byRelationIn.delete(targetUuid);
+    }
     this._markDirty(ann.filePath);
+
+    // v4.2: 同步删除反向关系 B→A（增量索引，不走全量重建）
+    const reverseType = this._relationSchema.getReverse(type);
+    const targetAnn = this._byUuid.get(targetUuid);
+    if (reverseType && targetAnn?.relations) {
+      const reverseIdx = targetAnn.relations.findIndex(
+        r => r.targetUuid === sourceUuid && r.type === reverseType
+      );
+      if (reverseIdx !== -1) {
+        // 增量删除：直接操作 relations 数组和索引
+        targetAnn.relations.splice(reverseIdx, 1);
+        if (targetAnn.relations.length === 0) {
+          delete targetAnn.relations;
+        }
+        // 增量清理出边索引
+        const outSet = this._byRelationOut.get(targetUuid);
+        if (outSet) {
+          outSet.delete(`${sourceUuid}:${reverseType}`);
+          if (outSet.size === 0) this._byRelationOut.delete(targetUuid);
+        }
+        // 增量清理入边索引
+        const inSet = this._byRelationIn.get(sourceUuid);
+        if (inSet) {
+          inSet.delete(`${targetUuid}:${reverseType}`);
+          if (inSet.size === 0) this._byRelationIn.delete(sourceUuid);
+        }
+        this._markDirty(targetAnn.filePath);
+      }
+    }
+  }
+
+  /**
+   * v4.2: 使关系失效（软删除）。
+   * 参考 Graphiti 事实失效机制 — 不物理删除，而是标记 invalidAt，
+   * 保留关系历史可回溯。
+   *
+   * 同时使反向关系也失效（双向一致性）。
+   */
+  async invalidateRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(sourceUuid);
+    if (!ann || !ann.relations) return;
+
+    const rel = ann.relations.find(
+      r => r.targetUuid === targetUuid && r.type === type && !r.invalidAt
+    );
+    if (!rel) return;
+
+    const now = Date.now();
+
+    // 增量更新：只修改字段，不走 _removeFromIndex/_addToIndex 全量重建
+    rel.invalidAt = now;
+    this._markDirty(ann.filePath);
+
+    // v4.2: 同步使反向关系失效（增量更新）
+    const reverseType = this._relationSchema.getReverse(type);
+    const targetAnn = this._byUuid.get(targetUuid);
+    if (reverseType && targetAnn?.relations) {
+      const reverseRel = targetAnn.relations.find(
+        r => r.targetUuid === sourceUuid && r.type === reverseType && !r.invalidAt
+      );
+      if (reverseRel) {
+        reverseRel.invalidAt = now;
+        this._markDirty(targetAnn.filePath);
+      }
+    }
+  }
+
+  /**
+   * v5.0: 批量失效指定关系类型的所有关系。
+   *
+   * 当用户删除自定义关系类型时，可选择级联软删除所有使用该类型的关系。
+   * 遍历所有标注的 .relations，将匹配 type 的有效关系标记为 invalidAt。
+   * 同时失效双向关系。
+   *
+   * @returns 被失效的关系数量
+   */
+  async invalidateRelationsByType(type: RelationType): Promise<number> {
+    this._assertInitialized();
+
+    const reverseType = this._relationSchema.getReverse(type);
+    const now = Date.now();
+    let count = 0;
+
+    for (const ann of this._byUuid.values()) {
+      if (!ann.relations) continue;
+
+      for (const rel of ann.relations) {
+        if (rel.type === type && !rel.invalidAt) {
+          rel.invalidAt = now;
+          count++;
+          this._markDirty(ann.filePath);
+        }
+        // 同时失效反向关系（如果 reverseType 存在且不同于 type）
+        if (reverseType && reverseType !== type && rel.type === reverseType && !rel.invalidAt) {
+          rel.invalidAt = now;
+          count++;
+          this._markDirty(ann.filePath);
+        }
+      }
+    }
+
+    return count;
+  }
+
+  /**
+   * v4.2 P1: 恢复已失效的关系（双向级联）。
+   *
+   * 清除正向关系和反向关系上的 invalidAt 标记。
+   * 使用增量更新，不走 _removeFromIndex/_addToIndex 全量重建。
+   */
+  async restoreRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+    this._assertInitialized();
+
+    const ann = this._byUuid.get(sourceUuid);
+    if (!ann?.relations) return;
+
+    // 1. 恢复正向关系
+    const rel = ann.relations.find(
+      r => r.targetUuid === targetUuid && r.type === type && r.invalidAt
+    );
+    if (!rel) return;
+
+    rel.invalidAt = undefined;
+    this._markDirty(ann.filePath);
+
+    // 2. 级联恢复反向关系
+    const reverseType = this._relationSchema.getReverse(type);
+    const targetAnn = this._byUuid.get(targetUuid);
+    if (reverseType && targetAnn?.relations) {
+      const reverseRel = targetAnn.relations.find(
+        r => r.targetUuid === sourceUuid && r.type === reverseType && r.invalidAt
+      );
+      if (reverseRel) {
+        reverseRel.invalidAt = undefined;
+        this._markDirty(targetAnn.filePath);
+      }
+    }
   }
 
   /**
    * 获取标注的所有关联（出边 + 入边）。
+   * 默认只返回有效关系（invalidAt == null），可选包含已失效关系。
    */
-  getRelations(uuid: string): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
+  getRelations(uuid: string, options?: { includeInvalidated?: boolean }): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
+    const includeInvalidated = options?.includeInvalidated ?? false;
     const result: { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } = {
       outgoing: [],
       incoming: [],
@@ -1135,7 +1465,9 @@ export class AnnotationStore {
     // 出边
     const ann = this._byUuid.get(uuid);
     if (ann?.relations) {
-      result.outgoing = [...ann.relations];
+      result.outgoing = includeInvalidated
+        ? [...ann.relations]
+        : ann.relations.filter(r => !r.invalidAt);
     }
 
     // 入边
@@ -1148,7 +1480,7 @@ export class AnnotationStore {
         const sourceAnn = this._byUuid.get(sourceUuid);
         if (sourceAnn?.relations) {
           const rel = sourceAnn.relations.find(r => r.targetUuid === uuid && r.type === relType);
-          if (rel) {
+          if (rel && (includeInvalidated || !rel.invalidAt)) {
             result.incoming.push({ sourceUuid, relation: rel });
           }
         }
@@ -1255,6 +1587,176 @@ export class AnnotationStore {
   // ═══════════════════════════════════════════════════════
   // 私有方法
   // ═══════════════════════════════════════════════════════
+
+  /**
+   * Round 6 P1 + Phase 1 P2 审计修复：删除标注前级联清理伙伴标注上的反向关系数据。
+   *
+   * 当标注 A 被删除时，如果 A 有关系 A→B（例如 applies），
+   * 那么 B 上会存在自动创建的反向关系 B→A（例如 isAppliedBy）。
+   * 此方法在删除前遍历 A 的所有关系，清理伙伴标注上的悬空反向关系，
+   * 并同步增量清理对应的 _byRelationOut / _byRelationIn 索引。
+   *
+   * 🔧 P2 审计修复：直接增量清理索引，不再依赖 _removeFromIndex 的副作用。
+   * 这消除了调用顺序耦合，使 _cascadeDeleteRelations 可独立工作。
+   */
+  private _cascadeDeleteRelations(ann: Annotation): void {
+    if (!ann.relations || ann.relations.length === 0) return;
+
+    for (const rel of ann.relations) {
+      const partnerAnn = this._byUuid.get(rel.targetUuid);
+      if (!partnerAnn?.relations) continue;
+
+      const reverseType = this._relationSchema.getReverse(rel.type);
+      if (!reverseType) continue;
+
+      // 从伙伴标注中移除指向本标注的反向关系
+      const reverseIdx = partnerAnn.relations.findIndex(
+        r => r.targetUuid === ann.uuid && r.type === reverseType
+      );
+      if (reverseIdx !== -1) {
+        partnerAnn.relations.splice(reverseIdx, 1);
+        if (partnerAnn.relations.length === 0) {
+          delete partnerAnn.relations;
+        }
+
+        // 🔧 P2: 增量清理伙伴的出边索引 _byRelationOut[partner]
+        const partnerOutSet = this._byRelationOut.get(rel.targetUuid);
+        if (partnerOutSet) {
+          partnerOutSet.delete(`${ann.uuid}:${reverseType}`);
+          if (partnerOutSet.size === 0) this._byRelationOut.delete(rel.targetUuid);
+        }
+        // 🔧 P2: 增量清理被删标注的入边索引 _byRelationIn[ann.uuid]
+        const annInSet = this._byRelationIn.get(ann.uuid);
+        if (annInSet) {
+          annInSet.delete(`${rel.targetUuid}:${reverseType}`);
+          if (annInSet.size === 0) this._byRelationIn.delete(ann.uuid);
+        }
+
+        this._markDirty(partnerAnn.filePath);
+      }
+    }
+  }
+
+  /**
+   * Round 6 P2 + Phase 1 P1 审计修复：updateAnnotation 中 changes.relations 的级联处理。
+   *
+   * 当调用方直接替换 relations 数组时（而非走 addRelation/removeRelation），
+   * 需要确保伙伴标注的反向关系数据与新的 relations 保持一致。
+   *
+   * 策略：
+   * 1. 计算旧关系中"被移除"的条目（oldSet - newSet），清理其伙伴的反向关系 + 增量索引
+   * 2. 计算新关系中"新增"的条目（newSet - oldSet），为伙伴补建反向关系 + 增量索引
+   * 3. 保留新旧都有的条目——其伙伴的反向关系无需变动
+   *
+   * 三元组去重键：(targetUuid, type, !invalidAt) — 与 addRelation 去重逻辑一致
+   *
+   * 🔧 P1 审计修复：在修改伙伴标注的 .relations 数组后，同步增量更新
+   * _byRelationOut 和 _byRelationIn 索引，确保索引与数据一致。
+   */
+  private _cascadeUpdateRelations(
+    sourceUuid: string,
+    oldRelations: AnnotationRelation[],
+    newRelations: AnnotationRelation[]
+  ): void {
+    const relKey = (r: AnnotationRelation) => `${r.targetUuid}::${r.type}::${r.invalidAt ? 'inv' : 'act'}`;
+
+    const oldKeys = new Map<string, AnnotationRelation>();
+    for (const r of oldRelations) oldKeys.set(relKey(r), r);
+
+    const newKeys = new Map<string, AnnotationRelation>();
+    for (const r of newRelations) newKeys.set(relKey(r), r);
+
+    // 1. 清理被移除关系的伙伴反向数据 + 增量索引
+    for (const [key, oldRel] of oldKeys) {
+      if (newKeys.has(key)) continue; // 保留的关系，跳过
+
+      const partnerAnn = this._byUuid.get(oldRel.targetUuid);
+      if (!partnerAnn?.relations) continue;
+
+      const reverseType = this._relationSchema.getReverse(oldRel.type);
+      if (!reverseType) continue;
+
+      const reverseIdx = partnerAnn.relations.findIndex(
+        r => r.targetUuid === sourceUuid && r.type === reverseType
+      );
+      if (reverseIdx !== -1) {
+        partnerAnn.relations.splice(reverseIdx, 1);
+        if (partnerAnn.relations.length === 0) {
+          delete partnerAnn.relations;
+        }
+
+        // 🔧 P1: 增量清理伙伴的出边索引 _byRelationOut[partner]
+        const partnerOutSet = this._byRelationOut.get(oldRel.targetUuid);
+        if (partnerOutSet) {
+          partnerOutSet.delete(`${sourceUuid}:${reverseType}`);
+          if (partnerOutSet.size === 0) this._byRelationOut.delete(oldRel.targetUuid);
+        }
+        // 🔧 P1: 增量清理源标注的入边索引 _byRelationIn[source]
+        const sourceInSet = this._byRelationIn.get(sourceUuid);
+        if (sourceInSet) {
+          sourceInSet.delete(`${oldRel.targetUuid}:${reverseType}`);
+          if (sourceInSet.size === 0) this._byRelationIn.delete(sourceUuid);
+        }
+      }
+      this._markDirty(partnerAnn.filePath);
+    }
+
+    // 2. 为新增关系补建伙伴的反向关系 + 增量索引
+    for (const [key, newRel] of newKeys) {
+      if (oldKeys.has(key)) continue; // 已存在的关系，跳过
+
+      const partnerAnn = this._byUuid.get(newRel.targetUuid);
+      if (!partnerAnn) continue;
+
+      const reverseType = this._relationSchema.getReverse(newRel.type);
+      if (!reverseType) continue;
+
+      // 检查伙伴是否已有该反向关系（避免重复）
+      const alreadyHas = partnerAnn.relations?.some(
+        r => r.targetUuid === sourceUuid && r.type === reverseType && !r.invalidAt
+      );
+      if (alreadyHas) continue;
+
+      // 🔧 P1-5: 优先复用已失效的反向关系（与 addRelation 逻辑一致）
+      const existingReverseInvalidated = partnerAnn.relations?.find(
+        r => r.targetUuid === sourceUuid && r.type === reverseType && r.invalidAt
+      );
+
+      if (existingReverseInvalidated) {
+        // 复用：清除 invalidAt，恢复为有效
+        existingReverseInvalidated.invalidAt = undefined;
+        existingReverseInvalidated.createdAt = newRel.createdAt;
+        // 复用时索引已存在，无需重复添加
+      } else {
+        if (!partnerAnn.relations) partnerAnn.relations = [];
+        partnerAnn.relations.push({
+          targetUuid: sourceUuid,
+          type: reverseType,
+          createdAt: newRel.createdAt,
+          source: 'inferred' as const,
+          ...(newRel.invalidAt ? { invalidAt: newRel.invalidAt } : {}),
+        });
+
+        // 🔧 P1: 增量添加伙伴的出边索引 _byRelationOut[partner]
+        let partnerOutSet = this._byRelationOut.get(newRel.targetUuid);
+        if (!partnerOutSet) {
+          partnerOutSet = new Set();
+          this._byRelationOut.set(newRel.targetUuid, partnerOutSet);
+        }
+        partnerOutSet.add(`${sourceUuid}:${reverseType}`);
+
+        // 🔧 P1: 增量添加源标注的入边索引 _byRelationIn[source]
+        let sourceInSet = this._byRelationIn.get(sourceUuid);
+        if (!sourceInSet) {
+          sourceInSet = new Set();
+          this._byRelationIn.set(sourceUuid, sourceInSet);
+        }
+        sourceInSet.add(`${newRel.targetUuid}:${reverseType}`);
+      }
+
+      this._markDirty(partnerAnn.filePath);
+    }
+  }
 
   /**
    * 将标注添加到所有倒排索引。
@@ -1372,6 +1874,22 @@ export class AnnotationStore {
       }
       prioritySet.add(uuid);
     }
+
+    // v4.1: _byMotivation
+    if (annotation.motivation) {
+      let motivationSet = this._byMotivation.get(annotation.motivation);
+      if (!motivationSet) {
+        motivationSet = new Set();
+        this._byMotivation.set(annotation.motivation, motivationSet);
+      }
+      motivationSet.add(uuid);
+    }
+
+    // 🔧 P0-1 修复：增量重建本标注被其他标注指向的反向入边索引
+    // _removeFromIndex 会清除 _byRelationIn[uuid]（包括伙伴标注上的反向关系 B→A），
+    // 但 _addToIndex 只从 annotation.relations 重建正向关系产生的入边。
+    // 此步骤扫描所有其他标注的关系，恢复指向本标注的反向入边索引。
+    this._rebuildIncomingIndexFor(uuid);
   }
 
   /**
@@ -1449,46 +1967,15 @@ export class AnnotationStore {
     }
 
     // v4.0: _byRelationOut（出边索引移除）
-    const outSet = this._byRelationOut.get(uuid);
-    if (outSet) {
-      // 同时清理入边索引
-      for (const entry of outSet) {
-        const [targetUuid] = entry.split(':');
-        const inSet = this._byRelationIn.get(targetUuid);
-        if (inSet) {
-          // 移除所有以 uuid 为源的入边条目
-          for (const inEntry of inSet) {
-            if (inEntry.startsWith(`${uuid}:`)) {
-              inSet.delete(inEntry);
-            }
-          }
-          if (inSet.size === 0) {
-            this._byRelationIn.delete(targetUuid);
-          }
-        }
-      }
-      this._byRelationOut.delete(uuid);
-    }
+    // 🔧 P2 修复：只删除本标注自身的出边索引，不做交叉清理。
+    // 交叉清理（清理伙伴的 _byRelationIn 条目）由 _cascadeDeleteRelations /
+    // _cascadeUpdateRelations 负责。_removeFromIndex 做交叉清理会在
+    // updateAnnotation 流程中撤销 _cascadeUpdateRelations 刚创建的反向关系索引。
+    this._byRelationOut.delete(uuid);
 
-    // v4.0: _byRelationIn（入边索引清理 — 本标注被其他标注指向的条目）
-    const inSet2 = this._byRelationIn.get(uuid);
-    if (inSet2) {
-      for (const entry of inSet2) {
-        const [sourceUuid] = entry.split(':');
-        const sourceOutSet = this._byRelationOut.get(sourceUuid);
-        if (sourceOutSet) {
-          for (const outEntry of sourceOutSet) {
-            if (outEntry.startsWith(`${uuid}:`)) {
-              sourceOutSet.delete(outEntry);
-            }
-          }
-          if (sourceOutSet.size === 0) {
-            this._byRelationOut.delete(sourceUuid);
-          }
-        }
-      }
-      this._byRelationIn.delete(uuid);
-    }
+    // v4.0: _byRelationIn（入边索引移除 — 本标注被其他标注指向的条目）
+    // 🔧 P2 修复：同上，只删除本标注自身的入边索引，不做交叉清理。
+    this._byRelationIn.delete(uuid);
 
     // v4.0: _byGroup
     if (ann.groups) {
@@ -1524,14 +2011,55 @@ export class AnnotationStore {
         }
       }
     }
+
+    // v4.1: _byMotivation
+    if (ann.motivation) {
+      const motivationSet = this._byMotivation.get(ann.motivation);
+      if (motivationSet) {
+        motivationSet.delete(uuid);
+        if (motivationSet.size === 0) {
+          this._byMotivation.delete(ann.motivation);
+        }
+      }
+    }
   }
 
   /**
-   * 便捷方法：先移除旧索引再添加新索引。
+   * 🔧 P0-1/P0-2 修复：重建指定标注的入边索引 _byRelationIn[uuid]。
+   *
+   * 扫描所有其他标注的 .relations，将指向本标注的关系（含正向和反向、有效和失效）
+   * 重建到 _byRelationIn[uuid] 中。
+   *
+   * 此方法现在作为 _addToIndex 的标准后置步骤，确保任何
+   * _removeFromIndex + _addToIndex 序列后入边索引始终一致。
+   *
+   * P0-2 修复：不再过滤 rel.invalidAt，确保失效关系也被收录。
    */
-  private _updateIndex(oldAnn: Annotation, newAnn: Annotation): void {
-    this._removeFromIndex(oldAnn.uuid);
-    this._addToIndex(newAnn);
+  private _rebuildIncomingIndexFor(uuid: string): void {
+    // 🔧 P2 优化：利用 _byRelationOut 反查，重建 _byRelationIn[uuid]。
+    //
+    // _byRelationIn[uuid] 应只包含 OTHER 标注指向本 uuid 的入边条目。
+    // 格式: "sourceUuid:relType"，表示 sourceAnn 有出边指向 uuid。
+    //
+    // _removeFromIndex(uuid) 会清除 _byRelationIn[uuid]（包括伙伴的反向关系 B→A），
+    // _addToIndex 只从 annotation.relations 重建正向关系产生的入边（存入 _byRelationIn[targetUuid]），
+    // 但不重建指向 uuid 本身的入边。此方法补全缺失的入边索引。
+    for (const [sourceUuid, outSet] of this._byRelationOut) {
+      if (sourceUuid === uuid) continue; // 不含自引用出边
+      for (const entry of outSet) {
+        // entry 格式: "targetUuid:type"
+        const colonIdx = entry.indexOf(':');
+        const targetUuid = entry.slice(0, colonIdx);
+        if (targetUuid === uuid) {
+          let inSet = this._byRelationIn.get(uuid);
+          if (!inSet) {
+            inSet = new Set();
+            this._byRelationIn.set(uuid, inSet);
+          }
+          inSet.add(`${sourceUuid}:${entry.slice(colonIdx + 1)}`);
+        }
+      }
+    }
   }
 
   /**
@@ -1621,8 +2149,12 @@ export class AnnotationStore {
       // 3. 写入目标文件
       await this.adapter.write(shardPath, content);
 
-      // 4. 清理临时文件
-      await this.adapter.remove(tmpPath);
+      // 4. 清理临时文件（防御性 — 可能因竞态已不存在）
+      try {
+        await this.adapter.remove(tmpPath);
+      } catch {
+        // ENOENT: safe to ignore
+      }
     } catch (err) {
       // 写入失败时清理 .tmp，保留 .bak 供恢复
       try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
@@ -1660,8 +2192,11 @@ export class AnnotationStore {
           // 第2级：从 .bak 恢复
           const recovered = await this._recoverFromBak(shardPath);
           if (recovered !== null) {
-            // 用恢复的数据覆写损坏的主文件
-            await this._atomicWrite(shardPath, JSON.stringify(data));
+            // 用恢复的数据覆写损坏的主文件（计算新 checksum）
+            const recoveredPayload = { filePath, annotations: recovered };
+            const recoveredChecksum = this._computeChecksum(JSON.stringify(recoveredPayload));
+            const recoveredShard = { ...recoveredPayload, _checksum: recoveredChecksum };
+            await this._atomicWrite(shardPath, JSON.stringify(recoveredShard));
             return recovered;
           }
           // .bak 也坏了，记录并返回空
@@ -1701,14 +2236,28 @@ export class AnnotationStore {
   }
 
   /**
-   * 通用原子写入（tmp → target → clean tmp）。
-   * 用于 _readFileShard 恢复损坏文件后覆写。
+   * 通用原子写入（bak → tmp → target → clean tmp）。
+   * 与 _writeFileShard 保持一致：先备份旧文件，再写入。
    */
   private async _atomicWrite(filePath: string, content: string): Promise<void> {
     const tmpPath = filePath + '.tmp';
-    await this.adapter.write(tmpPath, content);
-    await this.adapter.write(filePath, content);
-    try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+    try {
+      // 先备份旧文件（如存在）
+      if (await this.adapter.exists(filePath)) {
+        const oldContent = await this.adapter.read(filePath);
+        await this.adapter.write(filePath + '.bak', oldContent);
+      }
+      await this.adapter.write(tmpPath, content);
+      await this.adapter.write(filePath, content);
+      try {
+        await this.adapter.remove(tmpPath);
+      } catch {
+        // ENOENT: tmp file already removed, safe to ignore
+      }
+    } catch (err) {
+      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   /**
@@ -1721,19 +2270,55 @@ export class AnnotationStore {
   }
 
   /**
-   * 写入 _index.json（原子写入）。
+   * 写入 _index.json（原子写入 + 互斥锁）。
+   *
+   * 跨文件 addRelation 会触发多次 _markDirty → _scheduleFlush，
+   * 两个 timer 的 flushFile 可能并发调用此方法。
+   * 互斥锁确保同一时刻只有一个写入在进行，后续调用等待前一个完成。
    */
   private async _writeIndexFile(): Promise<void> {
-    const indexPath = `${this._baseDir}/_index.json`;
-    const content = JSON.stringify(this._indexData);
-    const tmpPath = indexPath + '.tmp';
+    // 互斥锁：如果正在写入，等待完成后再写一次（确保最新数据落盘）
+    if (this._indexWriting) {
+      // 等待当前写入完成
+      await new Promise<void>(resolve => {
+        const check = () => {
+          if (!this._indexWriting) {
+            resolve();
+          } else {
+            setTimeout(check, 50);
+          }
+        };
+        check();
+      });
+      // 写入完成后再检查是否仍然 dirty（可能在等待期间又有修改）
+      if (!this._indexDirty) return;
+    }
+
+    this._indexWriting = true;
     try {
-      await this.adapter.write(tmpPath, content);
-      await this.adapter.write(indexPath, content);
-      await this.adapter.remove(tmpPath);
-    } catch (err) {
-      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
-      throw err;
+      const indexPath = `${this._baseDir}/_index.json`;
+      const content = JSON.stringify(this._indexData);
+      const tmpPath = indexPath + '.tmp';
+      try {
+        await this.adapter.write(tmpPath, content);
+        await this.adapter.write(indexPath, content);
+        // 防御性删除 .tmp — 文件可能因竞态已不存在
+        try {
+          await this.adapter.remove(tmpPath);
+        } catch {
+          // ENOENT: tmp file already removed, safe to ignore
+        }
+      } catch (err) {
+        // 写入失败，尝试清理 .tmp
+        try {
+          await this.adapter.remove(tmpPath);
+        } catch {
+          // ignore cleanup errors
+        }
+        throw err;
+      }
+    } finally {
+      this._indexWriting = false;
     }
   }
 
@@ -1747,19 +2332,47 @@ export class AnnotationStore {
   }
 
   /**
-   * 写入 _meta.json（原子写入）。
+   * 写入 _meta.json（原子写入 + 互斥锁）。
    */
   private async _writeMetaFile(): Promise<void> {
-    const metaPath = `${this._baseDir}/_meta.json`;
-    const content = JSON.stringify(this._meta);
-    const tmpPath = metaPath + '.tmp';
+    // 互斥锁
+    if (this._metaWriting) {
+      await new Promise<void>(resolve => {
+        const check = () => {
+          if (!this._metaWriting) {
+            resolve();
+          } else {
+            setTimeout(check, 50);
+          }
+        };
+        check();
+      });
+      // 检查是否仍然需要写入（meta 在等待期间可能已被更新）
+    }
+
+    this._metaWriting = true;
     try {
-      await this.adapter.write(tmpPath, content);
-      await this.adapter.write(metaPath, content);
-      await this.adapter.remove(tmpPath);
-    } catch (err) {
-      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
-      throw err;
+      const metaPath = `${this._baseDir}/_meta.json`;
+      const content = JSON.stringify(this._meta);
+      const tmpPath = metaPath + '.tmp';
+      try {
+        await this.adapter.write(tmpPath, content);
+        await this.adapter.write(metaPath, content);
+        try {
+          await this.adapter.remove(tmpPath);
+        } catch {
+          // ENOENT safe to ignore
+        }
+      } catch (err) {
+        try {
+          await this.adapter.remove(tmpPath);
+        } catch {
+          // ignore cleanup errors
+        }
+        throw err;
+      }
+    } finally {
+      this._metaWriting = false;
     }
   }
 
@@ -1819,8 +2432,10 @@ export class AnnotationStore {
       updatedAt: annotation.updatedAt,
     };
     // 可选字段
+    if (annotation.schemaVersion !== undefined) clean.schemaVersion = annotation.schemaVersion;
     if (annotation.kind !== undefined) clean.kind = annotation.kind;
     if (annotation.groupUuid !== undefined) clean.groupUuid = annotation.groupUuid;
+    if (annotation.endLine !== undefined) clean.endLine = annotation.endLine;
     if (annotation.blockType !== undefined) clean.blockType = annotation.blockType;
     if (annotation.targetLine !== undefined) clean.targetLine = annotation.targetLine;
     if (annotation.anchorLine !== undefined) clean.anchorLine = annotation.anchorLine;
@@ -1850,6 +2465,16 @@ export class AnnotationStore {
     }
     if (annotation.groups !== undefined && annotation.groups.length > 0) {
       clean.groups = annotation.groups;
+    }
+
+    // v4.1: Motivation 语义字段
+    if (annotation.motivation !== undefined) {
+      clean.motivation = annotation.motivation;
+    }
+
+    // v5.3: 图谱显示别名
+    if (annotation.alias !== undefined) {
+      clean.alias = annotation.alias;
     }
 
     return clean;

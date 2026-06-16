@@ -1,7 +1,8 @@
 import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext } from 'obsidian';
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
-import { DEFAULT_SETTINGS } from './types/annotation';
+import { DEFAULT_SETTINGS, RelationSchema } from './types/annotation';
 import { MARKVAULT_SIDEBAR_VIEW_TYPE, AnnotationSidebar } from './ui/sidebar/AnnotationSidebar';
+import { MARKVAULT_GRAPH_VIEW_TYPE, RelationGraphView } from './ui/graph/RelationGraphView';
 import { registerContextMenu, registerCommands, getBlockAnchorPrefixesForListItem, adjustRegionStartOffsetForListItem, adjustRegionEndOffsetForListItem } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
 import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from './core/markdown-sync';
@@ -30,9 +31,10 @@ import { markdownToPlainWithMap } from './core/markdown-plain';
 import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, requestRegionLayerRedraw } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
+import { buildAnnotation, finalizeAnnotation } from './core/annotation-creator';
 import { AnnotationModal } from './ui/editor/annotation-modal';
 import { initAnnotationStore, annotationStore } from './db/annotation-store';
-import { addAnnotation, getAnnotationByUuid } from './db/annotation-repo';
+import { getAnnotationByUuid } from './db/annotation-repo';
 import { generateId } from './utils/id';
 import { migrateFromIndexedDB } from './db/migration';
 
@@ -48,7 +50,11 @@ import { AnnotationSearchEngine } from './search/search-engine';
 
 export default class MarkVaultPlugin extends Plugin {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
+  /** v4.3: 关系类型 Schema 实例 — 从 settings 动态构建 */
+  relationSchema: RelationSchema = new RelationSchema(DEFAULT_SETTINGS.customRelationTypes);
   private sidebar: AnnotationSidebar | null = null;
+  /** v4.3 Phase 2: 关系图谱视图 */
+  private graphView: RelationGraphView | null = null;
 
   // 当前活跃文件的路径，用于偏移修正
   private activeFilePath: string | null = null;
@@ -101,6 +107,11 @@ export default class MarkVaultPlugin extends Plugin {
       this._searchEngine = new AnnotationSearchEngine(annotationStore);
     }
     return this._searchEngine;
+  }
+
+  /** v4.3: 获取关系类型 Schema 实例 */
+  public getRelationSchema(): RelationSchema {
+    return this.relationSchema;
   }
 
   /** 注册一个标注为"正在编辑"状态，防止被 sync 覆盖 */
@@ -348,6 +359,8 @@ export default class MarkVaultPlugin extends Plugin {
     // ── AnnotationStore 初始化（Phase 2: 分片 JSON + 内存索引） ──
     try {
       initAnnotationStore(this.app.vault);
+      // v4.3: 注入关系类型 Schema（在 initialize 之前，确保所有操作使用自定义配置）
+      annotationStore.setRelationSchema(this.relationSchema);
       await annotationStore.initialize();
       this._storeReady = true;
       const migratedCount = await migrateFromIndexedDB();
@@ -399,6 +412,20 @@ export default class MarkVaultPlugin extends Plugin {
       console.error('MarkVault: failed to register sidebar view', err);
     }
 
+    // 注册关系图谱视图
+    try {
+      this.registerView(
+        MARKVAULT_GRAPH_VIEW_TYPE,
+        (leaf) => {
+          this.graphView = new RelationGraphView(leaf);
+          this.graphView.setPluginInstance(this);
+          return this.graphView;
+        },
+      );
+    } catch (err) {
+      console.error('MarkVault: failed to register graph view', err);
+    }
+
     // 添加侧边栏图标
     try {
       this.addRibbonIcon('pen-tool', 'MarkVault-JS', () => {
@@ -406,6 +433,15 @@ export default class MarkVaultPlugin extends Plugin {
       });
     } catch (err) {
       console.error('MarkVault: failed to add ribbon icon', err);
+    }
+
+    // 添加关系图谱图标
+    try {
+      this.addRibbonIcon('git-branch', 'MarkVault Relation Graph', () => {
+        this.activateGraphView();
+      });
+    } catch (err) {
+      console.error('MarkVault: failed to add graph ribbon icon', err);
     }
 
     // 注册命令（最关键 — 必须成功）
@@ -680,6 +716,9 @@ export default class MarkVaultPlugin extends Plugin {
 
   async onunload() {
     console.log('MarkVault: unloading plugin');
+    // 🔧 BUG-8 修复：立即清除 CM6 EditorView 引用，防止异步 dispatch 到已销毁的 view
+    // 避免 Obsidian 关闭标签页时 saveHistory→field() 触发 RangeError
+    setActiveEditorView(null);
     try {
       // 🆕 持久化搜索引擎索引
       await this._saveSearchIndex();
@@ -736,6 +775,14 @@ export default class MarkVaultPlugin extends Plugin {
     const data = await this.loadData();
     // loadData() 首次返回 null，Object.assign 能正确处理
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+
+    // v4.3: 兼容旧设置 — 如果没有 customRelationTypes，填充默认值
+    if (!this.settings.customRelationTypes || this.settings.customRelationTypes.length === 0) {
+      this.settings.customRelationTypes = DEFAULT_SETTINGS.customRelationTypes;
+    }
+
+    // v4.3: 重建 RelationSchema（设置加载后必须重建）
+    this.relationSchema = new RelationSchema(this.settings.customRelationTypes);
   }
 
   async saveSettings() {
@@ -771,6 +818,43 @@ export default class MarkVaultPlugin extends Plugin {
       }
     } catch (err) {
       console.error('MarkVault: failed to refresh sidebar', err);
+    }
+    // P2-7: 标注变更后同时刷新关系图谱
+    this.refreshGraphView();
+  }
+
+  /** 激活关系图谱视图 */
+  async activateGraphView() {
+    try {
+      const existing = this.app.workspace.getLeavesOfType(MARKVAULT_GRAPH_VIEW_TYPE);
+      if (existing.length > 0) {
+        this.app.workspace.revealLeaf(existing[0]);
+        if (this.graphView) {
+          this.graphView.refresh();
+        }
+        return;
+      }
+      const leaf = this.app.workspace.getLeaf(false);
+      if (leaf) {
+        await leaf.setViewState({
+          type: MARKVAULT_GRAPH_VIEW_TYPE,
+          active: true,
+        });
+        this.app.workspace.revealLeaf(leaf);
+      }
+    } catch (err) {
+      console.error('MarkVault: failed to activate graph view', err);
+    }
+  }
+
+  /** 刷新关系图谱视图 */
+  refreshGraphView() {
+    try {
+      if (this.graphView) {
+        this.graphView.refresh();
+      }
+    } catch (err) {
+      console.error('MarkVault: failed to refresh graph view', err);
     }
   }
 
@@ -3047,36 +3131,32 @@ export default class MarkVaultPlugin extends Plugin {
           view.previewMode.rerender(true);
         }
 
-        const annotation: Annotation = {
+        const annotation = buildAnnotation({
           uuid,
           filePath,
           type,
           color,
           text: blockContent,
-          note: '',
-          tags: [],
+          kind: 'block',
           startOffset: blockStartOffset,
           endOffset: blockStartOffset + replacement.length,
           startLine: blockInfo.startLine,
           endLine: blockInfo.endLine + 2,
           contextBefore: content.substring(Math.max(0, blockStartOffset - 80), blockStartOffset),
           contextAfter: content.substring(blockEndOffset, Math.min(content.length, blockEndOffset + 80)),
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          kind: 'block',
           blockType: blockInfo.type,
           targetLine: blockInfo.startLine + 1,
           anchorLine: blockInfo.startLine,
           targetHash: computeSignature(blockContent),
-        };
+        });
 
-        await addAnnotation(annotation);
+        await finalizeAnnotation(annotation, {
+          updateSpanCache: (fp) => this.updateSpanCache(fp),
+          updateRegionCache: (fp) => this.updateRegionCache(fp),
+          markFileSynced: (fp) => this.markFileSynced(fp),
+          refreshSidebar: () => this.refreshSidebar(),
+        });
         console.log(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
-        this.markFileSynced(filePath);
-        // 🔧 BUG-5.3 修复：阅读模式创建 block 后刷新缓存，确保切回编辑模式时装饰正确
-        await this.updateSpanCache(filePath);
-        await this.updateRegionCache(filePath);
-        await this.refreshSidebar();
       } else {
         const sourceSelected = content.substring(startOffset, endOffset);
         const scan = scanMarkdownContexts(sourceSelected);
@@ -3104,52 +3184,45 @@ export default class MarkVaultPlugin extends Plugin {
           const startLine = content.substring(0, safeStartOffset).split('\n').length - 1;
           const endLine = content.substring(0, safeEndOffset).split('\n').length - 1;
 
-          const annotation: Annotation = {
+          const annotation = buildAnnotation({
             uuid,
             filePath,
             type,
             color,
             text: regionSelected,
-            note: '',
-            tags: [],
+            kind: 'region',
             startOffset: safeStartOffset,
             endOffset: safeStartOffset + replacement.length,
             startLine,
             endLine,
             contextBefore: content.substring(Math.max(0, safeStartOffset - 40), safeStartOffset),
             contextAfter: content.substring(safeEndOffset, Math.min(content.length, safeEndOffset + 40)),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            kind: 'region',
             targetHash: computeSpanSignature(regionSelected),
-          };
+          });
 
-          await addAnnotation(annotation);
-          await this.updateSpanCache(filePath);
-          await this.updateRegionCache(filePath);
+          await finalizeAnnotation(annotation, {
+            updateSpanCache: (fp) => this.updateSpanCache(fp),
+            updateRegionCache: (fp) => this.updateRegionCache(fp),
+            markFileSynced: (fp) => this.markFileSynced(fp),
+            refreshSidebar: () => this.refreshSidebar(),
+          });
           console.log(`MarkVault: created reading-mode region annotation ${uuid} in ${filePath}`);
-          this.markFileSynced(filePath);
-          await this.refreshSidebar();
         } else {
         // ── 自然语法行内标注：隐身锚点 + 原生 HTML 包裹 ──
-        const annotation: Annotation = {
+        const annotation = buildAnnotation({
           uuid,
           filePath,
           type,
           color,
           text: selectedText,
-          note: '',
-          tags: [],
+          kind: 'inline',
           startOffset,
           endOffset,
           startLine: 0,
           contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
           contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          kind: 'inline',
           format: 'native',
-        };
+        });
 
         const nativeTag = buildNativeAnnotation(annotation);
         const newContent = content.substring(0, startOffset) + nativeTag + content.substring(endOffset);
@@ -3160,11 +3233,15 @@ export default class MarkVaultPlugin extends Plugin {
         }
 
         annotation.endOffset = startOffset + nativeTag.length;
-        await addAnnotation(annotation);
+
+        await finalizeAnnotation(annotation, {
+          updateSpanCache: (fp) => this.updateSpanCache(fp),
+          updateRegionCache: (fp) => this.updateRegionCache(fp),
+          markFileSynced: (fp) => this.markFileSynced(fp),
+          refreshSidebar: () => this.refreshSidebar(),
+        });
 
         console.log(`MarkVault: created reading-mode native annotation ${uuid} in ${filePath}`);
-        this.markFileSynced(filePath);
-        await this.refreshSidebar();
       }
       }
     } catch (err) {

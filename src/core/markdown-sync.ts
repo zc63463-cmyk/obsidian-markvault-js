@@ -178,6 +178,22 @@ export async function syncFromMarkdown(
       }
     }
 
+    // v5.3: alias 同步 — 对所有标注类型同步（inline 通过 data-alias，block/span 通过锚点格式）
+    {
+      const mdAlias = mdAnn.alias || '';
+      const dbAlias = dbAnn.alias || '';
+      if (mdAlias !== dbAlias) {
+        if (mdAlias && !dbAlias) {
+          // MD 有 alias，DB 无 → 更新 DB
+          updates.alias = mdAnn.alias;
+        } else if (mdAlias && dbAlias) {
+          // 双方都有但不同 → 以 MD 为准
+          updates.alias = mdAnn.alias;
+        }
+        // MD 无 alias 但 DB 有 → 保留 DB（防止 MD 中 alias 被手动删除后 DB 数据被清除）
+      }
+    }
+
     if (Object.keys(updates).length > 0) {
       console.log(`MarkVault sync: updating annotation ${mdAnn.uuid} with`, updates);
       await annotationStore.updateAnnotation(mdAnn.uuid, {

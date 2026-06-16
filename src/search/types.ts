@@ -107,4 +107,6 @@ export interface SearchFacets {
   /** 有/无批注数量 */
   hasNote: number;
   noNote: number;
+  /** 按标注意图分布（v4.1） */
+  motivation: Record<string, number>;
 }

@@ -58,6 +58,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
       const { id: _id, ...cleanAnn } = ann;
       // 确保必要字段存在
       const annotation: Annotation = {
+        schemaVersion: 1, // 迁移数据为旧格式
         uuid: cleanAnn.uuid,
         filePath: cleanAnn.filePath,
         type: cleanAnn.type,

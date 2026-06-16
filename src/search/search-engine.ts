@@ -29,6 +29,7 @@ const FIELD_WEIGHTS: Record<string, number> = {
   text: 10,
   note: 7,
   tags: 5,
+  alias: 6,    // v5.3: 图谱别名，权重高于 groups（用户有意命名的短名称）
   filePath: 4,
   groups: 3,
   fields: 2,
@@ -353,9 +354,11 @@ export class AnnotationSearchEngine {
       text: ann.text,
       note: ann.note || '',
       tags: ann.tags.join(' '),
+      alias: ann.alias || '',    // v5.3: 图谱别名纳入搜索索引
       filePath: ann.filePath,
       groups: (ann.groups || []).join(' '),
       fields: ann.fields ? Object.values(ann.fields).join(' ') : '',
+      motivation: ann.motivation || '',
     };
 
     let totalTokens = 0;
@@ -480,6 +483,7 @@ export class AnnotationSearchEngine {
       mastery: {},
       hasNote: 0,
       noNote: 0,
+      motivation: {},
     };
 
     for (const r of results) {
@@ -496,6 +500,11 @@ export class AnnotationSearchEngine {
       // 掌握度分布
       const m = ann.flags?.mastery || 'unknown';
       facets.mastery[m] = (facets.mastery[m] || 0) + 1;
+
+      // 标注意图分布
+      if (ann.motivation) {
+        facets.motivation[ann.motivation] = (facets.motivation[ann.motivation] || 0) + 1;
+      }
 
       // 批注分布
       if (ann.note && ann.note.trim()) {
@@ -807,6 +816,7 @@ export class AnnotationSearchEngine {
     check('uuid', ann.uuid);
     check('text', ann.text);
     check('note', ann.note || '');
+    check('alias', ann.alias || '');    // v5.3: 图谱别名命中检测
     for (const t of ann.tags) { if (t) check('tags', t); }
     check('filePath', ann.filePath);
     for (const g of (ann.groups || [])) { if (g) check('groups', g); }
@@ -844,12 +854,13 @@ export class AnnotationSearchEngine {
   }
 
   private _determineMatchField(ann: Annotation, tokens: string[]): string {
-    const order: Array<keyof typeof FIELD_WEIGHTS> = ['text', 'note', 'tags', 'filePath', 'groups', 'fields', 'uuid'];
+    const order: Array<keyof typeof FIELD_WEIGHTS> = ['text', 'note', 'tags', 'alias', 'filePath', 'groups', 'fields', 'uuid'];
     for (const field of order) {
       const texts: string[] = [];
       if (field === 'text') texts.push(ann.text);
       else if (field === 'note') texts.push(ann.note || '');
       else if (field === 'tags') texts.push(...ann.tags);
+      else if (field === 'alias') texts.push(ann.alias || '');    // v5.3: 图谱别名匹配
       else if (field === 'filePath') texts.push(ann.filePath);
       else if (field === 'groups') texts.push(...(ann.groups || []));
       else if (field === 'uuid') texts.push(ann.uuid);

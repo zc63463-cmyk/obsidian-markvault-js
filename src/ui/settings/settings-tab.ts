@@ -1,7 +1,9 @@
 import { PluginSettingTab, App, Setting } from 'obsidian';
 import type MarkVaultPlugin from '../../main';
-import { PRESET_COLORS, DEFAULT_SETTINGS } from '../../types/annotation';
-import type { PresetColorId, AnnotationType, FieldTemplate } from '../../types/annotation';
+import { PRESET_COLORS, DEFAULT_SETTINGS, DEFAULT_RELATION_TYPE_CONFIGS, RelationSchema } from '../../types/annotation';
+import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig } from '../../types/annotation';
+import { annotationStore } from '../../db/annotation-store';
+import { AddRelationTypeModal } from './add-relation-type-modal';
 
 export class MarkVaultSettingTab extends PluginSettingTab {
   plugin: MarkVaultPlugin;
@@ -163,6 +165,48 @@ export class MarkVaultSettingTab extends PluginSettingTab {
       this.display();
     });
 
+    // ── 关系类型管理（v4.3: Schema-First RelationType） ──
+    containerEl.createEl('h3', { text: 'Relation Types' });
+
+    const relTypesContainer = containerEl.createDiv({ cls: 'markvault-relation-types-container' });
+    this.renderRelationTypesSection(relTypesContainer);
+
+    // 添加自定义类型按钮
+    const relTypeActions = containerEl.createDiv({ cls: 'markvault-relation-type-actions' });
+
+    const newRelTypeBtn = relTypeActions.createEl('button', {
+      text: '+ Add Custom Type',
+      cls: 'mod-cta',
+    });
+    newRelTypeBtn.addEventListener('click', async () => {
+      const existingIds = this.plugin.settings.customRelationTypes.map(t => t.id);
+      const modal = new AddRelationTypeModal(this.app, existingIds, async (result) => {
+        this.plugin.settings.customRelationTypes.push({
+          id: result.id,
+          label: result.label,
+          reverseId: result.reverseId,
+          isSymmetric: result.isSymmetric,
+          isActive: true,
+          color: '#94a3b8',
+        });
+        await this.plugin.saveSettings();
+        this._rebuildSchemaSync();
+        this._markSchemaAffectedDirty();
+        this.display();
+      });
+      modal.open();
+    });
+
+    const restoreRelTypesBtn = relTypeActions.createEl('button', {
+      text: 'Restore Default Types',
+    });
+    restoreRelTypesBtn.addEventListener('click', async () => {
+      this.plugin.settings.customRelationTypes = JSON.parse(JSON.stringify(DEFAULT_RELATION_TYPE_CONFIGS));
+      await this.plugin.saveSettings();
+      this._rebuildSchemaSync();
+      this.display();
+    });
+
     // ── 数据管理 ──
     containerEl.createEl('h3', { text: 'Data Management' });
 
@@ -299,6 +343,218 @@ export class MarkVaultSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
         this.renderTemplateFields(container, template);
       });
+    }
+  }
+
+  /** 渲染关系类型管理区段（v4.3: Schema-First RelationType） */
+  private renderRelationTypesSection(container: HTMLElement) {
+    container.empty();
+
+    const types = this.plugin.settings.customRelationTypes;
+    const activeTypes = types.filter(t => t.isActive);
+    const passiveTypes = types.filter(t => !t.isActive);
+
+    // ── 主动类型 ──
+    container.createEl('h4', { text: 'Active Types (User-selectable)', cls: 'markvault-relation-section-title' });
+
+    for (let i = 0; i < activeTypes.length; i++) {
+      const cfg = activeTypes[i];
+      // 找到在 customRelationTypes 中的实际索引
+      const realIdx = types.indexOf(cfg);
+      this._renderRelationTypeRow(container, cfg, realIdx);
+    }
+
+    // ── 被动类型（折叠） ──
+    const passiveHeader = container.createEl('h4', {
+      text: 'Passive Types (Auto-maintained)',
+      cls: 'markvault-relation-section-title markvault-relation-passive-title',
+    });
+
+    for (let i = 0; i < passiveTypes.length; i++) {
+      const cfg = passiveTypes[i];
+      const realIdx = types.indexOf(cfg);
+      this._renderRelationTypeRow(container, cfg, realIdx);
+    }
+  }
+
+  /** 渲染单个关系类型行 */
+  private _renderRelationTypeRow(container: HTMLElement, cfg: RelationTypeConfig, realIdx: number) {
+    const row = container.createDiv({ cls: 'markvault-relation-type-row' });
+
+    // 颜色指示器
+    const colorDot = row.createSpan({ cls: 'markvault-relation-color-dot' });
+    colorDot.style.backgroundColor = cfg.color || '#94a3b8';
+
+    // 内置类型：ID 只读显示；自定义类型：ID 可编辑
+    if (cfg.isBuiltIn) {
+      row.createSpan({ text: cfg.id, cls: 'markvault-relation-type-id' });
+    } else {
+      const idInput = row.createEl('input', {
+        type: 'text',
+        value: cfg.id,
+        cls: 'markvault-relation-type-id markvault-relation-type-id-editable',
+        attr: { placeholder: 'Type ID (e.g. inspires)' },
+      });
+      idInput.addEventListener('change', async () => {
+        const newId = idInput.value.trim();
+        if (!newId || newId === cfg.id) { idInput.value = cfg.id; return; }
+        // 检查唯一性
+        if (this.plugin.settings.customRelationTypes.some(t => t.id === newId)) {
+          idInput.value = cfg.id;
+          return;
+        }
+        // 更新所有引用此 ID 的 reverseId
+        for (const t of this.plugin.settings.customRelationTypes) {
+          if (t.reverseId === cfg.id) t.reverseId = newId;
+        }
+        cfg.id = newId;
+        await this.plugin.saveSettings();
+        this._rebuildSchema();
+      });
+    }
+
+    // 标签编辑
+    const labelInput = row.createEl('input', {
+      type: 'text',
+      value: cfg.label,
+      cls: 'markvault-relation-type-label',
+    });
+    labelInput.addEventListener('input', async () => {
+      cfg.label = labelInput.value;
+      await this.plugin.saveSettings();
+      this._rebuildSchema();
+    });
+
+    // 反向类型：内置只读显示；自定义可编辑
+    if (cfg.isBuiltIn) {
+      row.createSpan({ text: `↔ ${cfg.reverseId}`, cls: 'markvault-relation-type-reverse' });
+    } else {
+      row.createSpan({ text: '↔ ', cls: 'markvault-relation-type-reverse' });
+      const reverseInput = row.createEl('input', {
+        type: 'text',
+        value: cfg.reverseId,
+        cls: 'markvault-relation-type-reverse-editable',
+        attr: { placeholder: 'Reverse ID' },
+      });
+      reverseInput.addEventListener('change', async () => {
+        const newReverseId = reverseInput.value.trim();
+        if (!newReverseId) { reverseInput.value = cfg.reverseId; return; }
+        cfg.reverseId = newReverseId;
+        // 如果该 reverseId 也作为独立类型存在，同步其 reverseId
+        for (const t of this.plugin.settings.customRelationTypes) {
+          if (t.id === newReverseId && t.reverseId === cfg.id) {
+            // 已配对，无需修改
+          }
+        }
+        await this.plugin.saveSettings();
+        this._rebuildSchema();
+      });
+    }
+
+    // 对称标记（自定义类型可切换）
+    if (cfg.isBuiltIn) {
+      if (cfg.isSymmetric) {
+        row.createSpan({ text: '⟷ 对称', cls: 'markvault-relation-type-symmetric' });
+      }
+    } else {
+      const symmetricToggle = row.createEl('input', {
+        type: 'checkbox',
+        cls: 'markvault-relation-type-symmetric-toggle',
+      });
+      symmetricToggle.checked = cfg.isSymmetric;
+      symmetricToggle.title = 'Symmetric';
+      symmetricToggle.addEventListener('change', async () => {
+        cfg.isSymmetric = symmetricToggle.checked;
+        if (cfg.isSymmetric) {
+          cfg.reverseId = cfg.id;
+        }
+        await this.plugin.saveSettings();
+        this._rebuildSchema();
+        this.display();
+      });
+      const symmetricLabel = row.createSpan({ text: '对称', cls: 'markvault-relation-type-symmetric-label' });
+    }
+
+    // 内置标记
+    if (cfg.isBuiltIn) {
+      row.createSpan({ text: '内置', cls: 'markvault-relation-type-builtin' });
+    }
+
+    // 删除按钮（自定义类型可删除）
+    if (!cfg.isBuiltIn) {
+      const deleteBtn = row.createEl('button', {
+        text: '✕',
+        cls: 'markvault-relation-type-delete',
+      });
+      deleteBtn.addEventListener('click', async () => {
+        // v5.0: 提供级联清理选项
+        const hasActiveRelations = annotationStore.getAllAnnotations().some(
+          ann => ann.relations?.some(r => r.type === cfg.id && !r.invalidAt)
+        );
+
+        let shouldCascade = false;
+        if (hasActiveRelations) {
+          const choice = window.confirm(
+            `There are active relations of type "${cfg.id}".\n\n` +
+            `Click OK to also invalidate (soft-delete) those relations.\n` +
+            `Click Cancel to keep the relations as orphans (they will still appear in the graph).`
+          );
+          shouldCascade = choice;
+        }
+
+        const idx = this.plugin.settings.customRelationTypes.findIndex(t => t.id === cfg.id);
+        if (idx !== -1) {
+          this.plugin.settings.customRelationTypes.splice(idx, 1);
+          await this.plugin.saveSettings();
+          this._rebuildSchema();
+
+          if (shouldCascade) {
+            await annotationStore.invalidateRelationsByType(cfg.id);
+          }
+
+          this.display();
+        }
+      });
+    }
+  }
+
+  /** 重建 RelationSchema 并注入到 Store，同时标记受影响文件为 dirty */
+  private _rebuildSchema() {
+    this._rebuildSchemaSync();
+    this._markSchemaAffectedDirty();
+  }
+
+  /** 同步重建 Schema */
+  private _rebuildSchemaSync() {
+    this.plugin.relationSchema = new RelationSchema(this.plugin.settings.customRelationTypes);
+    annotationStore.setRelationSchema(this.plugin.relationSchema);
+  }
+
+  /**
+   * P4 审计修复：Schema 变更后标记受影响文件为 dirty。
+   *
+   * 当关系类型配置发生变化时（类型被删除/修改），使用新 Schema 的关系类型
+   * 可能与已存储的 .relations 数据不匹配。扫描所有标注，将包含未注册关系
+   * 类型的标注所在文件标记为 dirty，确保下次 flush 时写回最新数据。
+   *
+   * 注意：不修改标注数据本身 — 删除类型不级联删除旧关系，留作数据兼容。
+   * 这确保关闭 Obsidian 前这些文件会被持久化。
+   */
+  private _markSchemaAffectedDirty() {
+    const allAnnotations = annotationStore.getAllAnnotations();
+    const affectedFiles = new Set<string>();
+    for (const ann of allAnnotations) {
+      if (ann.relations && ann.relations.length > 0) {
+        const hasUnregistered = ann.relations.some(
+          r => !this.plugin.relationSchema.isRegistered(r.type)
+        );
+        if (hasUnregistered) {
+          affectedFiles.add(ann.filePath);
+        }
+      }
+    }
+    for (const filePath of affectedFiles) {
+      annotationStore.markFileDirty(filePath);
     }
   }
 }

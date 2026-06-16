@@ -1,11 +1,11 @@
 import { App, Component, Menu, TFile, MarkdownRenderer, MarkdownView } from 'obsidian';
-import type { Annotation } from '../../../types/annotation';
-import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
+import type { Annotation, AnnotationRelation } from '../../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
 import { updateSpanAnchor, updateBlockAnchor, updateMarkTag } from '../../../core/annotation-parser';
 import { updateNativeAnnotation } from '../../../core/native-annotation';
 import { updateRegionAnnotation } from '../../../core/region-annotation';
-import { updateAnnotation } from '../../../db/annotation-repo';
+import { updateAnnotation, getRelations, getAnnotationByUuid } from '../../../db/annotation-repo';
 
 /**
  * AnnotationCard —— 单个标注卡片
@@ -178,11 +178,44 @@ export class AnnotationCard {
     // v4.0: 元数据徽章区域（Relations / Flags / Groups）
     const metaEl = card.createDiv({ cls: 'markvault-card-meta' });
 
-    // 关系徽章
-    if (annotation.relations && annotation.relations.length > 0) {
-      const relBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-relation' });
-      relBadge.textContent = `🔗 ${annotation.relations.length}`;
-      relBadge.title = `${annotation.relations.length} relation(s)`;
+    // 关系徽章 — v5.1: 可点击展开关联详情
+    const activeRelations = annotation.relations?.filter(r => !r.invalidAt) ?? [];
+    if (activeRelations.length > 0) {
+      const relBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-relation markvault-rel-toggle' });
+      relBadge.textContent = `🔗 ${activeRelations.length}`;
+      relBadge.title = `${activeRelations.length} active relation(s) — click to expand`;
+
+      // 关联详情面板（默认折叠）
+      const relPanel = card.createDiv({ cls: 'markvault-rel-panel' });
+      relPanel.style.display = 'none';
+
+      // #4 fix: 面板本体阻止点击冒泡到卡片（否则点击面板空白区会触发卡片 onJump）
+      relPanel.addEventListener('click', (e) => e.stopPropagation());
+
+      relBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const expanded = relPanel.style.display !== 'none';
+        if (expanded) {
+          relPanel.style.display = 'none';
+          relBadge.classList.remove('expanded');
+          relBadge.title = `${activeRelations.length} active relation(s) — click to expand`;
+        } else {
+          // 延迟渲染：只在首次展开时构建内容
+          if (relPanel.childElementCount === 0) {
+            // #1 fix: await async renderRelationPanel，先显示 loading 再展开
+            // #5 fix: 加载状态指示
+            const loadingEl = relPanel.createDiv({ cls: 'markvault-rel-loading', text: 'Loading…' });
+            relPanel.style.display = 'block';
+            relBadge.classList.add('expanded');
+            relBadge.title = `${activeRelations.length} active relation(s) — click to collapse`;
+            this.renderRelationPanel(relPanel, annotation, loadingEl);
+          } else {
+            relPanel.style.display = 'block';
+            relBadge.classList.add('expanded');
+            relBadge.title = `${activeRelations.length} active relation(s) — click to collapse`;
+          }
+        }
+      });
     }
 
     // 掌握度徽章
@@ -218,6 +251,13 @@ export class AnnotationCard {
       const priorityBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-priority' });
       priorityBadge.textContent = priorityEmoji[annotation.flags.reviewPriority] || '';
       priorityBadge.title = `Priority: ${REVIEW_PRIORITY_LABELS[annotation.flags.reviewPriority]}`;
+    }
+
+    // v4.1: Motivation 语义徽章
+    if (annotation.motivation) {
+      const motBadge = metaEl.createSpan({ cls: 'markvault-meta-badge markvault-badge-motivation' });
+      motBadge.textContent = MOTIVATION_LABELS[annotation.motivation];
+      motBadge.title = `Motivation: ${annotation.motivation}`;
     }
 
     // 分组标签
@@ -336,5 +376,123 @@ export class AnnotationCard {
       console.error('MarkVault: quick color change error', err);
     }
     await this.host.refreshListOnly();
+  }
+
+  /**
+   * v5.1: 渲染关联详情面板
+   * 展示出边/入边关系，每项显示类型标签 + 目标标注摘要，点击可跳转
+   *
+   * 先并行加载所有目标标注（避免 async getAnnotationByUuid 未 await 导致 .text 为 undefined），
+   * 再同步渲染 DOM。
+   *
+   * @param panel 面板容器
+   * @param annotation 当前标注
+   * @param loadingEl 加载指示器元素，渲染完成后移除
+   */
+  private async renderRelationPanel(panel: HTMLElement, annotation: Annotation, loadingEl?: HTMLElement): Promise<void> {
+    try {
+      const rels = getRelations(annotation.uuid);
+      const plugin = this.host.getPluginInstance();
+      const schema = plugin?.getRelationSchema();
+
+      // 收集所有目标 UUID 并并行加载
+      const targetUuids = new Set<string>();
+      for (const rel of rels.outgoing) targetUuids.add(rel.targetUuid);
+      for (const { sourceUuid } of rels.incoming) targetUuids.add(sourceUuid);
+
+      const targetMap = new Map<string, Annotation | undefined>();
+      const loadPromises = Array.from(targetUuids, async (uuid) => {
+        targetMap.set(uuid, await getAnnotationByUuid(uuid));
+      });
+      await Promise.all(loadPromises);
+
+      // ── 出边关系（本标注主动建立的） ──
+      if (rels.outgoing.length > 0) {
+        const outSection = panel.createDiv({ cls: 'markvault-rel-section' });
+        outSection.createDiv({ cls: 'markvault-rel-section-header', text: 'Outgoing' });
+        for (const rel of rels.outgoing) {
+          this.renderRelationItem(outSection, rel, rel.targetUuid, schema?.getLabel(rel.type) ?? rel.type, 'outgoing', targetMap, annotation.filePath);
+        }
+      }
+
+      // ── 入边关系（其他标注指向本标注的） ──
+      if (rels.incoming.length > 0) {
+        const inSection = panel.createDiv({ cls: 'markvault-rel-section' });
+        inSection.createDiv({ cls: 'markvault-rel-section-header', text: 'Incoming' });
+        for (const { sourceUuid, relation } of rels.incoming) {
+          // 入边显示反向类型的标签（即对方看到的正向标签）
+          const reverseLabel = schema?.getLabel(relation.type) ?? relation.type;
+          this.renderRelationItem(inSection, relation, sourceUuid, reverseLabel, 'incoming', targetMap, annotation.filePath);
+        }
+      }
+
+      // 空状态兜底（理论上不会走到这里）
+      if (rels.outgoing.length === 0 && rels.incoming.length === 0) {
+        panel.createDiv({ cls: 'markvault-rel-empty', text: 'No active relations' });
+      }
+    } catch (err) {
+      console.error('MarkVault: renderRelationPanel error', err);
+      panel.createDiv({ cls: 'markvault-rel-broken', text: 'Failed to load relations' });
+    } finally {
+      // 移除加载指示器
+      loadingEl?.remove();
+    }
+  }
+
+  /**
+   * 渲染单条关联项
+   * @param sourceFilePath 当前标注的 filePath，用于判断跨文件时才显示文件名
+   */
+  private renderRelationItem(
+    container: HTMLElement,
+    rel: AnnotationRelation,
+    targetUuid: string,
+    typeLabel: string,
+    direction: 'outgoing' | 'incoming',
+    targetMap: Map<string, Annotation | undefined>,
+    sourceFilePath: string,
+  ): void {
+    const targetAnn = targetMap.get(targetUuid);
+    const item = container.createDiv({ cls: `markvault-rel-item markvault-rel-${direction}` });
+
+    // 类型标签
+    const typeEl = item.createSpan({ cls: 'markvault-rel-type-label' });
+    typeEl.textContent = typeLabel;
+
+    // 箭头
+    item.createSpan({ cls: 'markvault-rel-arrow', text: direction === 'outgoing' ? '→' : '←' });
+
+    // 目标标注摘要
+    if (targetAnn) {
+      // #2 fix: 防御 text 为 undefined / null
+      const rawText = targetAnn.text ?? '';
+      const targetText = rawText.length > 40
+        ? rawText.substring(0, 40) + '…'
+        : rawText;
+      const summaryEl = item.createSpan({ cls: 'markvault-rel-summary', title: rawText });
+      summaryEl.textContent = targetText ? `"${targetText}"` : '(empty)';
+
+      // #3 fix: 文件名仅在跨文件时显示（同文件冗余）
+      if (targetAnn.filePath !== undefined && targetAnn.filePath !== sourceFilePath) {
+        const fileName = targetAnn.filePath.split('/').pop()?.replace('.md', '') || targetAnn.filePath;
+        item.createSpan({ cls: 'markvault-rel-file', text: `📄 ${fileName}` });
+      }
+
+      // 点击跳转到目标标注
+      item.addClass('clickable');
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.host.onJump(targetAnn);
+      });
+    } else {
+      // 目标标注不在 Store 中（数据异常）
+      item.createSpan({ cls: 'markvault-rel-broken', text: '(annotation not found)' });
+      item.title = `UUID: ${targetUuid}`;
+    }
+
+    // 关联备注
+    if (rel.note) {
+      item.createSpan({ cls: 'markvault-rel-note', text: `💬 ${rel.note}` });
+    }
   }
 }

@@ -4,14 +4,21 @@
  * 替代 editor-modal.ts 中原始的 prompt('Enter UUID') 交互。
  * 使用 AnnotationSearchEngine 实现实时搜索 + 结果列表。
  *
- * Phase 4.5 (搜索重构): 新增模块。
+ * v4.3: 从 RelationSchema 获取动态关系类型配置。
+ * v5.2: 高级搜索+筛选升级 — 支持跨文件/跨章节搜索，复用 AnnotationFilter 体系。
+ *       - Scope 切换：当前文件 / 全部文件
+ *       - 筛选栏：Type / Color / Mastery / Motivation / Group
+ *       - 使用 SearchEngine.search() 替代 suggest()，走完整 BM25 + filter 路径
+ *       - 结果行显示：标注原文 + 文件名 + 行号 + 类型徽章 + 掌握度
  */
 
-import { Modal, App, Setting } from 'obsidian';
-import type { AnnotationRelation, RelationType } from '../../types/annotation';
-import { RELATION_TYPE_LABELS } from '../../types/annotation';
+import { Modal, App, Menu } from 'obsidian';
+import type { AnnotationRelation, RelationType, AnnotationFilter, AnnotationType, AnnotationMotivation, MasteryLevel } from '../../types/annotation';
+import type { RelationSchema } from '../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS } from '../../types/annotation';
 import type { AnnotationSearchEngine } from '../../search/search-engine';
-import type { Suggestion } from '../../search/types';
+import type { SearchResult } from '../../search/types';
+import { getGroupNames, getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 
 /** RelationPicker 的回调参数 */
@@ -21,27 +28,43 @@ export interface RelationPickResult {
   note?: string;
 }
 
+/** 搜索范围 */
+type SearchScope = 'file' | 'all';
+
 export class RelationPickerModal extends Modal {
   private engine: AnnotationSearchEngine;
+  private schema: RelationSchema;
   private sourceUuid: string;
   private sourceFilePath: string;
   private onPick: (result: RelationPickResult) => void;
 
   private selectedUuid: string | null = null;
   private selectedType: RelationType | null = null;
-  private suggestions: Suggestion[] = [];
   private searchInput: HTMLInputElement | null = null;
   private linkBtn: HTMLButtonElement | null = null;
+
+  // v5.2: 筛选状态
+  // 注意：不能用 `scope` 作为属性名，Obsidian Modal 基类已有 scope: Scope 属性
+  private searchScope: SearchScope = 'file';
+  private filter: AnnotationFilter = {
+    type: 'all',
+    color: 'all',
+    sortBy: 'position',
+  };
+  private fieldFilterEntries: Array<{ key: string; value: string }> = [];
+  private searchQuery: string = '';
 
   constructor(
     app: App,
     engine: AnnotationSearchEngine,
+    schema: RelationSchema,
     sourceUuid: string,
     sourceFilePath: string,
     onPick: (result: RelationPickResult) => void,
   ) {
     super(app);
     this.engine = engine;
+    this.schema = schema;
     this.sourceUuid = sourceUuid;
     this.sourceFilePath = sourceFilePath;
     this.onPick = onPick;
@@ -68,29 +91,217 @@ export class RelationPickerModal extends Modal {
     this.searchInput.addEventListener(
       'input',
       debounce(() => {
-        this._doSearch(this.searchInput!.value);
+        this.searchQuery = this.searchInput!.value;
+        this._doSearch();
       }, 200),
     );
 
-    // ── 关系类型选择器 ──
-    new Setting(contentEl)
-      .setName('Relation type')
-      .setDesc(`Linking from current annotation to the selected one`)
-      .addDropdown((dropdown) => {
-        dropdown.addOption('', 'Select type...');
-        for (const [value, label] of Object.entries(RELATION_TYPE_LABELS)) {
-          dropdown.addOption(value, label);
-        }
-        dropdown.setValue('');  // 默认空，强制用户主动选择
-        dropdown.onChange((value) => {
-          this.selectedType = (value || null) as RelationType | null;
-          this._updateLinkBtnState();
-        });
+    // ── v5.2: Scope 切换 ──
+    const scopeRow = contentEl.createDiv({ cls: 'markvault-relation-picker-scope' });
+    const fileScopeBtn = scopeRow.createEl('button', {
+      text: '📄 Current File',
+      cls: `markvault-scope-btn ${this.searchScope === 'file' ? 'active' : ''}`,
+    });
+    fileScopeBtn.addEventListener('click', () => {
+      this.searchScope = 'file';
+      scopeRow.querySelectorAll('.markvault-scope-btn').forEach(b => b.removeClass('active'));
+      fileScopeBtn.addClass('active');
+      this._doSearch();
+    });
+
+    const allScopeBtn = scopeRow.createEl('button', {
+      text: '📂 All Files',
+      cls: `markvault-scope-btn ${this.searchScope === 'all' ? 'active' : ''}`,
+    });
+    allScopeBtn.addEventListener('click', () => {
+      this.searchScope = 'all';
+      scopeRow.querySelectorAll('.markvault-scope-btn').forEach(b => b.removeClass('active'));
+      allScopeBtn.addClass('active');
+      this._doSearch();
+    });
+
+    // ── v5.2: 筛选栏 ──
+    const filterRow = contentEl.createDiv({ cls: 'markvault-relation-picker-filters' });
+
+    // Type 筛选
+    const typeBtn = filterRow.createEl('button', {
+      text: this.filter.type !== 'all' ? this.filter.type : 'Type',
+      cls: `markvault-picker-filter-btn ${this.filter.type !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by annotation type' },
+    });
+    typeBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All types').setChecked(this.filter.type === 'all')
+          .onClick(() => { this.filter.type = 'all'; typeBtn.textContent = 'Type'; typeBtn.removeClass('active'); this._doSearch(); });
       });
+      for (const t of ['highlight', 'bold', 'underline'] as AnnotationType[]) {
+        menu.addItem((item) => {
+          const labels: Record<string, string> = { highlight: '🖍️ Highlight', bold: '𝗕 Bold', underline: 'U̲ Underline' };
+          item.setTitle(labels[t] || t).setChecked(this.filter.type === t)
+            .onClick(() => { this.filter.type = t; typeBtn.textContent = t; typeBtn.addClass('active'); this._doSearch(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: typeBtn.getBoundingClientRect().left, clientY: typeBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Color 筛选
+    const colorBtn = filterRow.createEl('button', {
+      text: '🎨',
+      cls: `markvault-picker-filter-btn ${this.filter.color !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by color' },
+    });
+    colorBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All colors').setChecked(this.filter.color === 'all')
+          .onClick(() => { this.filter.color = 'all'; colorBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const pc of PRESET_COLORS) {
+        menu.addItem((item) => {
+          item.setTitle(pc.label).setChecked(this.filter.color === pc.id)
+            .onClick(() => { this.filter.color = pc.id; colorBtn.addClass('active'); this._doSearch(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: colorBtn.getBoundingClientRect().left, clientY: colorBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Mastery 筛选
+    const masteryBtn = filterRow.createEl('button', {
+      text: this.filter.mastery && this.filter.mastery !== 'all' ? (MASTERY_LABELS[this.filter.mastery] || this.filter.mastery) : '📊 Mastery',
+      cls: `markvault-picker-filter-btn ${this.filter.mastery && this.filter.mastery !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by mastery level' },
+    });
+    masteryBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.filter.mastery || this.filter.mastery === 'all')
+          .onClick(() => { this.filter.mastery = 'all'; masteryBtn.textContent = '📊 Mastery'; masteryBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const [value, label] of Object.entries(MASTERY_LABELS)) {
+        menu.addItem((item) => {
+          item.setTitle(label).setChecked(this.filter.mastery === value)
+            .onClick(() => { this.filter.mastery = value as MasteryLevel; masteryBtn.textContent = label; masteryBtn.addClass('active'); this._doSearch(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: masteryBtn.getBoundingClientRect().left, clientY: masteryBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Motivation 筛选
+    const motBtn = filterRow.createEl('button', {
+      text: this.filter.motivation && this.filter.motivation !== 'all' ? (MOTIVATION_LABELS[this.filter.motivation] || this.filter.motivation) : '🎯 Intent',
+      cls: `markvault-picker-filter-btn ${this.filter.motivation && this.filter.motivation !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by motivation (annotation intent)' },
+    });
+    motBtn.addEventListener('click', () => {
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.filter.motivation || this.filter.motivation === 'all')
+          .onClick(() => { this.filter.motivation = 'all'; motBtn.textContent = '🎯 Intent'; motBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const m of ['highlighting', 'commenting', 'questioning', 'editing', 'bookmarking'] as AnnotationMotivation[]) {
+        const labels: Record<string, string> = { highlighting: '🖍️ Highlighting', commenting: '💬 Commenting', questioning: '❓ Questioning', editing: '✏️ Editing', bookmarking: '🔖 Bookmarking' };
+        menu.addItem((item) => {
+          item.setTitle(labels[m] || m).setChecked(this.filter.motivation === m)
+            .onClick(() => { this.filter.motivation = m; motBtn.textContent = labels[m]; motBtn.addClass('active'); this._doSearch(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: motBtn.getBoundingClientRect().left, clientY: motBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Group 筛选
+    const groupBtn = filterRow.createEl('button', {
+      text: this.filter.group && this.filter.group !== 'all' ? this.filter.group : '🏷️ Group',
+      cls: `markvault-picker-filter-btn ${this.filter.group && this.filter.group !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by group' },
+    });
+    groupBtn.addEventListener('click', () => {
+      const groups = getGroupNames();
+      const menu = new Menu();
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.filter.group || this.filter.group === 'all')
+          .onClick(() => { this.filter.group = 'all'; groupBtn.textContent = '🏷️ Group'; groupBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const g of groups) {
+        menu.addItem((item) => {
+          item.setTitle(g).setChecked(this.filter.group === g)
+            .onClick(() => { this.filter.group = g; groupBtn.textContent = g; groupBtn.addClass('active'); this._doSearch(); });
+        });
+      }
+      menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Field 筛选（与侧边栏 FilterBar 一致的 + Field 按钮）
+    const fieldBtn = filterRow.createEl('button', {
+      text: this.fieldFilterEntries.length > 0 ? `🏷️+${this.fieldFilterEntries.length}` : '+ Field',
+      cls: `markvault-picker-filter-btn ${this.fieldFilterEntries.length > 0 ? 'active' : ''}`,
+      attr: { title: 'Filter by custom field' },
+    });
+    fieldBtn.addEventListener('click', () => {
+      const keys = getFieldKeys();
+      const menu = new Menu();
+      if (keys.length === 0) {
+        menu.addItem((item) => { item.setTitle('No fields found').setDisabled(true); });
+      } else {
+        for (const key of keys) {
+          menu.addItem((item) => {
+            item.setTitle(key).onClick(() => {
+              const values = getFieldValues(key);
+              const subMenu = new Menu();
+              for (const val of values) {
+                subMenu.addItem((si) => {
+                  si.setTitle(val).onClick(() => {
+                    this.fieldFilterEntries.push({ key, value: val });
+                    fieldBtn.textContent = `🏷️+${this.fieldFilterEntries.length}`;
+                    fieldBtn.addClass('active');
+                    this._doSearch();
+                  });
+                });
+              }
+              subMenu.showAtMouseEvent({ clientX: fieldBtn.getBoundingClientRect().left, clientY: fieldBtn.getBoundingClientRect().bottom } as MouseEvent);
+            });
+          });
+        }
+      }
+      menu.showAtMouseEvent({ clientX: fieldBtn.getBoundingClientRect().left, clientY: fieldBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // ── 活跃筛选条件标签区 ──
+    const activeFiltersEl = contentEl.createDiv({ cls: 'markvault-relation-picker-active-filters' });
+    activeFiltersEl.id = 'markvault-active-filters';
+
+    // ── 关系类型选择器 ──
+    const relationSection = contentEl.createDiv({ cls: 'markvault-relation-picker-relation-section' });
+    relationSection.createSpan({ cls: 'markvault-relation-picker-relation-label', text: 'Relation type:' });
+
+    const relationBtns = relationSection.createDiv({ cls: 'markvault-relation-type-btns' });
+    for (const type of this.schema.getActiveTypes()) {
+      const label = this.schema.getLabel(type);
+      const config = this.schema.getConfig(type);
+      const btn = relationBtns.createEl('button', {
+        text: label,
+        cls: `markvault-relation-type-btn ${this.selectedType === type ? 'active' : ''}`,
+        attr: { title: `Relation: ${label}` },
+      });
+      if (config?.color) {
+        btn.style.setProperty('--relation-color', config.color);
+      }
+      btn.addEventListener('click', () => {
+        // 取消旧选中
+        relationBtns.querySelectorAll('.markvault-relation-type-btn').forEach(b => b.removeClass('active'));
+        btn.addClass('active');
+        this.selectedType = type;
+        this._updateLinkBtnState();
+      });
+    }
 
     // ── 结果列表容器 ──
     const resultsContainer = contentEl.createDiv({ cls: 'markvault-relation-picker-results' });
     resultsContainer.id = 'markvault-relation-results';
+
+    // ── 结果计数 ──
+    const countEl = contentEl.createDiv({ cls: 'markvault-relation-picker-count' });
+    countEl.id = 'markvault-relation-count';
 
     // ── 按钮栏 ──
     const buttonBar = contentEl.createDiv({ cls: 'markvault-relation-picker-buttons' });
@@ -113,8 +324,8 @@ export class RelationPickerModal extends Modal {
       this.close();
     });
 
-    // 初始加载最近的标注
-    this._loadRecent();
+    // 初始加载
+    this._doSearch();
   }
 
   onClose() {
@@ -124,93 +335,207 @@ export class RelationPickerModal extends Modal {
 
   // ─── Private ──────────────────────────────────────────
 
-  private _doSearch(query: string) {
-    if (!query || !query.trim()) {
-      this._loadRecent();
-      return;
+  /**
+   * v5.2: 统一搜索入口 — 使用 SearchEngine.search() 走完整 BM25 + filter 路径
+   */
+  private _doSearch() {
+    // 构建 fieldFilters
+    if (this.fieldFilterEntries.length > 0) {
+      this.filter.fieldFilters = {};
+      for (const entry of this.fieldFilterEntries) {
+        this.filter.fieldFilters[entry.key] = entry.value;
+      }
+    } else {
+      this.filter.fieldFilters = undefined;
     }
 
-    this.suggestions = this.engine.suggest(query, 20);
-
-    // 过滤掉自己（不能关联到自己）
-    this.suggestions = this.suggestions.filter(s => s.uuid !== this.sourceUuid);
-
-    this._renderResults();
-  }
-
-  private _loadRecent() {
-    // 无搜索词时显示最近标注（按 createdAt 降序）
     const results = this.engine.search({
-      query: undefined,
-      scope: 'file',
-      filePath: this.sourceFilePath,
-      sortByRelevance: false,
-      limit: 20,
+      query: this.searchQuery || undefined,
+      scope: this.searchScope === 'file' ? 'file' : 'all',
+      filePath: this.searchScope === 'file' ? this.sourceFilePath : undefined,
+      filter: this.filter,
+      sortByRelevance: !!this.searchQuery,
+      limit: 30,
+      facets: true,
     });
 
     // 排除自己
-    this.suggestions = results
-      .filter(r => r.annotation.uuid !== this.sourceUuid)
-      .map(r => ({
-        uuid: r.annotation.uuid,
-        text: r.annotation.text.length > 80 ? r.annotation.text.slice(0, 77) + '…' : r.annotation.text,
-        note: r.annotation.note,
-        filePath: r.annotation.filePath,
-        matchField: 'text',
-        matchSnippet: r.annotation.text.slice(0, 60),
-      }));
+    const filtered = results.filter(r => r.annotation.uuid !== this.sourceUuid);
 
-    this._renderResults();
+    this._renderResults(filtered);
+    this._renderActiveFilters();
+    this._renderCount(filtered.length, results.length);
   }
 
-  private _renderResults() {
+  /**
+   * 渲染搜索结果列表（SearchResult 版本，信息更丰富）
+   */
+  private _renderResults(results: SearchResult[]) {
     const container = this.contentEl.querySelector('#markvault-relation-results') as HTMLElement;
     if (!container) return;
     container.empty();
 
-    if (this.suggestions.length === 0) {
+    if (results.length === 0) {
       container.createDiv({
         cls: 'markvault-relation-picker-empty',
-        text: this.searchInput?.value?.trim()
+        text: this.searchQuery?.trim()
           ? 'No matching annotations found'
-          : 'No annotations in this file',
+          : this.searchScope === 'file'
+            ? 'No annotations in this file'
+            : 'No annotations found',
       });
       return;
     }
 
-    for (const suggestion of this.suggestions) {
+    for (const result of results) {
+      const ann = result.annotation;
       const row = container.createDiv({
-        cls: `markvault-relation-picker-row ${this.selectedUuid === suggestion.uuid ? 'selected' : ''}`,
+        cls: `markvault-relation-picker-row ${this.selectedUuid === ann.uuid ? 'selected' : ''}`,
       });
 
-      // 文本预览
-      const textEl = row.createDiv({ cls: 'markvault-relation-picker-text' });
-      textEl.createSpan({ text: suggestion.text, cls: 'markvault-relation-picker-body' });
+      // ── 第一行：标注原文 + 类型徽章 ──
+      const topRow = row.createDiv({ cls: 'markvault-picker-row-top' });
 
-      // 命中字段标签
-      if (suggestion.matchSnippet) {
-        textEl.createSpan({
-          text: suggestion.matchField,
+      // 类型+颜色小圆点
+      const preset = PRESET_COLORS.find(c => c.id === ann.color);
+      const colorHex = preset ? preset.hex : ann.color;
+      const dotEl = topRow.createSpan({ cls: 'markvault-picker-color-dot' });
+      dotEl.style.backgroundColor = colorHex;
+
+      // 标注原文
+      const textEl = topRow.createSpan({ cls: 'markvault-relation-picker-body' });
+      const displayText = ann.text.length > 60 ? ann.text.slice(0, 57) + '…' : ann.text;
+      textEl.textContent = displayText;
+
+      // 匹配字段标签（有搜索词时显示）
+      if (this.searchQuery && result.matchSnippets && Object.keys(result.matchSnippets).length > 0) {
+        const matchField = Object.keys(result.matchSnippets)[0];
+        topRow.createSpan({
+          text: matchField,
           cls: 'markvault-relation-picker-match-tag',
         });
       }
 
-      // 文件路径
-      if (suggestion.filePath !== this.sourceFilePath) {
-        row.createDiv({
-          cls: 'markvault-relation-picker-path',
-          text: suggestion.filePath,
-        });
+      // ── 第二行：元信息（文件名 + 行号 + 徽章） ──
+      const metaRow = row.createDiv({ cls: 'markvault-picker-row-meta' });
+
+      // 文件路径（跨文件时显示）
+      if (ann.filePath !== this.sourceFilePath) {
+        const fileName = ann.filePath.split('/').pop()?.replace('.md', '') || ann.filePath;
+        metaRow.createSpan({ cls: 'markvault-picker-file-tag', text: `📄 ${fileName}` });
       }
 
+      // 行号
+      metaRow.createSpan({ cls: 'markvault-picker-line-tag', text: `L${ann.startLine + 1}` });
+
+      // 掌握度徽章
+      if (ann.flags?.mastery && ann.flags.mastery !== 'unknown') {
+        const masteryEmoji: Record<string, string> = { learning: '📖', familiar: '✅', mastered: '🎯' };
+        metaRow.createSpan({ cls: 'markvault-picker-meta-badge', text: masteryEmoji[ann.flags.mastery] || '' });
+      }
+
+      // Motivation 徽章
+      if (ann.motivation && ann.motivation !== 'highlighting') {
+        metaRow.createSpan({ cls: 'markvault-picker-meta-badge', text: MOTIVATION_LABELS[ann.motivation] });
+      }
+
+      // 批注存在标记
+      if (ann.note && ann.note.trim()) {
+        metaRow.createSpan({ cls: 'markvault-picker-meta-badge', text: '💬' });
+      }
+
+      // 关联数量
+      const relCount = ann.relations?.filter(r => !r.invalidAt).length ?? 0;
+      if (relCount > 0) {
+        metaRow.createSpan({ cls: 'markvault-picker-meta-badge', text: `🔗${relCount}` });
+      }
+
+      // 点击选中
       row.addEventListener('click', () => {
-        // 取消旧选择
         const prev = container.querySelector('.markvault-relation-picker-row.selected');
         prev?.removeClass('selected');
         row.addClass('selected');
-        this.selectedUuid = suggestion.uuid;
+        this.selectedUuid = ann.uuid;
         this._updateLinkBtnState();
       });
+    }
+  }
+
+  /**
+   * 渲染活跃筛选条件标签（可单独移除）
+   */
+  private _renderActiveFilters() {
+    const container = this.contentEl.querySelector('#markvault-active-filters') as HTMLElement;
+    if (!container) return;
+    container.empty();
+
+    // 非默认的 filter 条件
+    const tags: Array<{ label: string; onRemove: () => void }> = [];
+
+    if (this.searchScope === 'all') {
+      tags.push({ label: '📂 All Files', onRemove: () => { this.searchScope = 'file'; this._doSearch(); } });
+    }
+    if (this.filter.type && this.filter.type !== 'all') {
+      tags.push({ label: `Type: ${this.filter.type}`, onRemove: () => { this.filter.type = 'all'; this._doSearch(); } });
+    }
+    if (this.filter.color && this.filter.color !== 'all') {
+      tags.push({ label: `Color: ${this.filter.color}`, onRemove: () => { this.filter.color = 'all'; this._doSearch(); } });
+    }
+    if (this.filter.mastery && this.filter.mastery !== 'all') {
+      tags.push({ label: `Mastery: ${MASTERY_LABELS[this.filter.mastery]}`, onRemove: () => { this.filter.mastery = 'all'; this._doSearch(); } });
+    }
+    if (this.filter.motivation && this.filter.motivation !== 'all') {
+      tags.push({ label: `${MOTIVATION_LABELS[this.filter.motivation]}`, onRemove: () => { this.filter.motivation = 'all'; this._doSearch(); } });
+    }
+    if (this.filter.group && this.filter.group !== 'all') {
+      tags.push({ label: `Group: ${this.filter.group}`, onRemove: () => { this.filter.group = 'all'; this._doSearch(); } });
+    }
+    for (let i = 0; i < this.fieldFilterEntries.length; i++) {
+      const entry = this.fieldFilterEntries[i];
+      const idx = i;
+      tags.push({ label: `${entry.key}=${entry.value}`, onRemove: () => { this.fieldFilterEntries.splice(idx, 1); this._doSearch(); } });
+    }
+
+    if (tags.length === 0) return;
+
+    for (const tag of tags) {
+      const el = container.createSpan({ cls: 'markvault-picker-active-tag' });
+      el.createSpan({ text: tag.label, cls: 'markvault-picker-active-tag-text' });
+      const removeBtn = el.createEl('button', { text: '✕', cls: 'markvault-picker-active-tag-remove' });
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        tag.onRemove();
+      });
+    }
+
+    // 全部清除按钮
+    if (tags.length > 1) {
+      const clearBtn = container.createEl('button', {
+        text: 'Clear all',
+        cls: 'markvault-picker-clear-all',
+      });
+      clearBtn.addEventListener('click', () => {
+        this.searchScope = 'file';
+        this.filter = { type: 'all', color: 'all', sortBy: 'position' };
+        this.fieldFilterEntries = [];
+        this._doSearch();
+      });
+    }
+  }
+
+  /**
+   * 渲染结果计数
+   */
+  private _renderCount(filteredCount: number, totalCount: number) {
+    const countEl = this.contentEl.querySelector('#markvault-relation-count') as HTMLElement;
+    if (!countEl) return;
+
+    const excluded = totalCount - filteredCount;  // 被自身排除的数量
+    if (this.searchScope === 'all') {
+      countEl.textContent = `${filteredCount} annotation${filteredCount !== 1 ? 's' : ''} found across all files`;
+    } else {
+      const fileName = this.sourceFilePath.split('/').pop()?.replace('.md', '') || 'this file';
+      countEl.textContent = `${filteredCount} annotation${filteredCount !== 1 ? 's' : ''} in ${fileName}`;
     }
   }
 

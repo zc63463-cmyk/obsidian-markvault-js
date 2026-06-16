@@ -7,6 +7,7 @@ import {
   addAnnotation,
   getAllAnnotations,
   getAnnotationByUuid,
+  getRelations,
 } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 import { applyUnifiedFilter, hasActiveFilters } from '../../search/filter-engine';
@@ -234,6 +235,19 @@ export class AnnotationSidebar extends ItemView {
         await this.renderContent();
       });
     }
+
+    // 图谱快捷入口 — 打开 Relation Graph 视图
+    const graphBtn = tabBar.createEl('button', {
+      cls: 'markvault-tab-btn markvault-graph-tab-btn',
+      attr: { 'aria-label': 'Open Relation Graph' },
+    });
+    graphBtn.createSpan({ text: '🔗', cls: 'markvault-tab-icon' });
+    graphBtn.createSpan({ text: 'Graph', cls: 'markvault-tab-label' });
+    graphBtn.addEventListener('click', () => {
+      if (this.pluginInstance) {
+        (this.pluginInstance as any).activateGraphView();
+      }
+    });
   }
 
   // ─── 搜索栏 ─────────────────────────────────────────────
@@ -611,7 +625,14 @@ export class AnnotationSidebar extends ItemView {
   }
 
   private async deleteAnnotationWithConfirm(annotation: Annotation) {
-    const confirmed = confirm(`Delete annotation "${annotation.text.substring(0, 50)}..."?`);
+    // 🔧 v5.1: 有关联关系时在确认信息中提示
+    const rels = getRelations(annotation.uuid);
+    const totalRels = rels.outgoing.length + rels.incoming.length;
+    const baseText = annotation.text.substring(0, 50);
+    const confirmMsg = totalRels > 0
+      ? `Delete annotation "${baseText}..."? It has ${totalRels} relation${totalRels > 1 ? 's' : ''} that will also be removed.`
+      : `Delete annotation "${baseText}..."?`;
+    const confirmed = confirm(confirmMsg);
     if (!confirmed) return;
 
     const plugin = this.pluginInstance;

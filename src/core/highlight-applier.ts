@@ -64,12 +64,17 @@ export function requestRegionLayerRedraw(): void {
     try {
       // 使用 any 访问 destroyed 属性（CM6 内部标记，TypeScript 定义为 private）
       const view = activeEditorView as any;
-      if (view.destroyed) return;
+      if (view.destroyed) { activeEditorView = null; return; }
+      // 🔧 BUG-8 修复：检查 state 有效性，防止 dispatch 到已部分销毁的 view
+      // 场景：Obsidian 关闭标签页时 beforeUnload→saveHistory→field() 已拆解，
+      // 但 view.destroyed 尚未设为 true，此时 dispatch 会触发 RangeError
+      if (!activeEditorView.state?.field) { activeEditorView = null; return; }
       activeEditorView.dispatch({
         effects: [regionCacheUpdatedEffect.of(undefined)],
       });
     } catch {
-      // view 可能已销毁，忽略
+      // view 可能已销毁，清除过期引用
+      activeEditorView = null;
     }
   }
 }

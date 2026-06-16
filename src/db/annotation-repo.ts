@@ -127,14 +127,24 @@ export async function addRelation(sourceUuid: string, relation: AnnotationRelati
   await annotationStore.addRelation(sourceUuid, relation);
 }
 
-/** 移除标注间关联 */
+/** 移除标注间关联（物理删除） */
 export async function removeRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
   await annotationStore.removeRelation(sourceUuid, targetUuid, type);
 }
 
-/** 获取标注的所有关联（出边 + 入边） */
-export function getRelations(uuid: string): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
-  return annotationStore.getRelations(uuid);
+/** v4.2: 使关系失效（软删除，保留历史） — 参考 Graphiti 事实失效 */
+export async function invalidateRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+  await annotationStore.invalidateRelation(sourceUuid, targetUuid, type);
+}
+
+/** v4.2 P1: 恢复已失效的关系（双向级联清除 invalidAt） */
+export async function restoreRelation(sourceUuid: string, targetUuid: string, type: RelationType): Promise<void> {
+  await annotationStore.restoreRelation(sourceUuid, targetUuid, type);
+}
+
+/** 获取标注的所有关联（出边 + 入边），默认只返回有效关系 */
+export function getRelations(uuid: string, options?: { includeInvalidated?: boolean }): { outgoing: AnnotationRelation[]; incoming: Array<{ sourceUuid: string; relation: AnnotationRelation }> } {
+  return annotationStore.getRelations(uuid, options);
 }
 
 // ─── v4.0: Flag 操作 ──────────────────────────────────

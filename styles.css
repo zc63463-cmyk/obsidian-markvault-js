@@ -418,6 +418,19 @@
   background: var(--background-primary);
 }
 
+.markvault-graph-tab-btn {
+  margin-left: auto;
+  color: var(--text-faint);
+  opacity: 0.7;
+  transition: all 0.15s ease;
+}
+
+.markvault-graph-tab-btn:hover {
+  opacity: 1;
+  color: var(--interactive-accent);
+  border-bottom-color: var(--interactive-accent);
+}
+
 .markvault-tab-icon {
   font-size: 1em;
 }
@@ -986,6 +999,151 @@
   border-color: #f87171;
 }
 
+/* ─── v5.1: 关联详情面板 ─── */
+
+.markvault-rel-toggle {
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.markvault-rel-toggle:hover {
+  background: var(--interactive-hover, rgba(124,58,237,0.10));
+}
+.markvault-rel-toggle.expanded {
+  background: var(--interactive-accent, rgba(124,58,237,0.15));
+  font-weight: 600;
+}
+
+.markvault-rel-panel {
+  margin: 4px 0 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  animation: mvRelSlideIn 0.2s ease;
+}
+@keyframes mvRelSlideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.markvault-rel-loading {
+  font-size: 0.78em;
+  color: var(--text-faint);
+  font-style: italic;
+  padding: 4px 0;
+  animation: mvRelPulse 1s ease-in-out infinite;
+}
+@keyframes mvRelPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.markvault-rel-section {
+  margin-bottom: 6px;
+}
+.markvault-rel-section:last-child {
+  margin-bottom: 0;
+}
+.markvault-rel-section-header {
+  font-size: 0.7em;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.markvault-rel-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  font-size: 0.78em;
+  line-height: 1.4;
+  transition: background 0.12s ease;
+}
+.markvault-rel-item.clickable {
+  cursor: pointer;
+}
+.markvault-rel-item.clickable:hover {
+  background: var(--interactive-hover, rgba(124,58,237,0.08));
+}
+
+.markvault-rel-type-label {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 0.9em;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  /* 默认色，会被 JS 覆盖为各类型的 color */
+  background: rgba(99,102,241,0.12);
+  color: #6366f1;
+}
+
+.markvault-rel-outgoing .markvault-rel-type-label {
+  background: rgba(34,197,94,0.12);
+  color: #16a34a;
+}
+.markvault-rel-incoming .markvault-rel-type-label {
+  background: rgba(59,130,246,0.12);
+  color: #2563eb;
+}
+
+.markvault-rel-arrow {
+  color: var(--text-faint);
+  font-size: 0.95em;
+  flex-shrink: 0;
+}
+
+.markvault-rel-summary {
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-style: italic;
+}
+
+.markvault-rel-file {
+  color: var(--text-faint);
+  font-size: 0.9em;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.markvault-rel-note {
+  color: var(--text-faint);
+  font-size: 0.9em;
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markvault-rel-broken {
+  color: var(--text-error, #ef4444);
+  font-style: italic;
+  font-size: 0.92em;
+}
+
+.markvault-rel-empty {
+  font-size: 0.78em;
+  color: var(--text-faint);
+  font-style: italic;
+  padding: 4px 0;
+}
+
 /* ─── 时间线视图 ─── */
 
 .markvault-timeline-group {
@@ -1364,6 +1522,17 @@
   width: 100%;
 }
 
+/* v5.3: Graph Alias 输入框 */
+.markvault-modal-alias-input {
+  width: 100%;
+  font-size: 13px;
+}
+
+.markvault-modal-alias-input::placeholder {
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+
 .markvault-modal-buttons {
   display: flex;
   gap: 8px;
@@ -1577,6 +1746,44 @@
   background: var(--background-modifier-error);
 }
 
+/* v4.2: Relation 时态 — 已失效/已恢复 */
+
+.markvault-relation-invalidated {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.markvault-relation-invalidated-hint {
+  font-size: 0.8em;
+  color: var(--text-faint);
+  margin-left: 4px;
+}
+
+.markvault-modal-relation-source {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  background: var(--background-modifier-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+.markvault-modal-relation-restore {
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: var(--text-success);
+  font-size: 1em;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.markvault-modal-relation-restore:hover {
+  background: var(--background-modifier-hover);
+}
+
 /* ─── v4.5: Relation Picker Modal ─── */
 
 .markvault-relation-picker {
@@ -1680,6 +1887,219 @@
   gap: 8px;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+/* ─── v5.2: Relation Picker 高级搜索+筛选 ─── */
+
+.markvault-relation-picker-scope {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.markvault-scope-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.82em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.markvault-scope-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+.markvault-scope-btn.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+  font-weight: 500;
+}
+
+.markvault-relation-picker-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.markvault-picker-filter-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: 0.78em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.markvault-picker-filter-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+.markvault-picker-filter-btn.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.markvault-relation-picker-active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+  min-height: 0;
+}
+
+.markvault-picker-active-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  border-radius: 10px;
+  background: var(--background-modifier-hover);
+  font-size: 0.72em;
+  color: var(--text-muted);
+  animation: mvFilterTagIn 0.15s ease;
+}
+
+@keyframes mvFilterTagIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.markvault-picker-active-tag-text {
+  white-space: nowrap;
+}
+
+.markvault-picker-active-tag-remove {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 1em;
+  line-height: 1;
+}
+
+.markvault-picker-active-tag-remove:hover {
+  color: var(--text-error);
+}
+
+.markvault-picker-clear-all {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.72em;
+  padding: 2px 6px;
+  text-decoration: underline;
+}
+
+.markvault-picker-clear-all:hover {
+  color: var(--text-error);
+}
+
+/* 关系类型按钮区 */
+.markvault-relation-picker-relation-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.markvault-relation-picker-relation-label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.markvault-relation-type-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.markvault-relation-type-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 0.78em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.markvault-relation-type-btn:hover {
+  border-color: var(--relation-color, var(--interactive-accent));
+}
+
+.markvault-relation-type-btn.active {
+  background: var(--relation-color, var(--interactive-accent));
+  color: white;
+  border-color: var(--relation-color, var(--interactive-accent));
+  font-weight: 500;
+}
+
+/* 结果行升级 — 双行信息 */
+.markvault-picker-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.markvault-picker-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.markvault-picker-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 14px;
+  margin-top: 2px;
+}
+
+.markvault-picker-file-tag {
+  font-size: 0.72em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.markvault-picker-line-tag {
+  font-size: 0.72em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.markvault-picker-meta-badge {
+  font-size: 0.72em;
+  white-space: nowrap;
+}
+
+/* 结果计数 */
+.markvault-relation-picker-count {
+  font-size: 0.75em;
+  color: var(--text-faint);
+  padding: 2px 0;
+  margin-bottom: 4px;
 }
 
 /* ─── 块级标注样式 (Track B) ─── */
@@ -1938,4 +2358,468 @@
 
 .markvault-sync-label {
   font-weight: 500;
+}
+
+/* ─── 关系图谱视图 ────────────────────────── */
+
+.markvault-graph-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.markvault-graph-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  flex-wrap: wrap;
+  min-height: 28px;
+}
+
+.markvault-graph-filter-row + .markvault-graph-filter-row {
+  border-top: 1px solid var(--background-modifier-border, rgba(128,128,128,0.1));
+}
+
+.markvault-graph-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-normal);
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+.markvault-graph-search-wrap {
+  flex: 1;
+  min-width: 120px;
+  max-width: 240px;
+}
+
+.markvault-graph-search-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  outline: none;
+  height: 22px;
+}
+
+.markvault-graph-search-input:focus {
+  border-color: var(--interactive-accent);
+}
+
+.markvault-graph-btn-icon {
+  font-size: 14px;
+  padding: 1px 6px !important;
+  line-height: 1;
+  min-width: 24px;
+}
+
+.markvault-graph-filter-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.markvault-graph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: opacity 0.15s, transform 0.1s, border-color 0.15s;
+  border: 1px solid transparent;
+  /* v5.10: 颜色通过 dot 表达，chip 本身无背景 */
+  background: transparent;
+}
+
+.markvault-graph-chip:hover {
+  transform: scale(1.05);
+}
+
+.markvault-graph-chip-active {
+  opacity: 1;
+  border-color: var(--background-modifier-border, rgba(128,128,128,0.3));
+}
+
+.markvault-graph-chip-dim {
+  opacity: 0.4;
+  border-color: transparent;
+}
+
+/* v5.11: 语义分组标题 — 微小灰色标签 */
+.markvault-graph-chip-group-header {
+  font-size: 9.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 2px;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+/* v5.11: 语义组间分隔线 — 细竖线 */
+.markvault-graph-chip-divider {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  background: var(--background-modifier-border, rgba(128,128,128,0.18));
+  margin: 0 2px;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+/* v5.10: 色块小圆点 */
+.markvault-graph-chip-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* v5.10: 芯片文字标签 */
+.markvault-graph-chip-label {
+  color: var(--text-normal);
+  line-height: 1;
+}
+
+/* v5.10: 被动关系 — 灰色 dot + 灰色文字 */
+.markvault-graph-chip-passive .markvault-graph-chip-dot {
+  opacity: 0.6;
+}
+
+.markvault-graph-chip-passive .markvault-graph-chip-label {
+  color: var(--text-muted);
+}
+
+/* 关系类型 chip 颜色 — v5.10: 仅保留 data-type 作为标识（颜色由 JS 内联注入），
+   这些类名仍需保留以兼容可能的旧版本引用 */
+
+/* 关系类型 chip 颜色 — v5.10: 颜色改由内联 dot 注入，不再通过 CSS 选择器 */
+
+/* 标注类型 chip 颜色（Kind chips 保持 solid 背景样式） */
+.markvault-graph-chip-kind-inline {
+  background: rgba(55, 138, 221, 0.15);
+  color: #378add;
+}
+.markvault-graph-chip-kind-block {
+  background: rgba(212, 83, 126, 0.15);
+  color: #d4537e;
+}
+.markvault-graph-chip-kind-span {
+  background: rgba(239, 159, 39, 0.15);
+  color: #ef9f27;
+}
+.markvault-graph-chip-kind-region {
+  background: rgba(29, 158, 117, 0.15);
+  color: #1d9e75;
+}
+
+.markvault-graph-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--background-modifier-border);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.markvault-graph-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.markvault-graph-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
+.markvault-graph-slider {
+  width: 60px;
+  height: 4px;
+  accent-color: var(--interactive-accent);
+}
+
+.markvault-graph-slider-value {
+  font-size: 11px;
+  color: var(--text-normal);
+  font-weight: 500;
+  min-width: 12px;
+  text-align: center;
+}
+
+.markvault-graph-select {
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  max-width: 150px;
+  height: 20px;
+}
+
+.markvault-graph-stats {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.markvault-graph-canvas {
+  width: 100%;
+  min-height: 400px;
+  background: var(--background-primary);
+  cursor: grab;
+}
+
+.markvault-graph-canvas:active {
+  cursor: grabbing;
+}
+
+/* 图谱视图容器 */
+.workspace-leaf-content[data-type="markvault-relation-graph"] .view-content {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ═══════════════════════════════════════════════
+   v5.3: 节点详情 Modal (NodeDetailModal)
+   ═══════════════════════════════════════════════ */
+
+.markvault-node-modal {
+  --mv-modal-width: 480px;
+}
+
+.markvault-node-modal .modal-content {
+  max-width: var(--mv-modal-width);
+}
+
+/* ── 头部 ── */
+
+.markvault-node-modal-header {
+  padding: 0 0 12px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 12px;
+}
+
+.markvault-node-modal-alias-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.markvault-node-modal-alias-input {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1.5px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.markvault-node-modal-alias-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--interactive-accent-hover);
+}
+
+.markvault-node-modal-alias-input::placeholder {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-style: italic;
+}
+
+.markvault-node-modal-alias-save {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+}
+
+.markvault-node-modal-alias-save:hover {
+  opacity: 0.85;
+}
+
+.markvault-node-modal-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.markvault-node-modal-kind {
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.markvault-node-modal-kind.markvault-kind-inline { background: #f59e0b22; color: #f59e0b; }
+.markvault-node-modal-kind.markvault-kind-block { background: #3b82f622; color: #3b82f6; }
+.markvault-node-modal-kind.markvault-kind-span { background: #8b5cf622; color: #8b5cf6; }
+.markvault-node-modal-kind.markvault-kind-region { background: #10b98122; color: #10b981; }
+
+.markvault-node-modal-file,
+.markvault-node-modal-degree {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ── 区段标题 ── */
+
+.markvault-node-modal-section-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+}
+
+/* ── 标注原文预览 ── */
+
+.markvault-node-modal-preview {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.markvault-node-modal-text {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  word-break: break-word;
+  padding: 8px 12px;
+  background: var(--background-primary);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border-hover);
+}
+
+/* ── 批注内容 ── */
+
+.markvault-node-modal-note {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.markvault-node-modal-note-text {
+  font-size: 13px;
+  color: var(--text-normal);
+  line-height: 1.6;
+  padding: 8px 12px;
+  background: var(--background-primary);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border-hover);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Relations 列表 ── */
+
+.markvault-node-modal-relations {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border-hover);
+}
+
+.markvault-node-modal-rel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 4px 0;
+  border-radius: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border-hover);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.markvault-node-modal-rel-row:hover {
+  background: var(--background-modifier-hover);
+  border-color: var(--interactive-accent);
+}
+
+.markvault-node-modal-rel-icon {
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.markvault-rel-outgoing .markvault-node-modal-rel-icon { color: var(--interactive-accent); }
+.markvault-rel-incoming .markvault-node-modal-rel-icon { color: var(--text-faint); }
+
+.markvault-node-modal-rel-type {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  flex-shrink: 0;
+}
+
+.markvault-node-modal-rel-target {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.markvault-node-modal-no-rel {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 12px 0;
+  text-align: center;
+  font-style: italic;
+}
+
+/* ── 操作按钮区 ── */
+
+.markvault-node-modal-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0 0 0;
+  justify-content: flex-end;
+}
+
+.markvault-node-modal-actions button {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 6px;
 }

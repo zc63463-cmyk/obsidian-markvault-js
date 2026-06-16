@@ -9,6 +9,7 @@
 
 import type { Annotation, AnnotationFilter } from '../types/annotation';
 import { tokenize, isCJK } from './tokenizer';
+import { stripUserFieldPrefix } from '../types/annotation';
 
 // ─── 活跃判断 ──────────────────────────────────────────
 
@@ -26,6 +27,7 @@ export function hasActiveFilters(filter: AnnotationFilter): boolean {
   if (filter.group && filter.group !== 'all') return true;
   if (filter.hasRelations === true) return true;
   if (filter.needsCorrection === true) return true;
+  if (filter.motivation && filter.motivation !== 'all') return true;
   return false;
 }
 
@@ -68,12 +70,21 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.note && a.note.trim().length > 0);
   }
 
-  // —— 字段过滤 ——
+  // —— 字段过滤（v4.1: u: 命名空间兼容匹配） ——
   if (filter.fieldFilters && Object.keys(filter.fieldFilters).length > 0) {
     for (const [key, value] of Object.entries(filter.fieldFilters)) {
-      results = results.filter(a =>
-        a.fields && a.fields[key] !== undefined && a.fields[key] === value,
-      );
+      results = results.filter(a => {
+        if (!a.fields) return false;
+        // 精确匹配：key 完全一致
+        if (a.fields[key] !== undefined && a.fields[key] === value) return true;
+        // u: 命名空间兼容：裸键 "source" 也能匹配 "u:source"
+        const strippedKey = stripUserFieldPrefix(key);
+        if (strippedKey !== key && a.fields[strippedKey] !== undefined && a.fields[strippedKey] === value) return true;
+        // 反向兼容：filter 中的裸键匹配带 u: 前缀的字段
+        const prefixedKey = 'u:' + key;
+        if (a.fields[prefixedKey] !== undefined && a.fields[prefixedKey] === value) return true;
+        return false;
+      });
     }
   }
 
@@ -92,14 +103,20 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.groups?.includes(groupVal) ?? false);
   }
 
+  // v4.2: hasRelations 只计算有效关系（invalidAt == null）
   if (filter.hasRelations === true) {
-    results = results.filter(a => a.relations && a.relations.length > 0);
+    results = results.filter(a => a.relations?.some(r => !r.invalidAt) ?? false);
   } else if (filter.hasRelations === false) {
-    results = results.filter(a => !a.relations || a.relations.length === 0);
+    results = results.filter(a => !a.relations || !a.relations.some(r => !r.invalidAt));
   }
 
   if (filter.needsCorrection === true) {
     results = results.filter(a => a.flags?.needsCorrection === true);
+  }
+
+  // —— v4.1: Motivation 语义过滤 ——
+  if (filter.motivation && filter.motivation !== 'all') {
+    results = results.filter(a => a.motivation === filter.motivation);
   }
 
   // —— 搜索（tokenizer 分词匹配，与 SearchEngine 行为一致） ——
@@ -122,14 +139,15 @@ export function applyUnifiedFilter(
       }
 
       results = results.filter(a => {
-        // 收集标注所有可搜索字段的文本
+        // 收集标注所有可搜索字段的文本（v4.1: 增加 motivation、u: 字段 key 兼容搜索）
         const searchableText = [
           a.text,
           a.note || '',
           ...a.tags,
           a.filePath,
           ...(a.groups || []),
-          ...(a.fields ? Object.entries(a.fields).flat() : []),
+          ...(a.fields ? Object.entries(a.fields).flatMap(([k, v]) => [stripUserFieldPrefix(k), v]) : []),
+          a.motivation || '',
         ].join(' ').toLowerCase();
 
         // 语义：至少一个 bigram 命中（OR）+ 任一 other token 命中（OR）

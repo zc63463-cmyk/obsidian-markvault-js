@@ -1,8 +1,8 @@
 import { App, Modal, TextAreaComponent, TextComponent, Setting, TFile, MarkdownRenderer, Component } from 'obsidian';
-import type { Annotation, AnnotationType, AnnotationFlag, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
-import { PRESET_COLORS, RELATION_TYPE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../types/annotation';
+import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
+import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS, MOTIVATION_OPTIONS, normalizeUserFieldKey, inferMotivation } from '../../types/annotation';
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, removeRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames } from '../../db/annotation-repo';
+import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
@@ -24,6 +24,8 @@ export class AnnotationModal extends Modal {
   private fieldsValue: Record<string, string>;
   private flagsValue: AnnotationFlag;
   private groupsValue: string[];
+  private motivationValue: AnnotationMotivation | '';
+  private aliasValue: string;
   private onSave: (annotation: Annotation) => void;
   private onDelete: (uuid: string) => void;
   private component_: Component;
@@ -45,6 +47,8 @@ export class AnnotationModal extends Modal {
     this.fieldsValue = annotation.fields ? { ...annotation.fields } : {};
     this.flagsValue = annotation.flags ? { ...annotation.flags } : {};
     this.groupsValue = annotation.groups ? [...annotation.groups] : [];
+    this.motivationValue = annotation.motivation || '';
+    this.aliasValue = annotation.alias || '';
     this.onSave = onSave;
     this.onDelete = onDelete;
     this.component_ = new Component();
@@ -70,6 +74,19 @@ export class AnnotationModal extends Modal {
       quoteEl.createEl('em', { text: `"${this.annotation.text.substring(0, 200)}${this.annotation.text.length > 200 ? '...' : ''}"` });
     });
 
+    // ── v5.3: 图谱别名（Graph Alias） ──
+    new Setting(contentEl)
+      .setName('🏷️ Graph Alias')
+      .setDesc('Short name for this annotation in the relation graph (e.g. "欧拉公式", "费马定理"). Leave empty to hide label.')
+      .addText((text: TextComponent) => {
+        text.setValue(this.aliasValue)
+          .setPlaceholder('e.g. 欧拉公式, Newton\'s 2nd Law...')
+          .onChange((value) => {
+            this.aliasValue = value.trim();
+          });
+        text.inputEl.addClass('markvault-modal-alias-input');
+      });
+
     // ── 类型选择 ──
     new Setting(contentEl)
       .setName('Type')
@@ -84,6 +101,21 @@ export class AnnotationModal extends Modal {
             this.selectedType = value as AnnotationType;
             this.updatePreview();
           });
+      });
+
+    // ── v4.1: Motivation 选择（标注意图） ──
+    new Setting(contentEl)
+      .setName('Motivation')
+      .setDesc('Why you annotated this (W3C Web Annotation)')
+      .addDropdown((dropdown) => {
+        dropdown.addOption('', 'Not set');
+        for (const m of MOTIVATION_OPTIONS) {
+          dropdown.addOption(m, MOTIVATION_LABELS[m]);
+        }
+        dropdown.setValue(this.motivationValue);
+        dropdown.onChange((value) => {
+          this.motivationValue = value as AnnotationMotivation | '';
+        });
       });
 
     // ── 颜色选择器 ──
@@ -310,24 +342,20 @@ export class AnnotationModal extends Modal {
       const picker = new RelationPickerModal(
         this.app,
         engine,
+        this.plugin.getRelationSchema(),
         this.annotation.uuid,
         this.annotation.filePath,
         (result) => {
           // 立即持久化关联
+          // 🔧 BUG-fix: addRelation() 内部已向 store 中的 annotation 对象 push 了 relation
+          // this.annotation 与 store 中的对象是同一个引用，无需再手动 push
           addRelation(this.annotation.uuid, {
             targetUuid: result.targetUuid,
             type: result.type,
             createdAt: Date.now(),
             note: result.note,
+            source: 'manual',  // v4.2: 来源溯源
           }).then(() => {
-            // 更新本地 annotation 的 relations
-            if (!this.annotation.relations) this.annotation.relations = [];
-            this.annotation.relations.push({
-              targetUuid: result.targetUuid,
-              type: result.type,
-              createdAt: Date.now(),
-              note: result.note,
-            });
             this.renderRelations(relationsListEl);
           }).catch((err) => {
             console.error('MarkVault: failed to add relation', err);
@@ -349,7 +377,13 @@ export class AnnotationModal extends Modal {
 
     const deleteBtn = buttonBar.createEl('button', { text: 'Delete', cls: 'mod-warning' });
     deleteBtn.addEventListener('click', async () => {
-      const confirmed = confirm('Delete this annotation?');
+      // 🔧 v5.1: 有关联关系时提示用户，避免误删
+      const rels = getRelations(this.annotation.uuid);
+      const totalRels = rels.outgoing.length + rels.incoming.length;
+      const confirmMsg = totalRels > 0
+        ? `Delete this annotation? It has ${totalRels} relation${totalRels > 1 ? 's' : ''} that will also be removed.`
+        : 'Delete this annotation?';
+      const confirmed = confirm(confirmMsg);
       if (confirmed) {
         await this.remove();
         this.close();
@@ -510,40 +544,75 @@ export class AnnotationModal extends Modal {
       return;
     }
 
-    for (let i = 0; i < relations.length; i++) {
-      const rel = relations[i];
-      const row = container.createDiv({ cls: 'markvault-modal-relation-row' });
+    // v4.2: 有效关系在前，已失效关系在后（灰色显示）
+    const activeRels = relations.filter(r => !r.invalidAt);
+    const invalidatedRels = relations.filter(r => r.invalidAt);
 
-      // 关系类型标签
-      const typeLabel = RELATION_TYPE_LABELS[rel.type] || rel.type;
-      row.createSpan({ text: `${typeLabel} →`, cls: 'markvault-modal-relation-type' });
+    for (const rel of activeRels) {
+      this._renderRelationRow(container, rel, false);
+    }
 
-      // 目标 UUID（截断显示）
-      const shortUuid = rel.targetUuid.length > 8
-        ? rel.targetUuid.substring(0, 8) + '...'
-        : rel.targetUuid;
-      row.createSpan({ text: shortUuid, cls: 'markvault-modal-relation-target', attr: { title: rel.targetUuid } });
+    for (const rel of invalidatedRels) {
+      this._renderRelationRow(container, rel, true);
+    }
+  }
 
-      // 删除按钮
+  /** 渲染单个 relation 行 */
+  private _renderRelationRow(container: HTMLElement, rel: AnnotationRelation, isInvalidated: boolean) {
+    const row = container.createDiv({
+      cls: isInvalidated ? 'markvault-modal-relation-row markvault-relation-invalidated' : 'markvault-modal-relation-row',
+    });
+
+    // 关系类型标签 — v4.3: 从 Schema 动态获取
+    const typeLabel = this.plugin.getRelationSchema().getLabel(rel.type);
+    row.createSpan({ text: `${typeLabel} →`, cls: 'markvault-modal-relation-type' });
+
+    // 目标 UUID（截断显示）
+    const shortUuid = rel.targetUuid.length > 8
+      ? rel.targetUuid.substring(0, 8) + '...'
+      : rel.targetUuid;
+    row.createSpan({
+      text: shortUuid,
+      cls: 'markvault-modal-relation-target',
+      attr: { title: rel.targetUuid },
+    });
+
+    // v4.2: 来源标签
+    if (rel.source) {
+      const sourceLabel = RELATION_SOURCE_LABELS[rel.source] || rel.source;
+      row.createSpan({ text: sourceLabel, cls: 'markvault-modal-relation-source' });
+    }
+
+    if (isInvalidated) {
+      // 已失效 — 显示失效时间和恢复按钮
+      const invalidDate = rel.invalidAt ? new Date(rel.invalidAt).toLocaleDateString() : '?';
+      row.createSpan({ text: `(已失效 ${invalidDate})`, cls: 'markvault-relation-invalidated-hint' });
+
+      // 恢复按钮
+      const restoreBtn = row.createEl('button', { text: '↺', cls: 'markvault-modal-relation-restore' });
+      restoreBtn.title = '恢复此关系（双向级联）';
+      restoreBtn.addEventListener('click', async () => {
+        try {
+          // v4.2 P1: 使用 restoreRelation（双向级联清除 invalidAt）
+          await restoreRelation(this.annotation.uuid, rel.targetUuid, rel.type);
+          this.renderRelations(container);
+        } catch (err) {
+          console.error('MarkVault: failed to restore relation', err);
+        }
+      });
+    } else {
+      // 有效关系 — 删除按钮（改为软删除/失效）
       const removeBtn = row.createEl('button', {
         text: '✕',
         cls: 'markvault-modal-relation-remove',
       });
       removeBtn.addEventListener('click', async () => {
         try {
-          await removeRelation(this.annotation.uuid, rel.targetUuid, rel.type);
-          // 更新本地 annotation
-          if (this.annotation.relations) {
-            this.annotation.relations = this.annotation.relations.filter(
-              r => !(r.targetUuid === rel.targetUuid && r.type === rel.type)
-            );
-            if (this.annotation.relations.length === 0) {
-              delete this.annotation.relations;
-            }
-          }
+          // v4.2: 默认使用软删除（invalidateRelation），保留历史可回溯
+          await invalidateRelation(this.annotation.uuid, rel.targetUuid, rel.type);
           this.renderRelations(container);
         } catch (err) {
-          console.error('MarkVault: failed to remove relation', err);
+          console.error('MarkVault: failed to invalidate relation', err);
         }
       });
     }
@@ -568,11 +637,13 @@ export class AnnotationModal extends Modal {
       updates.type = this.selectedType;
     }
 
-    // 🆕 Phase 3: 收集 fields（过滤空键）
+    // 🆕 Phase 3: 收集 fields（过滤空键） + v4.1: u: 前缀规范化
     const filteredFields: Record<string, string> = {};
     for (const [k, v] of Object.entries(this.fieldsValue)) {
       if (k.trim()) {
-        filteredFields[k.trim()] = v;
+        // 用户自定义字段自动添加 u: 前缀（排除以 _ 开头的系统字段和已有 u: 前缀的）
+        const normalizedKey = normalizeUserFieldKey(k.trim());
+        filteredFields[normalizedKey] = v;
       }
     }
     if (Object.keys(filteredFields).length > 0 || this.annotation.fields) {
@@ -584,6 +655,35 @@ export class AnnotationModal extends Modal {
       updates.groups = this.groupsValue;
     }
 
+    // v4.1: 收集 motivation
+    // 如果用户手动选择了 motivation，使用用户选择；否则根据当前 note/flags 重新推断
+    if (this.motivationValue) {
+      updates.motivation = this.motivationValue;
+    } else {
+      // 用户清空了 motivation → 根据当前 note 内容重新推断
+      updates.motivation = inferMotivation({
+        note: updates.note ?? this.annotation.note,
+        needsCorrection: updates.flags?.needsCorrection ?? this.annotation.flags?.needsCorrection,
+        kind: this.annotation.kind,
+      });
+    }
+
+    // v5.3: 收集图谱别名（带校验）
+    // 🔧 F1 审计修复：先 trim + replace（移除危险字符），再 slice（截断长度）
+    // 这样 replace 移除 < > 后的字符串长度才是最终长度，不会出现截断后再替换导致长度不一致
+    // 🔧 F5 审计修复：DB 和 MD 的 alias 语义分离
+    // - DB: undefined = "删除 alias 字段", "" = "alias 为空字符串"（语义错误）
+    // - MD: "" = "删除 data-alias 属性 / 写 _ 占位", undefined = "不更新"
+    // 所以：DB 用 rawAlias || undefined，MD 用 rawAlias || ""
+    let aliasForMD: string | undefined; // 传给 updateMarkTag/updateBlockAnchor/updateSpanAnchor
+    {
+      const rawAlias = this.aliasValue.trim().replace(/[<>]/g, '').slice(0, 50);
+      if (rawAlias.length > 0 || this.annotation.alias) {
+        updates.alias = rawAlias || undefined; // DB: undefined 表示删除
+        aliasForMD = rawAlias; // MD: "" 表示删除 data-alias/写 _ 占位
+      }
+    }
+
     console.log(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
 
     // 🔧 P0 修复：捕获原始值用于 MD 失败时回滚
@@ -592,6 +692,7 @@ export class AnnotationModal extends Modal {
     const originalColor = this.annotation.color;
     const originalType = this.annotation.type;
     const originalFields = this.annotation.fields ? { ...this.annotation.fields } : undefined;
+    const originalAlias = this.annotation.alias; // v5.3
 
     // ① 更新 AnnotationStore（先写 Store，再写 Markdown）
     await updateAnnotation(this.annotation.uuid, updates);
@@ -616,6 +717,7 @@ export class AnnotationModal extends Modal {
           note: this.noteValue,
           color: updates.color,
           type: updates.type,
+          alias: aliasForMD, // F5: "" 表示删除锚点 alias 段
         });
       } else if (this.annotation.kind === 'block') {
         // 块级标注：更新 %%markvault:...%% 锚点
@@ -623,9 +725,11 @@ export class AnnotationModal extends Modal {
           note: this.noteValue,
           color: updates.color,
           type: updates.type,
+          alias: aliasForMD, // F5: "" 表示删除锚点 alias 段
         });
       } else if (this.annotation.kind === 'region') {
         // 区域标注：双锚点包围
+        // alias 仅存 DB（region 锚点格式不含 alias 段），不写入 Markdown
         newContent = updateRegionAnnotation(content, this.annotation.uuid, {
           color: updates.color,
           type: updates.type,
@@ -633,7 +737,7 @@ export class AnnotationModal extends Modal {
         }) ?? content;
       } else if (this.annotation.format === 'native') {
         // 自然语法标注：隐身锚点 + 原生 Markdown 包裹
-        // note/tags/fields 只存在 Store 中，锚点只保存 uuid/type/color
+        // note/tags/fields/alias 只存在 Store 中，锚点只保存 uuid/type/color
         newContent = updateNativeAnnotation(content, this.annotation.uuid, {
           color: updates.color,
           type: updates.type,
@@ -646,6 +750,7 @@ export class AnnotationModal extends Modal {
           color: updates.color,
           type: updates.type,
           fields: Object.keys(filteredFields).length > 0 ? encodeFields(filteredFields) : '',
+          alias: aliasForMD, // F5: "" 表示删除 data-alias 属性
         });
       }
 
@@ -664,6 +769,7 @@ export class AnnotationModal extends Modal {
             color: originalColor,
             type: originalType,
             fields: originalFields,
+            alias: originalAlias, // v5.3
           });
           // 恢复内存中的 annotation 引用
           this.annotation.note = originalNote;
@@ -671,6 +777,7 @@ export class AnnotationModal extends Modal {
           this.annotation.color = originalColor;
           this.annotation.type = originalType;
           this.annotation.fields = originalFields;
+          this.annotation.alias = originalAlias; // v5.3
           throw mdErr; // 重新抛出，让外部感知
         } finally {
           this.plugin.modifyGuard.release(this.annotation.filePath);
@@ -688,6 +795,7 @@ export class AnnotationModal extends Modal {
     if (updates.fields !== undefined) this.annotation.fields = updates.fields;
     if (updates.groups !== undefined) this.annotation.groups = updates.groups;
     if (hasFlags) this.annotation.flags = { ...this.flagsValue };
+    if (updates.alias !== undefined) this.annotation.alias = updates.alias;
 
     // 🔧 P1 修复：标记文件已同步，避免 onFileOpen 触发无意义的全量 sync
     this.plugin.markFileSynced(this.annotation.filePath);

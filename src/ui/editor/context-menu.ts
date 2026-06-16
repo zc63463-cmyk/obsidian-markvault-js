@@ -1,8 +1,9 @@
 import { Editor, MarkdownView, Menu, Notice, TFile } from 'obsidian';
 import type MarkVaultPlugin from '../../main';
-import type { AnnotationType, PresetColorId, Annotation, SpanRange } from '../../types/annotation';
+import type { AnnotationType, PresetColorId, Annotation, SpanRange, AnnotationTemplate } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
-import { addAnnotation, getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
+import { getAnnotationByUuid, updateAnnotation, cleanOrphanAnnotations } from '../../db/annotation-repo';
+import { annotationStore } from '../../db/annotation-store';
 import { buildMarkTag, buildBlockAnchorStart, buildBlockAnchorEnd, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { buildNativeAnnotation } from '../../core/native-annotation';
 import { buildRegionAnchor } from '../../core/region-annotation';
@@ -12,6 +13,7 @@ import { extractContext } from '../../utils/context';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from '../../core/md-context';
 import { encodeFields, applyTemplate } from '../../utils/fields';
 import { AnnotationModal } from './annotation-modal';
+import { buildAnnotation, finalizeAnnotation } from '../../core/annotation-creator';
 
 /**
  * 右键菜单：选中文本后右键显示标注选项
@@ -110,6 +112,26 @@ export function registerContextMenu(plugin: MarkVaultPlugin): void {
             await createAnnotationWithNote(plugin, editor, view);
           });
       });
+
+      // 🆕 v4.1: 标注模板快捷入口（显示前 5 个模板）
+      const templates = plugin.settings.annotationTemplates;
+      if (templates && templates.length > 0) {
+        menu.addSeparator();
+        menu.addItem((item) => {
+          item.setTitle('   ── Templates ──')
+            .setDisabled(true);
+        });
+        for (const tpl of templates.slice(0, 5)) {
+          menu.addItem((item) => {
+            const icon = tpl.icon || '⚡';
+            const hotkeyHint = tpl.hotkey ? ` (${tpl.hotkey})` : '';
+            item.setTitle(`   ${icon} ${tpl.name}${hotkeyHint}`)
+              .onClick(async () => {
+                await createAnnotationFromTemplate(plugin, editor, view, tpl);
+              });
+          });
+        }
+      }
 
       // 🆕 Phase 3: Annotate with field（仅当有默认模板时显示）
       if (plugin.settings.defaultTemplateId) {
@@ -267,6 +289,52 @@ export async function createAnnotationWithNote(
 }
 
 /**
+ * v4.1: 根据标注模板创建标注
+ *
+ * 模板预设了 type + color + motivation + fields + tags，
+ * 一键创建常用标注类型，大幅减少重复操作。
+ */
+export async function createAnnotationFromTemplate(
+  plugin: MarkVaultPlugin,
+  editor: Editor,
+  view: MarkdownView,
+  template: AnnotationTemplate,
+): Promise<Annotation | null> {
+  // 1. 使用模板的 type 和 color 创建基础标注
+  const annotation = await createAnnotation(plugin, editor, view, template.type, template.color);
+  if (!annotation) return null;
+
+  // 2. 应用模板的 motivation（覆盖自动推断的值）
+  const updates: Partial<Annotation> = {};
+  if (template.motivation) {
+    annotation.motivation = template.motivation;
+    updates.motivation = template.motivation;
+  }
+
+  // 3. 应用模板的 fields
+  if (template.fields && Object.keys(template.fields).length > 0) {
+    annotation.fields = { ...template.fields };
+    updates.fields = annotation.fields;
+  }
+
+  // 4. 应用模板的 tags
+  if (template.tags && template.tags.length > 0) {
+    annotation.tags = [...template.tags];
+    updates.tags = annotation.tags;
+  }
+
+  // 5. 持久化模板覆盖的值
+  if (Object.keys(updates).length > 0) {
+    await updateAnnotation(annotation.uuid, updates);
+  }
+
+  // 6. 刷新侧边栏
+  await plugin.refreshSidebar();
+
+  return annotation;
+}
+
+/**
  * 创建标注：双写 Markdown + AnnotationStore
  *
  * 🆕 v2.0 智能路由：
@@ -332,25 +400,21 @@ async function createSimpleAnnotation(
   // 提取上下文
   const { contextBefore, contextAfter } = extractContext(editor, from, to, plugin.settings.contextWindowSize);
 
-  // 构建 Annotation 对象
-  const annotation: Annotation = {
+  // 构建 Annotation 对象 — 使用统一创建服务
+  const annotation = buildAnnotation({
     uuid,
     filePath,
     type,
     color,
     text: selection,
-    note: '',
-    tags: [],
+    kind: 'inline',
     startOffset,
     endOffset,
     startLine: from.line,
     contextBefore,
     contextAfter,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    kind: 'inline',
     format: (plugin.settings.useNativeSyntax || type === 'bold' || type === 'highlight' || type === 'underline') ? 'native' : 'mark',
-  };
+  });
 
   plugin.modifyGuard.acquire(filePath);
 
@@ -367,9 +431,13 @@ async function createSimpleAnnotation(
       console.log(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
     }
 
-    await addAnnotation(annotation);
-    plugin.markFileSynced(filePath);
-    await plugin.refreshSidebar();
+    // 统一持久化：Store 写入 + 缓存刷新 + 侧边栏
+    await finalizeAnnotation(annotation, {
+      updateSpanCache: (fp) => plugin.updateSpanCache(fp),
+      updateRegionCache: (fp) => plugin.updateRegionCache(fp),
+      markFileSynced: (fp) => plugin.markFileSynced(fp),
+      refreshSidebar: () => plugin.refreshSidebar(),
+    });
   } finally {
     plugin.modifyGuard.release(filePath);
   }
@@ -441,26 +509,22 @@ async function createSpanAnnotation(
   // 提取上下文
   const { contextBefore, contextAfter } = extractContext(editor, from, to, plugin.settings.contextWindowSize);
 
-  const annotation: Annotation = {
+  const annotation = buildAnnotation({
     uuid,
     filePath,
     type,
     color,
-    text: selection,              // 完整选区文本（含特殊内容）
-    note: '',
-    tags: [],
+    text: selection,
+    kind: 'span',
     startOffset: anchorOffset,
-    endOffset: anchorOffset,     // span 标注的 endOffset 不重要，由 spanRanges 决定
-    startLine: anchorLine + 1,   // 跳转到内容起始行（锚点行不可见，+1 跳到实际内容）
+    endOffset: anchorOffset,
+    startLine: anchorLine + 1,
     contextBefore,
     contextAfter,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    kind: 'span',
     anchorLine,
     spanRanges,
     targetHash: computeSpanSignature(selection),
-  };
+  });
 
   plugin.modifyGuard.acquire(filePath);
 
@@ -477,13 +541,13 @@ async function createSpanAnnotation(
 
     console.log(`MarkVault: created span annotation ${uuid} with ${spanRanges.length} ranges in ${filePath}`);
 
-    await addAnnotation(annotation);
-
-    // 更新 span 缓存供 CM6 装饰使用
-    plugin.updateSpanCache(filePath);
-    plugin.markFileSynced(filePath);
-
-    await plugin.refreshSidebar();
+    // 统一持久化
+    await finalizeAnnotation(annotation, {
+      updateSpanCache: (fp) => plugin.updateSpanCache(fp),
+      updateRegionCache: (fp) => plugin.updateRegionCache(fp),
+      markFileSynced: (fp) => plugin.markFileSynced(fp),
+      refreshSidebar: () => plugin.refreshSidebar(),
+    });
   } finally {
     plugin.modifyGuard.release(filePath);
   }
@@ -534,25 +598,21 @@ async function createRegionAnnotation(
 
   const { contextBefore, contextAfter } = extractContext(editor, from, to, plugin.settings.contextWindowSize);
 
-  const annotation: Annotation = {
+  const annotation = buildAnnotation({
     uuid,
     filePath,
     type,
     color,
     text: selection,
-    note: '',
-    tags: [],
+    kind: 'region',
     startOffset,
     endOffset: startOffset + replacement.length,
     startLine: from.line,
     endLine: to.line,
     contextBefore,
     contextAfter,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    kind: 'region',
     targetHash: computeSpanSignature(selection),
-  };
+  });
 
   // 🔧 BUG-5.1 修复：在 replaceSelection 前预填充 region 缓存
   // editor.replaceSelection() 同步触发 CM6 docChanged → layer markers() 读取缓存
@@ -577,10 +637,13 @@ async function createRegionAnnotation(
 
     console.log(`MarkVault: created region annotation ${uuid} in ${filePath}`);
 
-    await addAnnotation(annotation);
-    plugin.markFileSynced(filePath);
-    await plugin.updateRegionCache(filePath);
-    await plugin.refreshSidebar();
+    // 统一持久化
+    await finalizeAnnotation(annotation, {
+      updateSpanCache: (fp) => plugin.updateSpanCache(fp),
+      updateRegionCache: (fp) => plugin.updateRegionCache(fp),
+      markFileSynced: (fp) => plugin.markFileSynced(fp),
+      refreshSidebar: () => plugin.refreshSidebar(),
+    });
   } finally {
     plugin.modifyGuard.release(filePath);
   }
@@ -723,28 +786,24 @@ async function createBlockAnnotation(
   const startAnchorWithNewline = startAnchorPrefix + startAnchor + '\n';
   const endAnchorWithNewline = endAnchorPrefix + endAnchor + '\n';
 
-  const annotation: Annotation = {
+  const annotation = buildAnnotation({
     uuid,
     filePath,
     type,
     color,
     text: blockInfo.content,
-    note: '',
-    tags: [],
+    kind: 'block',
     startOffset: anchorOffset,
     endOffset: anchorOffset + startAnchorWithNewline.length + blockInfo.content.length + 1 + endAnchorWithNewline.length,
     startLine: anchorLine,
-    endLine: blockInfo.endLine + 2, // start + end 两个锚点使原块向下移动两行
+    endLine: blockInfo.endLine + 2,
     contextBefore: '',
     contextAfter: '',
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    kind: 'block',
     blockType: blockInfo.type,
-    targetLine: anchorLine + 1, // start 锚点下一行是目标块
+    targetLine: anchorLine + 1,
     anchorLine,
     targetHash: computeSignature(blockInfo.content),
-  };
+  });
 
   // 🔧 BUG-5.3 修复：在 replaceRange 前预填充 block 缓存
   // editor.replaceRange() 同步触发 CM6 docChanged → decoration plugin 读取缓存
@@ -762,12 +821,13 @@ async function createBlockAnnotation(
 
     console.log(`MarkVault: created block annotation ${uuid} for ${blockInfo.type} at line ${anchorLine}`);
 
-    await addAnnotation(annotation);
-    plugin.markFileSynced(filePath);
-    // 🔧 BUG-5.3 修复：创建后刷新 span/block 缓存，确保 CM6 装饰器正确渲染
-    await plugin.updateSpanCache(filePath);
-    await plugin.updateRegionCache(filePath);
-    await plugin.refreshSidebar();
+    // 统一持久化
+    await finalizeAnnotation(annotation, {
+      updateSpanCache: (fp) => plugin.updateSpanCache(fp),
+      updateRegionCache: (fp) => plugin.updateRegionCache(fp),
+      markFileSynced: (fp) => plugin.markFileSynced(fp),
+      refreshSidebar: () => plugin.refreshSidebar(),
+    });
   } finally {
     plugin.modifyGuard.release(filePath);
   }
@@ -901,6 +961,141 @@ export function registerCommands(plugin: MarkVaultPlugin): void {
       const cleaned = await cleanOrphanAnnotations(plugin.app);
       await plugin.refreshSidebar();
       new Notice(`MarkVault: cleaned ${cleaned} orphan annotations`, 4000);
+    },
+  });
+
+  // 🆕 v4.1: 标注模板命令（每个模板注册一个独立命令，可绑定快捷键）
+  for (const tpl of plugin.settings.annotationTemplates) {
+    plugin.addCommand({
+      id: `annotate-template-${tpl.id}`,
+      name: `Template: ${tpl.name}`,
+      icon: 'zap',
+      editorCallback: async (editor: Editor, view: MarkdownView) => {
+        await createAnnotationFromTemplate(plugin, editor, view, tpl);
+      },
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // v5.0: W3C 导入/导出命令
+  // ═══════════════════════════════════════════════════════
+
+  // 导出全部标注为 W3C JSON
+  plugin.addCommand({
+    id: 'markvault-export-w3c',
+    name: 'Export all annotations (W3C format)',
+    icon: 'file-json',
+    callback: async () => {
+      if (!plugin.isStoreReady()) {
+        new Notice('MarkVault: annotation database not initialized', 5000);
+        return;
+      }
+      try {
+        const { exportToW3CString } = await import('../../export/w3c-export');
+        const jsonStr = exportToW3CString(annotationStore, {}, true);
+        const blob = new Blob([jsonStr], { type: 'application/ld+json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `markvault-w3c-export-${new Date().toISOString().slice(0, 10)}.jsonld`;
+        a.click();
+        URL.revokeObjectURL(url);
+        new Notice('MarkVault: exported all annotations in W3C format', 3000);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        new Notice(`MarkVault: W3C export failed — ${msg}`, 5000);
+      }
+    },
+  });
+
+  // 导出当前文件标注为 W3C JSON
+  plugin.addCommand({
+    id: 'markvault-export-w3c-file',
+    name: 'Export current file annotations (W3C format)',
+    icon: 'file-json',
+    editorCallback: async (_editor: Editor, view: MarkdownView) => {
+      if (!plugin.isStoreReady() || !view.file) {
+        new Notice('MarkVault: no active file or database not initialized', 5000);
+        return;
+      }
+      try {
+        const { exportFileToW3C } = await import('../../export/w3c-export');
+        const collection = exportFileToW3C(annotationStore, view.file.path);
+        const jsonStr = JSON.stringify(collection, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/ld+json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `markvault-w3c-${view.file.basename}-${new Date().toISOString().slice(0, 10)}.jsonld`;
+        a.click();
+        URL.revokeObjectURL(url);
+        const count = collection.total ?? 0;
+        new Notice(`MarkVault: exported ${count} annotations in W3C format`, 3000);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        new Notice(`MarkVault: W3C export failed — ${msg}`, 5000);
+      }
+    },
+  });
+
+  // 从 W3C JSON 文件导入标注
+  plugin.addCommand({
+    id: 'markvault-import-w3c',
+    name: 'Import annotations from W3C JSON file',
+    icon: 'upload',
+    callback: async () => {
+      if (!plugin.isStoreReady()) {
+        new Notice('MarkVault: annotation database not initialized', 5000);
+        return;
+      }
+      try {
+        // 使用 Obsidian 的文件选择器
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,.jsonld';
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          try {
+            const text = await file.text();
+            const { importFromW3CString } = await import('../../export/w3c-import');
+            const result = await importFromW3CString(annotationStore, text, {
+              uuidConflict: 'regenerate',
+            });
+            const parts = [
+              result.imported > 0 ? `${result.imported} imported` : '',
+              result.skipped > 0 ? `${result.skipped} skipped (UUID conflict)` : '',
+              result.errors > 0 ? `${result.errors} errors` : '',
+            ].filter(Boolean);
+            const msg = parts.length > 0 ? parts.join(', ') : 'no annotations found';
+            new Notice(`MarkVault: W3C import — ${msg}`, 5000);
+
+            if (result.imported > 0) {
+              await plugin.refreshSidebar();
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            new Notice(`MarkVault: W3C import failed — ${msg}`, 5000);
+          }
+        };
+        input.click();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        new Notice(`MarkVault: W3C import failed — ${msg}`, 5000);
+      }
+    },
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // v5.2: 关系图谱命令
+  // ═══════════════════════════════════════════════════════
+
+  plugin.addCommand({
+    id: 'markvault-relation-graph',
+    name: 'Open Relation Graph',
+    icon: 'git-branch',
+    callback: () => {
+      plugin.activateGraphView();
     },
   });
 }
