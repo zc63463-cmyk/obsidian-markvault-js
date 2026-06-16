@@ -7,6 +7,16 @@ import { computeBlockSignature, computeSpanSignature, detectBlockTypeAtLine } fr
 import { parseNativeAnnotations } from './native-annotation';
 import { parseRegionAnnotations } from './region-annotation';
 
+// 🔧 Phase G-2: 延迟导入 FormatRegistry 避免循环依赖
+let _formatRegistry: import('../format/format-registry').FormatRegistry | null = null; /** 注入 FormatRegistry（由 plugin 初始化时调用） */
+export function injectFormatRegistry(registry: import('../format/format-registry').FormatRegistry): void {
+  _formatRegistry = registry;
+}
+/** 获取已注入的 FormatRegistry（用于解析器内部） */
+export function getFormatRegistry(): import('../format/format-registry').FormatRegistry | null {
+  return _formatRegistry;
+}
+
 const MARK_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_REGEX = /\b([\w-]+)="([^"]*)"/g;
 
@@ -957,8 +967,12 @@ export function parseAllAnnotationsFromMarkdown(
   content: string,
   filePath: string,
 ): Array<Annotation & { _source: 'markdown'; _needsUpgrade?: boolean }> {
-  // 🔧 P2-6 修复：每个子解析器独立 try-catch，防止单个 <mark> 异常导致全部格式解析失败
+  // 🔧 Phase G-2: FormatRegistry 注入后使用统一解析入口
+  if (_formatRegistry) {
+    return _formatRegistry.parseAll(content, filePath);
+  }
 
+  // 🔧 P2-6 修复：回退路径 — 每个子解析器独立 try-catch
   // 1. 行内 <mark> 标注
   let inlineAnnotations: Array<Annotation & { _source: 'markdown'; _needsUpgrade?: boolean }> = [];
   try {

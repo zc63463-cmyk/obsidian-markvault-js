@@ -22,13 +22,16 @@ export interface ParsedAnnotation extends Annotation {
 
 /**
  * 格式更新操作的变更描述
+ *
+ * fields 联合类型：mark 格式使用 encodeFields() 生成的 base64 字符串，
+ * 其他格式使用原始 Record<string, string>。
  */
 export interface FormatUpdates {
   type?: AnnotationType;
   color?: string;
   note?: string;
   tags?: string[];
-  fields?: Record<string, string>;
+  fields?: string | Record<string, string>;
   alias?: string;
 }
 

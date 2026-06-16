@@ -11,6 +11,9 @@ import { MARKVAULT_GRAPH_VIEW_TYPE, RelationGraphView } from './ui/graph/Relatio
 import { registerContextMenu, registerCommands, getBlockAnchorPrefixesForListItem, adjustRegionStartOffsetForListItem, adjustRegionEndOffsetForListItem } from './ui/editor/context-menu';
 import { MarkVaultSettingTab } from './ui/settings/settings-tab';
 import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from './core/markdown-sync';
+import { injectFormatRegistry } from './core/annotation-parser';
+import { formatRegistry } from './format/format-registry';
+import { initFormatRegistry } from './format/format-setup';
 import {
   computeBlockSignature,
   computeSpanSignature,
@@ -191,6 +194,10 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     (this as any).readingProcessor = new ReadingModeProcessor(this);
 
     console.log('MarkVault: loading plugin...');
+
+    // ── Phase G-2: 初始化 FormatRegistry 并注入到解析器 ──
+    initFormatRegistry();
+    injectFormatRegistry(formatRegistry);
 
     // ── 设置加载（最先执行，后续功能依赖设置） ──────────
     try {

@@ -26,7 +26,14 @@ export class MarkFormat implements AnnotationFormat {
   }
 
   update(content: string, uuid: string, changes: FormatUpdates): string | null {
-    return updateMarkTag(content, uuid, changes as any);
+    return updateMarkTag(content, uuid, {
+      note: changes.note,
+      tags: changes.tags,
+      color: changes.color,
+      type: changes.type,
+      alias: changes.alias,
+      fields: typeof changes.fields === 'string' ? changes.fields : undefined,
+    });
   }
 
   remove(content: string, uuid: string): string | null {

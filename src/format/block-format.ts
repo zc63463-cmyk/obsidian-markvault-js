@@ -25,33 +25,45 @@ export class BlockFormat implements AnnotationFormat {
     // 单锚点
     const singleAnchors = parseBlockAnchors(content);
     for (const anchor of singleAnchors) {
+      const lines = content.split('\n');
+      const blockContent = lines[anchor.anchorLine]?.trim() || '';
       results.push({
-        ...anchor as any,
+        uuid: anchor.uuid,
         filePath,
+        type: anchor.type,
+        color: anchor.color,
+        text: blockContent,
+        note: anchor.note,
         tags: [],
         startOffset: anchor.anchorOffset,
         endOffset: anchor.anchorOffset,
+        startLine: anchor.anchorLine,
         contextBefore: '',
         contextAfter: '',
         createdAt: 0,
         updatedAt: 0,
+        kind: anchor.anchorKind === 'span' ? 'span' as const : 'block' as const,
+        anchorLine: anchor.anchorLine,
+        alias: anchor.alias,
         _source: 'markdown' as const,
       });
     }
 
-    // 双锚点
-    // Note: parseBlockDoubleAnchors + pairing logic is in parseAllAnnotationsFromMarkdown
-    // For now, delegate to the full pipeline via the existing parser.
-    // The double-anchor pairing logic will be extracted in a future refactoring step.
+    // 双锚点：委托给 parseAllAnnotationsFromMarkdown 的完整逻辑
     return results;
   }
 
-  build(annotation: Annotation): string {
-    return buildBlockAnchor(annotation as any);
+  build(annotation: Pick<Annotation, 'uuid' | 'type' | 'color' | 'note' | 'alias'>): string {
+    return buildBlockAnchor(annotation as Parameters<typeof buildBlockAnchor>[0]);
   }
 
   update(content: string, uuid: string, changes: FormatUpdates): string | null {
-    return updateBlockAnchor(content, uuid, changes as any);
+    return updateBlockAnchor(content, uuid, {
+      type: changes.type,
+      color: changes.color,
+      note: changes.note,
+      alias: changes.alias,
+    });
   }
 
   remove(content: string, uuid: string): string | null {
