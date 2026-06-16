@@ -405,13 +405,16 @@ function deduplicateLinks(links: GraphLink[]): void {
 }
 
 /**
- * 计算双向边的 curvature，避免重叠。
+ * 计算多条边的 curvature，避免重叠。
  *
- * 如果 A→B 和 B→A 同时存在，两条边都需要弯曲以避免视觉重叠：
- * - A→B curvature = 0.2（向上弯）
- * - B→A curvature = 0.2（向上弯，与 A→B 形成对称弧）
+ * 如果 A→B 和 B→A 同时存在（双向），两条边都需要弯曲以避免视觉重叠：
+ * - A→B curvature = +0.15（向上弯）
+ * - B→A curvature = -0.15（向下弯，与 A→B 形成对称弧）
  *
- * 如果只有单向边，curvature = 0（直线）。
+ * 如果 A→B 存在多条同向但不同类型的关系（如 references + applies），
+ * 也应分配递增 curvature 以避免重叠。
+ *
+ * 如果只有一条单向边，curvature = 0（直线）。
  */
 function computeCurvature(links: GraphLink[]): void {
   // 构建 (source, target) → [links] 映射
@@ -427,7 +430,7 @@ function computeCurvature(links: GraphLink[]): void {
     pairLinks.push(link);
   }
 
-  // 对双向边对设置 curvature
+  // 对同对节点间多条边设置 curvature（双向或同向多类型）
   for (const [, pairLinks] of pairMap) {
     if (pairLinks.length <= 1) continue;
 
@@ -446,14 +449,26 @@ function computeCurvature(links: GraphLink[]): void {
       }
     }
 
-    // 如果存在双向边，给所有边设置 curvature
+    // 🔧 BUG-11 修复：同对节点间多条边（不论方向）都应分配 curvature，避免视觉重叠
+    const curvatureStep = 0.15;
+
     if (forward.length > 0 && reverse.length > 0) {
-      const curvatureStep = 0.15;
+      // 双向边：forward 向上弯，reverse 向下弯（对称弧）
       for (let i = 0; i < forward.length; i++) {
         forward[i].curvature = curvatureStep + i * 0.1;
       }
       for (let i = 0; i < reverse.length; i++) {
-        reverse[i].curvature = curvatureStep + i * 0.1;
+        reverse[i].curvature = -(curvatureStep + i * 0.1);
+      }
+    } else if (forward.length > 1) {
+      // 仅 forward 方向有多条边（同向多类型关系，如 references + applies）
+      for (let i = 0; i < forward.length; i++) {
+        forward[i].curvature = curvatureStep + i * 0.1;
+      }
+    } else if (reverse.length > 1) {
+      // 仅 reverse 方向有多条边
+      for (let i = 0; i < reverse.length; i++) {
+        reverse[i].curvature = -(curvatureStep + i * 0.1);
       }
     }
   }

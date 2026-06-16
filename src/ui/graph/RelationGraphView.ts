@@ -160,9 +160,15 @@ export class RelationGraphView extends ItemView {
       cls: 'markvault-graph-search-input',
       attr: { placeholder: 'Search label/alias...', value: this.filter.searchQuery },
     });
+    // 搜索框 — 300ms debounce 防止每次按键都遍历所有节点
+    let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
     searchInput.addEventListener('input', () => {
-      this.filter.searchQuery = searchInput.value.trim();
-      this.applySearchHighlight();
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        this.filter.searchQuery = searchInput.value.trim();
+        this.applySearchHighlight();
+        searchDebounceTimer = null;
+      }, 300);
     });
 
     // 操作按钮
