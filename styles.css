@@ -2051,6 +2051,76 @@
   font-weight: 500;
 }
 
+/* ── v5.12: 关系选择器 语义分组 dot+label 芯片布局 ── */
+.markvault-relation-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.markvault-relation-picker-group-header {
+  font-size: 9.5px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 2px;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.markvault-relation-picker-group-divider {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  background: var(--background-modifier-border, rgba(128,128,128,0.18));
+  margin: 0 2px;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.markvault-relation-picker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.markvault-relation-picker-chip:hover {
+  border-color: var(--interactive-accent);
+}
+
+.markvault-relation-picker-chip.active {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+.markvault-relation-picker-chip.active .markvault-relation-picker-chip-label {
+  color: white;
+  font-weight: 500;
+}
+
+.markvault-relation-picker-chip-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.markvault-relation-picker-chip-label {
+  font-size: 0.78em;
+  color: var(--text-normal);
+  line-height: 1;
+}
+
 /* 结果行升级 — 双行信息 */
 .markvault-picker-row-top {
   display: flex;

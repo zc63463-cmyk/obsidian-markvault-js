@@ -21,6 +21,16 @@ import type { SearchResult } from '../../search/types';
 import { getGroupNames, getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 
+/** v5.12: 语义分组 — 关系类型芯片按维度归类，与图谱工具栏一致 */
+const SEMANTIC_GROUPS: { label: string; types: string[] }[] = [
+  { label: 'Taxonomic',     types: ['generalizes', 'specializes', 'part-of'] },
+  { label: 'Argumentative', types: ['proves', 'refutes', 'contrasts'] },
+  { label: 'Expositive',    types: ['elaborates', 'exemplifies', 'illustrates'] },
+  { label: 'Referential',   types: ['references', 'applies'] },
+  { label: 'Dynamic',       types: ['enables', 'causes', 'precedes'] },
+  { label: 'Structural',    types: ['associates', 'supplements'] },
+];
+
 /** RelationPicker 的回调参数 */
 export interface RelationPickResult {
   targetUuid: string;
@@ -270,29 +280,50 @@ export class RelationPickerModal extends Modal {
     const activeFiltersEl = contentEl.createDiv({ cls: 'markvault-relation-picker-active-filters' });
     activeFiltersEl.id = 'markvault-active-filters';
 
-    // ── 关系类型选择器 ──
+    // ── 关系类型选择器 v5.12: 语义分组 dot+label 芯片 ──
     const relationSection = contentEl.createDiv({ cls: 'markvault-relation-picker-relation-section' });
     relationSection.createSpan({ cls: 'markvault-relation-picker-relation-label', text: 'Relation type:' });
 
-    const relationBtns = relationSection.createDiv({ cls: 'markvault-relation-type-btns' });
-    for (const type of this.schema.getActiveTypes()) {
-      const label = this.schema.getLabel(type);
-      const config = this.schema.getConfig(type);
-      const btn = relationBtns.createEl('button', {
-        text: label,
-        cls: `markvault-relation-type-btn ${this.selectedType === type ? 'active' : ''}`,
-        attr: { title: `Relation: ${label}` },
-      });
-      if (config?.color) {
-        btn.style.setProperty('--relation-color', config.color);
+    const relationBtns = relationSection.createDiv({ cls: 'markvault-relation-picker-chips' });
+    const activeTypes = this.schema.getActiveTypes();
+    let isFirstGroup = true;
+    for (const group of SEMANTIC_GROUPS) {
+      const groupTypes = group.types.filter(rt => activeTypes.includes(rt));
+      if (groupTypes.length === 0) continue;
+
+      // 组间分隔
+      if (!isFirstGroup) {
+        relationBtns.createSpan({ cls: 'markvault-relation-picker-group-divider' });
       }
-      btn.addEventListener('click', () => {
-        // 取消旧选中
-        relationBtns.querySelectorAll('.markvault-relation-type-btn').forEach(b => b.removeClass('active'));
-        btn.addClass('active');
-        this.selectedType = type;
-        this._updateLinkBtnState();
-      });
+      isFirstGroup = false;
+
+      // 组标题
+      relationBtns.createSpan({ text: group.label, cls: 'markvault-relation-picker-group-header' });
+
+      // 组内芯片
+      for (const type of groupTypes) {
+        const label = this.schema.getLabel(type);
+        const config = this.schema.getConfig(type);
+        const color = config?.color || '#78716C';
+
+        const chip = relationBtns.createEl('span', {
+          cls: `markvault-relation-picker-chip ${this.selectedType === type ? 'active' : ''}`,
+        });
+        chip.createSpan({
+          cls: 'markvault-relation-picker-chip-dot',
+          attr: { style: `background: ${color}` },
+        });
+        chip.createSpan({
+          text: label || type,
+          cls: 'markvault-relation-picker-chip-label',
+        });
+        chip.addEventListener('click', () => {
+          relationBtns.querySelectorAll('.markvault-relation-picker-chip').forEach(c => c.removeClass('active'));
+          chip.addClass('active');
+          this.selectedType = type;
+          this._updateLinkBtnState();
+        });
+      }
     }
 
     // ── 结果列表容器 ──
