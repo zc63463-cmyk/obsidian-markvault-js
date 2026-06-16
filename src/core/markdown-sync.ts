@@ -6,6 +6,9 @@ import { stripNativeAnnotations } from './native-annotation';
 import { batchRecoverOffsets } from './offset-recovery';
 import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation } from '../db/annotation-repo';
 
+/** 设为 true 启用 sync 详细日志（默认关闭以减少日常噪音） */
+const VERBOSE_SYNC = false;
+
 /**
  * Markdown ↔ AnnotationStore 双写同步引擎
  *
@@ -35,14 +38,14 @@ export async function syncFromMarkdown(
   filePath: string,
 ): Promise<{ added: number; removed: number; updated: number; upgraded: number }> {
   const markdownAnnotations = parseAllAnnotationsFromMarkdown(content, filePath);
-  console.log(`MarkVault sync: parsed ${markdownAnnotations.length} annotations (incl. block anchors) from markdown for ${filePath}`);
+  if (VERBOSE_SYNC) console.log(`MarkVault sync: parsed ${markdownAnnotations.length} annotations (incl. block anchors) from markdown for ${filePath}`);
   const dbAnnotations = await getAnnotationsForFile(filePath);
-  console.log(`MarkVault sync: found ${dbAnnotations.length} annotations in DB for ${filePath}`);
+  if (VERBOSE_SYNC) console.log(`MarkVault sync: found ${dbAnnotations.length} annotations in DB for ${filePath}`);
 
   const mdUuids = new Set(markdownAnnotations.map(a => a.uuid));
   const dbUuids = new Set(dbAnnotations.map(a => a.uuid));
 
-  console.log(`MarkVault sync: mdUuids=${mdUuids.size}, dbUuids=${dbUuids.size}`);
+  if (VERBOSE_SYNC) console.log(`MarkVault sync: mdUuids=${mdUuids.size}, dbUuids=${dbUuids.size}`);
 
   let added = 0;
   let removed = 0;
@@ -52,12 +55,8 @@ export async function syncFromMarkdown(
   // 1. Markdown 有但 DB 没有 → 添加到 DB
   const toAdd = markdownAnnotations.filter(a => !dbUuids.has(a.uuid));
   if (toAdd.length > 0) {
-    // 🔧 P0 修复：fullText 计算移到循环外，避免 O(n×content_size)
-    // 🔧 修复：fullText 计算时同时 strip <mark> 标签和 %%markvault%% 锚点行
-    // 防止锚点行碎片混入 contextBefore/contextAfter
-    const fullText = stripNativeAnnotations(content
-      .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-      .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
+    // 🔧 P0-2 修复：使用统一的 stripAllAnchors()，覆盖所有锚点格式
+    const fullText = stripAllAnchors(content);
     for (const ann of toAdd) {
       const startOffset = computeOffsetInPlainContent(content, ann.startOffset);
       const { contextBefore, contextAfter } = extractContextFromContent(fullText, startOffset, ann.text);
@@ -262,10 +261,8 @@ export async function recoverAndSyncOffsets(
   content: string,
   filePath: string,
 ): Promise<number> {
-  // 🔧 修复：plainContent 同时 strip <mark> 标签和 %%markvault%% 锚点行
-  const plainContent = content
-    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, '');
+  // 🔧 P0-2 修复：使用统一的 stripAllAnchors()，覆盖所有锚点格式
+  const plainContent = stripAllAnchors(content);
   const dbAnnotations = await getAnnotationsForFile(filePath);
 
   if (dbAnnotations.length === 0) return 0;
@@ -274,13 +271,22 @@ export async function recoverAndSyncOffsets(
   const validResults = recoveryResults.filter(r => r !== null);
 
   if (validResults.length > 0) {
-    await batchUpdateOffsets(
-      validResults.map(r => ({
-        uuid: r.uuid,
-        startOffset: r.startOffset,
-        endOffset: r.endOffset,
-      })),
-    );
+    // 🔧 P2-2 修复：仅在实际偏移发生变化时才写入，避免每次打开文件都触发 JSON 刷新
+    const changedResults = validResults.filter(r => {
+      const dbAnn = dbAnnotations.find(a => a.uuid === r.uuid);
+      if (!dbAnn) return true; // 新增项（不应该出现在恢复流程中，但防御性处理）
+      return dbAnn.startOffset !== r.startOffset || dbAnn.endOffset !== r.endOffset;
+    });
+
+    if (changedResults.length > 0) {
+      await batchUpdateOffsets(
+        changedResults.map(r => ({
+          uuid: r.uuid,
+          startOffset: r.startOffset,
+          endOffset: r.endOffset,
+        })),
+      );
+    }
   }
 
   return validResults.length;
@@ -289,25 +295,48 @@ export async function recoverAndSyncOffsets(
 // ─── 辅助函数 ──────────────────────────────────────
 
 /**
+ * 从 Markdown 中剥离所有类型的标注锚点/标记，保留纯文本内容。
+ *
+ * 🔧 P0-2 修复：v5.x 版本中各处分别 strip，且遗漏了 Region 和 Block 双锚点。
+ * 现统一为一个入口，确保所有锚点格式都被覆盖：
+ * - <mark> HTML 标签
+ * - %%markvault(-span)?:...%% block/span 单锚点
+ * - %%markvault-block:...%% block 双锚点
+ * - %%markvault-region:...%% region 锚点
+ * - %%mv:i:...%% native 隐身锚点 + HTML 包裹
+ *
+ * 调用顺序敏感：先处理 HTML 标签和双锚点，最后处理 native（keepInternalText=true）。
+ */
+export function stripAllAnchors(content: string): string {
+  let result = content
+    // 1. <mark> HTML 标签 → 保留内部文本
+    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
+    // 2. Block/Span 单锚点行（含 v5.3 alias 段）
+    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^:%]*)?(?::[^%]*)?%%\n?/g, '')
+    // 3. Block 双锚点 (start/end)
+    .replace(/%%markvault-block:[^:%]+:[^:%]+:[^:%]+:(?:start|end):[^%]*%%\n?/g, '')
+    // 4. Region 锚点 (start/end)
+    .replace(/%%markvault-region:[^:%]+:[^:%]+:[^:%]+:(?:start|end):[^%]*%%\n?/g, '');
+  // 5. Native 隐身锚点 + HTML 包裹 → 保留内部文本
+  result = stripNativeAnnotations(result);
+  return result;
+}
+
+/**
+ * 获取用于偏移恢复的纯文本（移除所有标注锚点/标记）
+ */
+export function getPlainTextForOffsetRecovery(markdownContent: string): string {
+  return stripAllAnchors(markdownContent);
+}
+
+/**
  * 计算 <mark> 标注在纯文本内容中的偏移
  * （Markdown 中 <mark> 标签占位，纯文本中不存在）
  */
 function computeOffsetInPlainContent(markdownContent: string, markTagOffset: number): number {
   const beforeMark = markdownContent.substring(0, markTagOffset);
-  // 🔧 修复：移除之前所有 mark 标签 + anchor 锚点行
-  const plainBefore = stripNativeAnnotations(beforeMark
-    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
+  const plainBefore = stripAllAnchors(beforeMark);
   return plainBefore.length;
-}
-
-/**
- * 获取用于偏移恢复的纯文本（移除 <mark> 标签和块级/span 锚点）
- */
-export function getPlainTextForOffsetRecovery(markdownContent: string): string {
-  return stripNativeAnnotations(markdownContent
-    .replace(/<mark[^>]*>([\s\S]*?)<\/mark>/g, '$1')
-    .replace(/%%markvault(-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%\n?/g, ''));
 }
 
 /**

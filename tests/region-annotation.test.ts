@@ -22,7 +22,7 @@ async function runTests() {
 
   await test('buildRegionAnchor generates start/end anchors', () => {
     const start = buildRegionAnchor({ uuid: 'u1', type: 'highlight', color: 'yellow', note: 'note:1' }, 'start');
-    if (!start.includes('markvault-region:u1:highlight:yellow:start:note\\c1')) {
+    if (!start.includes('markvault-region:u1:highlight:yellow:start:note\\21')) {
       throw new Error(`unexpected start anchor: ${start}`);
     }
     const end = buildRegionAnchor({ uuid: 'u1', type: 'highlight', color: 'yellow', note: '' }, 'end');

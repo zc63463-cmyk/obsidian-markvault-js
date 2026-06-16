@@ -70,25 +70,36 @@ function isEscaped(doc: string, pos: number): boolean {
   return backslashes % 2 === 1;
 }
 
-/** 查找新版 <tag class="markvault-native ..." data-uuid="...">...</tag> 包裹 */
+/** 查找新版 <tag class="markvault-native ..." data-uuid="...">...</tag> 包裹
+ *
+ * 🔧 P0-3 修复：v5.x 的 [^<]* 不包含 < 字符，导致标注文本含 < 时定位失败。
+ * 改为两步法：(1) 正则匹配开标签属性 (2) 手动搜索闭标签位置，文本可以包含任意字符。
+ */
 function findNativeHtmlWrapper(
   doc: string,
   pos: number,
   type: AnnotationType,
   tag: string,
 ): { wrapperStart: number; contentStart: number; contentEnd: number; wrapperEnd: number; text: string } | null {
-  const htmlRegex = new RegExp(
-    `^<${tag}\\s+class="markvault-native\\s+markvault-${type}\\s+markvault-([^"\\s]+)(?:\\s+markvault-clickable)?"\\s+data-uuid="([^"]+)"\\s+data-type="${type}"\\s+data-color="([^"]+)">([^<]*)</${tag}>`,
+  // 第1步：匹配开标签（不含文本内容部分，避免 [^<]* 的限制）
+  const openRegex = new RegExp(
+    `^<${tag}\\s+class="markvault-native\\s+markvault-${type}\\s+markvault-([^"\\s]+)(?:\\s+markvault-clickable)?"\\s+data-uuid="([^"]+)"\\s+data-type="${type}"\\s+data-color="([^"]+)">`,
   );
   const slice = doc.substring(pos);
-  const match = slice.match(htmlRegex);
-  if (!match) return null;
+  const openMatch = slice.match(openRegex);
+  if (!openMatch) return null;
 
   const wrapperStart = pos;
-  const contentStart = wrapperStart + match[0].indexOf('>') + 1;
-  const contentEnd = contentStart + match[4].length;
-  const wrapperEnd = wrapperStart + match[0].length;
-  const text = match[4];
+  const contentStart = wrapperStart + openMatch[0].length;
+
+  // 第2步：从 contentStart 开始手动搜索闭标签 </tag>
+  const closeTag = `</${tag}>`;
+  const closeIdx = doc.indexOf(closeTag, contentStart);
+  if (closeIdx === -1) return null;
+
+  const contentEnd = closeIdx;
+  const wrapperEnd = closeIdx + closeTag.length;
+  const text = doc.substring(contentStart, contentEnd);
 
   if (text.length === 0) return null;
   return { wrapperStart, contentStart, contentEnd, wrapperEnd, text };
@@ -213,26 +224,35 @@ export function parseNativeAnnotations(
  * 返回新内容；未找到返回 null
  */
 export function removeNativeAnnotation(content: string, uuid: string): string | null {
-  const regex = new RegExp(`%%mv:i:${escapeRegex(uuid)}:([^:%]+):([^:%]+)%%`, 'g');
+  // 🔧 P1-1 修复：不在 content 上预收集偏移再用于修改后的 result，
+  // 改为每次处理前在当前的 result 中重新定位锚点。
+  let result: string = content;
+  let changed = false;
+  const reRegex = new RegExp(`%%mv:i:${escapeRegex(uuid)}:([^:%]+):([^:%]+)%%`, 'g');
 
-  const matches: { index: number; length: number; type: AnnotationType }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(content)) !== null) {
-    matches.push({ index: m.index, length: m[0].length, type: m[1] as AnnotationType });
+  while (true) {
+    reRegex.lastIndex = 0;
+    // 从后往前搜索：找到该 uuid 在 result 中的最后一个锚点位置
+    let lastMatch: RegExpExecArray | null = null;
+    let rm: RegExpExecArray | null;
+    while ((rm = reRegex.exec(result)) !== null) {
+      lastMatch = rm;
+    }
+
+    if (!lastMatch) break;
+
+    const anchorStart = lastMatch.index;
+    const anchorEnd = anchorStart + lastMatch[0].length;
+    const type = lastMatch[1] as AnnotationType; // 🔧 group 1 = type, not group 2 = color!
+
+    const wrapper = findNativeWrapper(result, anchorEnd, type);
+    if (!wrapper) break;
+
+    result = result.substring(0, anchorStart) + wrapper.text + result.substring(wrapper.wrapperEnd);
+    changed = true;
   }
 
-  if (matches.length === 0) return null;
-
-  // 从后往前处理，避免前面删除后偏移变化
-  let result = content;
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const { index, length, type } = matches[i];
-    const wrapper = findNativeWrapper(result, index + length, type);
-    if (!wrapper) continue;
-    result = result.substring(0, index) + wrapper.text + result.substring(wrapper.wrapperEnd);
-  }
-
-  return result;
+  return changed ? result : null;
 }
 
 /**
@@ -243,29 +263,43 @@ export function updateNativeAnnotation(
   uuid: string,
   updates: { type?: AnnotationType; color?: string },
 ): string | null {
-  const regex = new RegExp(`%%mv:i:${escapeRegex(uuid)}:([^:%]+):([^:%]+)%%`, 'g');
+  // 🔧 P1-2 修复：不在 content 上预收集偏移再用于修改后的 result，
+  // 改为每次处理前在当前的 result 中重新定位锚点。
+  let result: string = content;
+  let changed = false;
+  const reRegex = new RegExp(`%%mv:i:${escapeRegex(uuid)}:([^:%]+):([^:%]+)%%`, 'g');
 
-  const matches: { index: number; length: number; oldType: AnnotationType; oldColor: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(content)) !== null) {
-    matches.push({ index: m.index, length: m[0].length, oldType: m[1] as AnnotationType, oldColor: m[2] });
-  }
+  while (true) {
+    reRegex.lastIndex = 0;
+    let lastMatch: RegExpExecArray | null = null;
+    let rm: RegExpExecArray | null;
+    while ((rm = reRegex.exec(result)) !== null) {
+      lastMatch = rm;
+    }
 
-  if (matches.length === 0) return null;
+    if (!lastMatch) break;
 
-  let result = content;
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const { index, length, oldType, oldColor } = matches[i];
-    const wrapper = findNativeWrapper(result, index + length, oldType);
-    if (!wrapper) continue;
+    const anchorStart = lastMatch.index;
+    const anchorEnd = anchorStart + lastMatch[0].length;
+    const oldType = lastMatch[1] as AnnotationType;
+    const oldColor = lastMatch[2];
+
+    const wrapper = findNativeWrapper(result, anchorEnd, oldType);
+    if (!wrapper) break;
 
     const currentType = updates.type || oldType;
     const currentColor = updates.color || oldColor;
+
+    // 🔧 关键：如果 currentType/currentColor 与锚点中已存的值一致，
+    // 替换后 result 不变 → while(true) 死循环。必须 break。
+    if (currentType === oldType && currentColor === oldColor) break;
+
     const newTag = buildNativeAnnotation({ uuid, type: currentType, color: currentColor, text: wrapper.text });
-    result = result.substring(0, index) + newTag + result.substring(wrapper.wrapperEnd);
+    result = result.substring(0, anchorStart) + newTag + result.substring(wrapper.wrapperEnd);
+    changed = true;
   }
 
-  return result;
+  return changed ? result : null;
 }
 
 /**

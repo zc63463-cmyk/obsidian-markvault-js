@@ -268,8 +268,16 @@ export class AnnotationStore {
     // 移除旧索引
     this.indexLayer.removeFromIndex(uuid);
 
+    // 🔧 P1-5 修复：过滤 changes 中的 undefined 值，防止展开后覆盖已有字段
+    const filteredChanges: Partial<Annotation> = {};
+    for (const [k, v] of Object.entries(changes)) {
+      if (v !== undefined) {
+        (filteredChanges as Record<string, unknown>)[k] = v;
+      }
+    }
+
     // 合并变更
-    const newAnn: Annotation = stripExtraFields({ ...oldAnn, ...changes });
+    const newAnn: Annotation = stripExtraFields({ ...oldAnn, ...filteredChanges });
     this.indexLayer.byUuid.set(uuid, newAnn);
 
     // 处理 filePath 变更
@@ -368,6 +376,9 @@ export class AnnotationStore {
 
   /**
    * 批量更新偏移量。
+   *
+   * 🔧 P1-4 修复：使用不可变对象模式，不再原地修改 Map 中的对象引用。
+   * 改为创建新对象替换 byUuid 中的条目，避免 async 间隙读到部分更新状态。
    */
   async batchUpdateOffsets(updates: BatchUpdateItem[]): Promise<void> {
     this._assertInitialized();
@@ -380,15 +391,18 @@ export class AnnotationStore {
 
       this.indexLayer.removeFromIndex(item.uuid);
 
-      ann.startOffset = item.startOffset;
-      ann.endOffset = item.endOffset;
-      if (item.spanRanges !== undefined) {
-        ann.spanRanges = item.spanRanges;
-      }
+      // 创建新对象，替换 byUuid 中的引用
+      const newAnn: Annotation = {
+        ...ann,
+        startOffset: item.startOffset,
+        endOffset: item.endOffset,
+        ...(item.spanRanges !== undefined ? { spanRanges: item.spanRanges } : {}),
+      };
+      this.indexLayer.byUuid.set(item.uuid, newAnn);
 
-      this.indexLayer.addToIndex(ann);
+      this.indexLayer.addToIndex(newAnn);
 
-      filesAffected.add(ann.filePath);
+      filesAffected.add(newAnn.filePath);
     }
 
     for (const filePath of filesAffected) {

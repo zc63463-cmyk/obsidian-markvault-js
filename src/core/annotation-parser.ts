@@ -280,14 +280,15 @@ export function removeMarkTag(content: string, uuid: string): { content: string;
     'g',
   );
 
-  let text = '';
+  // 🔧 P1-6 修复：收集所有匹配文本（拆分标注场景），而非只保留最后一个
+  const allTexts: string[] = [];
   const newContent = content.replace(regex, (_match, innerText) => {
-    text = innerText;
+    allTexts.push(innerText);
     return innerText;
   });
 
-  if (text === '' && content === newContent) return null;
-  return { content: newContent, text };
+  if (allTexts.length === 0) return null;
+  return { content: newContent, text: allTexts.join('') };
 }
 
 /**
@@ -437,14 +438,27 @@ function escapeRegex(s: string): string {
  * 向后兼容：旧格式 %%markvault:uuid:type:color:note%% 仍可解析（alias 默认为空）
  */
 
-/** 锚点字段中的冒号转义（因为冒号是分隔符） */
+/**
+ * 锚点字段转义 — 在 block/span 单锚点和 span 锚点中使用
+ *
+ * 转义规则：
+ * - `\` → `\0`（先转义转义符，防止后续 \1/\2 与原文混淆）
+ * - `\n` → ` `（锚点不跨行，换行符替换为空格）
+ * - `%` → `\1`（百分号是锚点 %% 终止符）
+ * - `:` → `\2`（冒号是段分隔符）
+ *
+ * 🔧 P0-1 修复：v5.x 版本中此函数不转义 %。
+ * 🔧 P2-4 修复：新增 \n 安全替换。
+ * 🔧 解码安全修复：使用数字后缀 (\0/\1/\2) 替代助记后缀 (\p/\c)，
+ *   避免原文中的字面量 \p/\c 被误解码。
+ */
 function escapeAnchorField(s: string): string {
-  return s.replace(/:/g, '\\c');
+  return s.replace(/\\/g, '\\0').replace(/\n/g, ' ').replace(/%/g, '\\1').replace(/:/g, '\\2');
 }
 
-/** 锚点字段中的冒号反转义 */
+/** 锚点字段反转义（解码顺序必须与编码相反） */
 function decodeAnchorField(s: string): string {
-  return s.replace(/\\c/g, ':');
+  return s.replace(/\\2/g, ':').replace(/\\1/g, '%').replace(/\\0/g, '\\');
 }
 
 /**
@@ -484,14 +498,18 @@ export function buildSpanAnchor(annotation: {
 /** Block 双锚点正则：%%markvault-block:<uuid>:<type>:<color>:<start|end>:<note>%% */
 export const BLOCK_DOUBLE_ANCHOR_REGEX = /%%markvault-block:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%/g;
 
-/** 双锚点 note 字段转义（冒号和百分号都是分隔符/终止符） */
+/** 双锚点 note 字段转义（数字后缀 \0=\ \1=% \2=:）
+ *
+ * 🔧 P2-4 修复：新增 \n → 空格替换。
+ * 🔧 解码安全修复：使用数字后缀避免原文 \p/\c 误解码。
+ */
 function escapeBlockAnchorField(s: string): string {
-  return s.replace(/%/g, '\\p').replace(/:/g, '\\c');
+  return s.replace(/\\/g, '\\0').replace(/\n/g, ' ').replace(/%/g, '\\1').replace(/:/g, '\\2');
 }
 
 /** 双锚点 note 字段反转义 */
 function decodeBlockAnchorField(s: string): string {
-  return s.replace(/\\p/g, '%').replace(/\\c/g, ':');
+  return s.replace(/\\2/g, ':').replace(/\\1/g, '%').replace(/\\0/g, '\\');
 }
 
 /** 生成 Block 双锚点的 start 锚点 */
@@ -744,8 +762,11 @@ export function removeBlockAnchor(content: string, uuid: string): string {
     );
   }
 
-  // 🔧 P1 修复：使用非贪婪匹配，避免 note 中包含 % 时截断
-  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:[\\s\\S]*?%%\\n?`, 'g');
+  // 🔧 P2-7 修复：使用非全局正则 + 手动 match，仅删除第一个匹配项。
+  // 防御数据损坏场景下 uuid 多次出现导致误删所有匹配。
+  const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:[\\s\\S]*?%%\\n?`);
+  const match = content.match(regex);
+  if (!match) return content;
   return content.replace(regex, '');
 }
 
@@ -936,12 +957,21 @@ export function parseAllAnnotationsFromMarkdown(
   content: string,
   filePath: string,
 ): Array<Annotation & { _source: 'markdown'; _needsUpgrade?: boolean }> {
+  // 🔧 P2-6 修复：每个子解析器独立 try-catch，防止单个 <mark> 异常导致全部格式解析失败
+
   // 1. 行内 <mark> 标注
-  const inlineAnnotations = parseAnnotationsFromMarkdown(content, filePath);
+  let inlineAnnotations: Array<Annotation & { _source: 'markdown'; _needsUpgrade?: boolean }> = [];
+  try {
+    inlineAnnotations = parseAnnotationsFromMarkdown(content, filePath);
+  } catch (err) {
+    console.error('MarkVault: inline <mark> parse error', err);
+  }
 
   // 2. 块级/span 锚点标注
   const blockAnchors = parseBlockAnchors(content);
-  const blockAnnotations: Array<Annotation & { _source: 'markdown' }> = blockAnchors.map(anchor => {
+  let blockAnnotations: Array<Annotation & { _source: 'markdown' }> = [];
+  try {
+    blockAnnotations = blockAnchors.map(anchor => {
     // 🔧 修复：跳过锚点行、公式分隔符、代码围栏，找到有意义的内容行
     const lines = content.split('\n');
     const actualTargetLine = findBlockTargetLine(content, anchor.anchorLine);
@@ -993,9 +1023,13 @@ export function parseAllAnnotationsFromMarkdown(
       alias: anchor.alias,  // v5.3: 从锚点解析的 alias
       _source: 'markdown' as const,
     };
-  });
+    });
+  } catch (err) {
+    console.error('MarkVault: block/span anchor parse error', err);
+  }
 
   // 3. Block 双锚点标注
+  try {
   const doubleBlockAnchors = parseBlockDoubleAnchors(content);
   const doubleByUuid = new Map<string, { start?: ParsedBlockDoubleAnchor; end?: ParsedBlockDoubleAnchor }>();
   for (const anchor of doubleBlockAnchors) {
@@ -1042,14 +1076,38 @@ export function parseAllAnnotationsFromMarkdown(
       _source: 'markdown' as const,
     });
   }
+  } catch (err) {
+    console.error('MarkVault: block double-anchor parse error', err);
+  }
 
   // 4. 区域标注（双锚点包围）
-  const regionAnnotations = parseRegionAnnotations(content, filePath);
+  let regionAnnotations: Array<Annotation & { _source: 'markdown' }> = [];
+  try {
+    regionAnnotations = parseRegionAnnotations(content, filePath);
+  } catch (err) {
+    console.error('MarkVault: region annotation parse error', err);
+  }
 
   // 5. 自然语法标注（隐身锚点 + 原生包裹）
-  const nativeAnnotations = parseNativeAnnotations(content, filePath);
+  let nativeAnnotations: Array<Annotation & { _source: 'markdown' }> = [];
+  try {
+    nativeAnnotations = parseNativeAnnotations(content, filePath);
+  } catch (err) {
+    console.error('MarkVault: native annotation parse error', err);
+  }
 
-  return [...inlineAnnotations, ...blockAnnotations, ...regionAnnotations, ...nativeAnnotations];
+  // 🔧 A-2 修复：native 标注的 <mark> wrapper 同时被 inline parser 和 native parser 双重拾取。
+  // native parser 的结果 offset 更准确（从 %%mv:i%% 锚点计算），inline parser 的 offset 从 <mark> 标签计算。
+  // 冲突时优先保留 native parser 的结果。
+  const allAnnotations = [...inlineAnnotations, ...blockAnnotations, ...regionAnnotations, ...nativeAnnotations];
+  const seen = new Map<string, Annotation & { _source: 'markdown'; _needsUpgrade?: boolean }>();
+  for (const ann of allAnnotations) {
+    const existing = seen.get(ann.uuid);
+    if (!existing || (ann.format === 'native' && existing.format !== 'native')) {
+      seen.set(ann.uuid, ann);
+    }
+  }
+  return [...seen.values()];
 }
 
 /**

@@ -33,7 +33,7 @@ async function runTests() {
     const end = buildBlockAnchorEnd({ uuid: id, type: 'highlight', color: 'yellow', note: 'hello:world' });
     if (!start.includes(`%%markvault-block:${id}:highlight:yellow:start:`)) throw new Error('start format mismatch');
     if (!end.includes(`%%markvault-block:${id}:highlight:yellow:end:`)) throw new Error('end format mismatch');
-    if (!start.includes('hello\\cworld')) throw new Error('note colon not escaped');
+    if (!start.includes('hello\\2world')) throw new Error('note colon not escaped');
   });
 
   await test('parseBlockDoubleAnchors groups start/end', () => {
@@ -78,7 +78,8 @@ async function runTests() {
     const removed = removeBlockAnchor(content, id);
     if (removed.includes('markvault:')) throw new Error('old anchor remain');
     const updated = updateBlockAnchor(content, id, { color: 'green' });
-    if (!updated.includes(`%%markvault:${id}:highlight:green:old note%%`)) throw new Error('old anchor not updated');
+    // v5.3: 更新旧格式锚点时自动升级为新格式（含 alias 占位符 _）
+    if (!updated.includes(`%%markvault:${id}:highlight:green:_:old note%%`)) throw new Error('old anchor not updated');
   });
 
   await test('findBlockContentEndLine skips fences and empty lines', () => {

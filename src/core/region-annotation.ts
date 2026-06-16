@@ -23,14 +23,14 @@ import { generateId } from '../utils/id';
  */
 export const REGION_ANCHOR_REGEX = /%%markvault-region:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%/g;
 
-/** 锚点字段中的特殊字符转义（冒号和百分号都是分隔符/终止符） */
+/** 锚点字段中的特殊字符转义（数字后缀 \0=\ \1=% \2=:） */
 function escapeAnchorField(s: string): string {
-  return s.replace(/%/g, '\\p').replace(/:/g, '\\c');
+  return s.replace(/\\/g, '\\0').replace(/\n/g, ' ').replace(/%/g, '\\1').replace(/:/g, '\\2');
 }
 
 /** 锚点字段中的特殊字符反转义 */
 function decodeAnchorField(s: string): string {
-  return s.replace(/\\p/g, '%').replace(/\\c/g, ':');
+  return s.replace(/\\2/g, ':').replace(/\\1/g, '%').replace(/\\0/g, '\\');
 }
 
 /** 正则特殊字符转义 */

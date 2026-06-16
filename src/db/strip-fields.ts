@@ -5,6 +5,7 @@ import type { Annotation } from '../types/annotation';
  * 防止解析器的临时标记被写入分片 JSON。
  */
 export function stripExtraFields(annotation: Annotation): Annotation {
+  // 🔧 P1-3 修复：对数组和对象字段使用浅拷贝，避免 clean 与原始 annotation 共享引用
   const clean: Annotation = {
     uuid: annotation.uuid,
     filePath: annotation.filePath,
@@ -12,7 +13,7 @@ export function stripExtraFields(annotation: Annotation): Annotation {
     color: annotation.color,
     text: annotation.text,
     note: annotation.note,
-    tags: annotation.tags,
+    tags: [...annotation.tags],
     startOffset: annotation.startOffset,
     endOffset: annotation.endOffset,
     startLine: annotation.startLine,
@@ -31,13 +32,13 @@ export function stripExtraFields(annotation: Annotation): Annotation {
   if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges;
   if (annotation.fields !== undefined) {
     if (Object.keys(annotation.fields).length > 0) {
-      clean.fields = annotation.fields;
+      clean.fields = { ...annotation.fields };
     }
   }
   if (annotation.format !== undefined) clean.format = annotation.format;
   if (annotation.targetHash !== undefined) clean.targetHash = annotation.targetHash;
   if (annotation.relations !== undefined && annotation.relations.length > 0) {
-    clean.relations = annotation.relations;
+    clean.relations = [...annotation.relations];
   }
   if (annotation.flags !== undefined) {
     const f = annotation.flags;
@@ -49,7 +50,7 @@ export function stripExtraFields(annotation: Annotation): Annotation {
     }
   }
   if (annotation.groups !== undefined && annotation.groups.length > 0) {
-    clean.groups = annotation.groups;
+    clean.groups = [...annotation.groups];
   }
   if (annotation.motivation !== undefined) {
     clean.motivation = annotation.motivation;
