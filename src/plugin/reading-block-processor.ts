@@ -9,7 +9,6 @@
  */
 
 import { TFile, type MarkdownPostProcessorContext } from 'obsidian';
-import type { AnnotationType } from '../types/annotation';
 import { DEFAULT_SETTINGS } from '../types/annotation';
 import { annotationStore } from '../db/annotation-store';
 import { findBlockTargetLine, findBlockContentEndLine, parseBlockDoubleAnchors, decodeAnchorField, decodeBlockAnchorField } from '../core/annotation-parser';
