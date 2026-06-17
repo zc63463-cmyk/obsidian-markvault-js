@@ -269,15 +269,18 @@
 }
 
 /* Region 编辑模式淡淡背景（只覆盖文本，不覆盖整行） */
+/* 🔧 P1-19 统一：编辑模式 region inline 背景也加左侧竖线，与阅读模式一致 */
 .markvault-region-edit-bg {
   border-radius: 2px;
+  border-left-width: 3px;
+  border-left-style: solid;
 }
 
-.markvault-region-edit-bg.markvault-region-yellow  { background-color: #FACC151A; }
-.markvault-region-edit-bg.markvault-region-green   { background-color: #4ADE801A; }
-.markvault-region-edit-bg.markvault-region-blue    { background-color: #60A5FA1A; }
-.markvault-region-edit-bg.markvault-region-pink    { background-color: #F472B61A; }
-.markvault-region-edit-bg.markvault-region-purple  { background-color: #C084FC1A; }
+.markvault-region-edit-bg.markvault-region-yellow  { background-color: #FACC151A; border-left-color: #FACC15; }
+.markvault-region-edit-bg.markvault-region-green   { background-color: #4ADE801A; border-left-color: #4ADE80; }
+.markvault-region-edit-bg.markvault-region-blue    { background-color: #60A5FA1A; border-left-color: #60A5FA; }
+.markvault-region-edit-bg.markvault-region-pink    { background-color: #F472B61A; border-left-color: #F472B6; }
+.markvault-region-edit-bg.markvault-region-purple  { background-color: #C084FC1A; border-left-color: #C084FC; }
 
 /* Region 编辑模式块级内容标识（代码块/公式块左侧竖线） */
 .markvault-region-block-line {
@@ -2292,6 +2295,37 @@
 .markvault-block-type-badge.markvault-block-badge-color-blue   .markvault-block-type-badge-dot { background-color: #60A5FA; }
 .markvault-block-type-badge.markvault-block-badge-color-pink   .markvault-block-type-badge-dot { background-color: #F472B6; }
 .markvault-block-type-badge.markvault-block-badge-color-purple .markvault-block-type-badge-dot { background-color: #C084FC; }
+
+/* 🔧 P1-18: 编辑模式 block 徽章（行首 inline widget） */
+.markvault-block-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px;
+  font-size: 0.7em;
+  line-height: 1;
+  border-radius: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  opacity: 0.8;
+  cursor: pointer;
+  vertical-align: super;
+  margin-right: 4px;
+}
+.markvault-block-badge-icon {
+  font-size: 0.9em;
+}
+.markvault-block-badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+.markvault-block-badge-yellow .markvault-block-badge-dot { background-color: #FACC15; }
+.markvault-block-badge-green  .markvault-block-badge-dot { background-color: #4ADE80; }
+.markvault-block-badge-blue   .markvault-block-badge-dot { background-color: #60A5FA; }
+.markvault-block-badge-pink   .markvault-block-badge-dot { background-color: #F472B6; }
+.markvault-block-badge-purple .markvault-block-badge-dot { background-color: #C084FC; }
 
 /* Span 标注在阅读模式下的文本片段高亮 */
 .markvault-span-fragment.markvault-highlight.markvault-yellow { background-color: #FACC1566; border-radius: 2px; padding: 1px 0; }

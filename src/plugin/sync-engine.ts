@@ -335,10 +335,29 @@ export class AnnotationSyncEngine {
         const parsedRegions = parseRegionAnnotations(content, filePath);
         const regionByUuid = new Map(parsedRegions.map((r) => [r.uuid, r]));
 
+        // 🔧 P1-2 修复：检测半残 region（只有 start 或只有 end）
+        const regionAnchorMap = new Map<string, { hasStart: boolean; hasEnd: boolean }>();
+        const regionAnchorRegex = /%%markvault-region:([^:%]+):[^:%]+:[^:%]+:(start|end):[^%]*%%/g;
+        let raMatch: RegExpExecArray | null;
+        while ((raMatch = regionAnchorRegex.exec(content)) !== null) {
+          const raUuid = raMatch[1];
+          const raPos = raMatch[2] as 'start' | 'end';
+          const entry = regionAnchorMap.get(raUuid) || { hasStart: false, hasEnd: false };
+          if (raPos === 'start') entry.hasStart = true;
+          else entry.hasEnd = true;
+          regionAnchorMap.set(raUuid, entry);
+        }
+
         for (const ann of regionAnnotations) {
           const parsed = regionByUuid.get(ann.uuid);
           if (!parsed) {
-            failedDetails.push({ uuid: ann.uuid, reason: 'region_anchor_missing' });
+            // 检查是否半残
+            const anchorState = regionAnchorMap.get(ann.uuid);
+            if (anchorState && (anchorState.hasStart || anchorState.hasEnd)) {
+              failedDetails.push({ uuid: ann.uuid, reason: 'region_anchor_pair_incomplete' });
+            } else {
+              failedDetails.push({ uuid: ann.uuid, reason: 'region_anchor_missing' });
+            }
             failed++;
             continue;
           }

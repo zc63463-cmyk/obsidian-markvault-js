@@ -46,36 +46,38 @@ import { parseBlockAnchors, findBlockTargetLine, parseBlockDoubleAnchors } from 
  */
 export const regionCacheUpdatedEffect = StateEffect.define<void>();
 
-/** 当前活跃的 EditorView 引用，由 main.ts 注入 */
-let activeEditorView: EditorView | null = null;
+/** 🔧 P1-22 修复：追踪所有活跃的 EditorView，而非仅一个 */
+const activeEditorViews = new Set<EditorView>();
 
 /** 注入当前活跃的 EditorView（在 main.ts 的 active-leaf-change 中调用） */
 export function setActiveEditorView(view: EditorView | null): void {
-  activeEditorView = view;
+  if (view) {
+    activeEditorViews.add(view);
+  }
+}
+
+/** 🔧 P1-22 修复：移除已销毁的 EditorView（在 onunload 中调用） */
+export function removeEditorView(view: EditorView): void {
+  activeEditorViews.delete(view);
 }
 
 /**
  * 在 region 缓存更新后强制 CM6 layer 重绘。
- * 通过发送 regionCacheUpdatedEffect 触发 layer 的 update() 返回 true。
+ * 🔧 P1-22 修复：向所有活跃的 EditorView 发送 effect，确保多 leaf 场景下都能重绘。
  * 必须在 updateRegionCache() 完成后调用。
  */
 export function requestRegionLayerRedraw(): void {
-  if (activeEditorView) {
+  for (const view of activeEditorViews) {
     try {
-      // 使用 any 访问 destroyed 属性（CM6 内部标记，TypeScript 定义为 private）
-      const view = activeEditorView as any;
-      if (view.destroyed) { activeEditorView = null; return; }
-      // 🔧 BUG-8 修复：检查 state 有效性，防止 dispatch 到已部分销毁的 view
-      // 场景：Obsidian 关闭标签页时 beforeUnload→saveHistory→field() 已拆解，
-      // 但 view.destroyed 尚未设为 true，此时 dispatch 会触发 RangeError
-      if (!activeEditorView.state?.field) { activeEditorView = null; return; }
-      activeEditorView.dispatch({
+      const v = view as any;
+      if (v.destroyed) { activeEditorViews.delete(view); continue; }
+      if (!view.state?.field) { activeEditorViews.delete(view); continue; }
+      view.dispatch({
         effects: [regionCacheUpdatedEffect.of(undefined)],
       });
     } catch (err) {
-      // view 可能已销毁，清除过期引用
       console.debug('MarkVault: regionLayer redraw dispatch failed, view likely destroyed', err);
-      activeEditorView = null;
+      activeEditorViews.delete(view);
     }
   }
 }
@@ -105,6 +107,19 @@ function resolveFilePath(): string | null {
     }
   }
   return null;
+}
+
+// ─── P1-17: 编辑模式点击标注回调 ──────────────────────────
+
+/**
+ * 🔧 P1-17 修复：编辑模式点击标注回调
+ * 由 main.ts 注入，当用户在编辑模式下点击 data-uuid 元素时调用。
+ */
+let annotationClickHandler: ((uuid: string) => void) | null = null;
+
+/** 注入编辑模式点击回调（在 main.ts onload 中调用） */
+export function setAnnotationClickHandler(handler: ((uuid: string) => void) | null): void {
+  annotationClickHandler = handler;
 }
 
 /**
@@ -280,7 +295,8 @@ class MarkOpenWidget extends WidgetType {
   }
 
   ignoreEvent() {
-    return true;
+    // 🔧 P1-17 修复：返回 false 让点击事件冒泡到 DOM 事件处理器
+    return false;
   }
 }
 
@@ -296,7 +312,7 @@ class MarkCloseWidget extends WidgetType {
   }
 
   ignoreEvent() {
-    return true;
+    return false;
   }
 }
 
@@ -313,7 +329,7 @@ class BlockAnchorWidget extends WidgetType {
   }
 
   ignoreEvent() {
-    return true;
+    return false;
   }
 }
 
@@ -329,7 +345,50 @@ class NativeAnchorWidget extends WidgetType {
   }
 
   ignoreEvent() {
-    return true;
+    return false;
+  }
+}
+
+/**
+ * 🔧 P1-18 修复：Block 标注编辑模式徽章
+ * 在编辑模式下给 block 标注的目标行添加类型+颜色徽章，
+ * 与阅读模式的 block-type-badge 保持视觉一致性。
+ */
+class BlockBadgeWidget extends WidgetType {
+  constructor(
+    readonly uuid: string,
+    readonly type: AnnotationType,
+    readonly color: string,
+  ) {
+    super();
+  }
+
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = `markvault-block-badge markvault-block-badge-${this.type} markvault-block-badge-${this.color}`;
+    span.dataset.uuid = this.uuid;
+    span.dataset.kind = 'block';
+
+    const preset = PRESET_COLORS.find(c => c.id === this.color);
+    const hex = preset ? preset.hex : this.color;
+
+    // 类型图标
+    const icon = document.createElement('span');
+    icon.className = 'markvault-block-badge-icon';
+    icon.textContent = this.type === 'bold' ? '𝗕' : this.type === 'underline' ? 'U̲' : '🎨';
+
+    // 颜色点
+    const dot = document.createElement('span');
+    dot.className = 'markvault-block-badge-dot';
+    dot.style.backgroundColor = hex;
+
+    span.appendChild(icon);
+    span.appendChild(dot);
+    return span;
+  }
+
+  ignoreEvent() {
+    return false;
   }
 }
 
@@ -370,7 +429,8 @@ class RegionAnchorMarkerWidget extends WidgetType {
   }
 
   ignoreEvent() {
-    return true;
+    // 🔧 P1-17 修复：返回 false 允许 region 锚点标记点击交互
+    return false;
   }
 }
 
@@ -378,15 +438,45 @@ class RegionAnchorMarkerWidget extends WidgetType {
 
 class MarkVaultDecorator implements PluginValue {
   decorations: DecorationSet;
+  /** 🔧 P1-17 修复：编辑模式标注点击事件处理器引用（destroy 时清理） */
+  private clickHandler: ((e: MouseEvent) => void) | null = null;
+  /** 🔧 P1-21 修复：debounce 定时器，快速连续输入时合并重绘 */
+  private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(view: EditorView) {
     this.decorations = this.buildDecorations(view);
+
+    // 🔧 P1-17 修复：注册编辑模式标注点击事件监听
+    this.clickHandler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const uuidEl = target.closest('[data-uuid]');
+      if (uuidEl) {
+        // 🔧 P1-20 修复：优先使用 data-uuids（多 region 重叠），否则用 data-uuid
+        const uuidsAttr = uuidEl.getAttribute('data-uuids');
+        const uuid = uuidsAttr ? uuidsAttr.split(',')[0] : uuidEl.getAttribute('data-uuid');
+        if (uuid && annotationClickHandler) {
+          e.preventDefault();
+          e.stopPropagation();
+          annotationClickHandler(uuid);
+        }
+      }
+    };
+    view.dom.addEventListener('click', this.clickHandler);
   }
 
   update(update: ViewUpdate) {
     // docChanged/viewportChanged: 正常文档/视口变化时重绘
     // regionCacheUpdatedEffect: 缓存更新后强制重绘（解决异步缓存竞态）
-    if (update.docChanged || update.viewportChanged) {
+    if (update.docChanged) {
+      // 🔧 P1-21 修复：文档变更时 debounce 100ms，合并快速连续输入
+      if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
+      this._rebuildTimer = setTimeout(() => {
+        this.decorations = this.buildDecorations(update.view);
+        this._rebuildTimer = null;
+      }, 100);
+      return;
+    }
+    if (update.viewportChanged) {
       this.decorations = this.buildDecorations(update.view);
       return;
     }
@@ -399,7 +489,9 @@ class MarkVaultDecorator implements PluginValue {
   }
 
   destroy() {
-    // cleanup
+    // 🔧 P1-17 修复：清理点击事件监听
+    if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
+    this.clickHandler = null;
   }
 
   private buildDecorations(view: EditorView): DecorationSet {
@@ -423,6 +515,14 @@ class MarkVaultDecorator implements PluginValue {
     if (!doc || doc.length === 0) {
       return Decoration.none;
     }
+
+    // 🔧 P1-21 修复：计算可视范围，跳过视口外的标注
+    const viewportRanges = view.visibleRanges;
+    const vpMin = viewportRanges.length > 0 ? viewportRanges[0].from : 0;
+    const vpMax = viewportRanges.length > 0 ? viewportRanges[viewportRanges.length - 1].to : doc.length;
+    // 扩展视口范围 ±2000 字符，确保边角标注也能渲染
+    const vpFrom = Math.max(0, vpMin - 2000);
+    const vpTo = Math.min(doc.length, vpMax + 2000);
 
     // 🔧 P0-7 修复：预扫描代码块/数学块范围
     // CM6 Widget（代码块/数学块）内的 inline Decoration 无法覆盖，
@@ -505,6 +605,8 @@ class MarkVaultDecorator implements PluginValue {
             const from = Math.max(0, Math.min(range.from, doc.length));
             const to = Math.max(from, Math.min(range.to, doc.length));
             if (from >= to) continue;
+            // 🔧 P1-21 修复：跳过视口外的 span range
+            if (from > vpTo || to < vpFrom) continue;
 
             const className = `markvault-${spanAnn.type} markvault-${spanAnn.color}`;
             const styleStr = this.getStyleForType(spanAnn.type, colorHex);
@@ -564,11 +666,26 @@ class MarkVaultDecorator implements PluginValue {
         const lineNumber = targetLine + 1;
         if (lineNumber < 1 || lineNumber > view.state.doc.lines) continue;
         const lineStart = view.state.doc.line(lineNumber).from;
+        // 🔧 P1-21 修复：跳过视口外的 block
+        if (lineStart > vpTo || lineStart < vpFrom) continue;
+
+        // 行级色条
         decoItems.push({
           from: lineStart,
           to: lineStart,
           deco: Decoration.line({
             class: `markvault-block-line-deco markvault-block-${blockAnn.type} markvault-block-${blockAnn.color}`,
+          }),
+        });
+
+        // 🔧 P1-18 修复：block 编辑模式徽章（行首 inline widget）
+        decoItems.push({
+          from: lineStart,
+          to: lineStart,
+          deco: Decoration.widget({
+            widget: new BlockBadgeWidget(blockAnn.uuid, blockAnn.type, blockAnn.color),
+            block: false,
+            side: -1, // 放在行首之前
           }),
         });
       }
@@ -686,39 +803,66 @@ class MarkVaultDecorator implements PluginValue {
       }
       regionByUuid.set(a.uuid, entry);
     }
+    // 🔧 P1-20 修复：检测重叠 region，使用 data-uuids 存储多个 UUID
+    // 先收集所有 region 的内容范围
+    const regionRanges: Array<{
+      uuid: string;
+      from: number;
+      to: number;
+      entry: { start: RegionAnchorMatch; end: RegionAnchorMatch };
+    }> = [];
     for (const [uuid, entry] of regionByUuid.entries()) {
       if (!entry.start || !entry.end) continue;
       const contentStart = entry.start.index + entry.start.length;
       const contentEnd = entry.end.index;
       if (contentStart >= contentEnd) continue;
+      regionRanges.push({ uuid, from: contentStart, to: contentEnd, entry });
+    }
 
-      // 淡淡的 inline 背景，不覆盖整行
+    // 按起始位置排序
+    regionRanges.sort((a, b) => a.from - b.from || a.to - b.to);
+
+    // 计算每个位置上重叠的 UUID 列表，将重叠的区段拆分为不重叠的子段
+    const regionSegments = this.computeRegionSegments(regionRanges);
+
+    for (const seg of regionSegments) {
+      const classes = seg.uuids.map(u => {
+        const e = regionByUuid.get(u);
+        const color = e?.start?.color || 'yellow';
+        return `markvault-region-edit-bg markvault-region-${color}`;
+      }).join(' ');
+      // 使用第一个 region 的颜色作为主色
+      const firstEntry = regionByUuid.get(seg.uuids[0]);
+      const primaryColor = firstEntry?.start?.color || 'yellow';
+
       decoItems.push({
-        from: contentStart,
-        to: contentEnd,
+        from: seg.from,
+        to: seg.to,
         deco: Decoration.mark({
-          class: `markvault-region-edit-bg markvault-region-${entry.start.color}`,
+          class: `markvault-region-edit-bg markvault-region-${primaryColor}`,
           attributes: {
-            'data-uuid': uuid,
+            'data-uuids': seg.uuids.join(','),
+            'data-uuid': seg.uuids[0], // 向后兼容：保留第一个 UUID
             'data-kind': 'region',
           },
         }),
       });
+    }
 
-      // 块级内容（代码块/公式块）用左侧竖线标识，inline mark 覆盖不到 widget
+    // 块级内容（代码块/公式块）用左侧竖线标识，inline mark 覆盖不到 widget
+    for (const rr of regionRanges) {
       try {
-        const blockLines = this.findRegionBlockLines(view.state.doc, contentStart, contentEnd);
+        const blockLines = this.findRegionBlockLines(view.state.doc, rr.from, rr.to);
         for (const line of blockLines) {
           decoItems.push({
             from: line.from,
             to: line.from,
             deco: Decoration.line({
-              class: `markvault-region-block-line markvault-region-${entry.start.color}`,
+              class: `markvault-region-block-line markvault-region-${rr.entry.start.color}`,
             }),
           });
         }
       } catch (err) {
-        // 忽略 line 解析异常
         console.debug('MarkVault: region block line parse error', err);
       }
     }
@@ -827,6 +971,62 @@ class MarkVaultDecorator implements PluginValue {
     }
 
     return builder.finish();
+  }
+
+  /**
+   * 🔧 P1-20 修复：计算 region 的不重叠区段
+   * 将可能重叠的 region 范围拆分为不重叠的子段，每个子段记录包含的 UUID 列表。
+   * 这样重叠 region 的 data-uuids 属性能正确存储所有相关 UUID。
+   */
+  private computeRegionSegments(
+    ranges: Array<{ uuid: string; from: number; to: number; entry: { start: RegionAnchorMatch; end: RegionAnchorMatch } }>,
+  ): Array<{ from: number; to: number; uuids: string[] }> {
+    if (ranges.length === 0) return [];
+    if (ranges.length === 1) {
+      return [{ from: ranges[0].from, to: ranges[0].to, uuids: [ranges[0].uuid] }];
+    }
+
+    // 收集所有边界点
+    const points = new Set<number>();
+    for (const r of ranges) {
+      points.add(r.from);
+      points.add(r.to);
+    }
+    const sorted = [...points].sort((a, b) => a - b);
+
+    // 对每个子段，收集覆盖它的 UUID
+    const segments: Array<{ from: number; to: number; uuids: string[] }> = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const segFrom = sorted[i];
+      const segTo = sorted[i + 1];
+      if (segFrom >= segTo) continue;
+
+      const uuids: string[] = [];
+      for (const r of ranges) {
+        if (r.from <= segFrom && r.to >= segTo) {
+          uuids.push(r.uuid);
+        }
+      }
+      if (uuids.length > 0) {
+        segments.push({ from: segFrom, to: segTo, uuids });
+      }
+    }
+
+    // 合并相邻且 uuids 相同的段（减少 decoration 数量）
+    const merged: Array<{ from: number; to: number; uuids: string[] }> = [];
+    for (const seg of segments) {
+      const key = seg.uuids.join(',');
+      if (merged.length > 0) {
+        const last = merged[merged.length - 1];
+        if (last.to === seg.from && last.uuids.join(',') === key) {
+          last.to = seg.to;
+          continue;
+        }
+      }
+      merged.push({ ...seg });
+    }
+
+    return merged;
   }
 
   /**

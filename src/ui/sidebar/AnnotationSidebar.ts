@@ -475,6 +475,9 @@ export class AnnotationSidebar extends ItemView {
         const scrolled = await this.scrollToPreviewAnnotation(view, annotation.uuid);
         if (scrolled) return;
 
+        // 🔧 P1-4 修复：阅读模式下找不到元素时，通知用户切换原因
+        new Notice(`⚠️ 阅读模式中未找到标注元素，正在切换到源码模式定位`, 3000);
+
         // 阅读模式下找不到元素（可能未渲染），降级到源码模式
         const state = leaf.getViewState();
         if (state?.state) {
