@@ -652,7 +652,6 @@ export function findBlockContentEndLine(content: string, endLine: number): numbe
     if (
       trimmed.startsWith('%%markvault') ||
       trimmed === '$$' ||
-      trimmed === '$$$' ||
       trimmed.startsWith('```') ||
       trimmed === ''
     ) {
@@ -821,8 +820,8 @@ export function updateBlockAnchor(
 ): string {
   const range = findBlockDoubleAnchorRange(content, uuid);
   if (range) {
-    const type = updates.type || range.type;
-    const color = updates.color || range.color;
+    const type = updates.type ?? range.type;
+    const color = updates.color ?? range.color;
     const note = updates.note !== undefined ? updates.note : range.note;
     // v5.3: 双锚点暂不支持 alias 段（双锚点格式未扩展），保留原有逻辑
     const startAnchor = buildBlockAnchorStart({ uuid, type, color, note });
@@ -842,8 +841,8 @@ export function updateBlockAnchor(
   const regex = new RegExp(`%%markvault:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^:%]*))?(?::([^%]*))?%%`);
 
   return content.replace(regex, (_full, oldType: string, oldColor: string, g3: string | undefined, g4: string | undefined) => {
-    const type = updates.type || oldType;
-    const color = updates.color || oldColor;
+    const type = updates.type ?? oldType;
+    const color = updates.color ?? oldColor;
 
     // 判断匹配到的是新格式还是旧格式
     const isNewFormat = g4 !== undefined;
@@ -885,8 +884,8 @@ export function updateSpanAnchor(
   const regex = new RegExp(`%%markvault-span:${escapeRegex(uuid)}:([^:%]*):([^:%]*)(?::([^:%]*))?(?::([^%]*))?%%`);
 
   return content.replace(regex, (_full, oldType: string, oldColor: string, g3: string | undefined, g4: string | undefined) => {
-    const type = updates.type || oldType;
-    const color = updates.color || oldColor;
+    const type = updates.type ?? oldType;
+    const color = updates.color ?? oldColor;
 
     const isNewFormat = g4 !== undefined;
     let oldAlias: string | undefined;
@@ -944,7 +943,7 @@ export function findBlockTargetLine(content: string, anchorLine: number): number
 
   for (let i = targetLine; i < lines.length; i++) {
     const trimmed = lines[i].trim();
-    if (trimmed.startsWith('%%markvault') || trimmed === '$$' || trimmed === '$$$' || trimmed.startsWith('```')) {
+    if (trimmed.startsWith('%%markvault') || trimmed === '$$' || trimmed.startsWith('```')) {
       actualTargetLine = i + 1;
       continue;
     }
@@ -983,9 +982,11 @@ export function parseAllAnnotationsFromMarkdown(
 
   // 2. 块级/span 锚点标注
   const blockAnchors = parseBlockAnchors(content);
+  // 🔧 BUG-16 修复：map 抛异常后整个 blockAnnotations 变空数组，
+  // 所有有效锚点都丢失。改为逐条 try-catch，跳过出错项。
   let blockAnnotations: Array<Annotation & { _source: 'markdown' }> = [];
-  try {
-    blockAnnotations = blockAnchors.map(anchor => {
+  for (const anchor of blockAnchors) {
+    try {
     // 🔧 修复：跳过锚点行、公式分隔符、代码围栏，找到有意义的内容行
     const lines = content.split('\n');
     const actualTargetLine = findBlockTargetLine(content, anchor.anchorLine);
@@ -1013,7 +1014,7 @@ export function parseAllAnnotationsFromMarkdown(
       spanRanges = computeSpanRanges(content, actualTargetLine, fullSpanText);
     }
 
-    return {
+    blockAnnotations.push({
       uuid: anchor.uuid,
       filePath,
       type: anchor.type,
@@ -1036,10 +1037,10 @@ export function parseAllAnnotationsFromMarkdown(
       targetHash,
       alias: anchor.alias,  // v5.3: 从锚点解析的 alias
       _source: 'markdown' as const,
-    };
     });
-  } catch (err) {
-    console.error('MarkVault: block/span anchor parse error', err);
+    } catch (err) {
+      console.error(`MarkVault: block/span anchor parse error for uuid=${anchor.uuid}`, err);
+    }
   }
 
   // 3. Block 双锚点标注
@@ -1057,7 +1058,16 @@ export function parseAllAnnotationsFromMarkdown(
   }
 
   for (const [uuid, entry] of doubleByUuid.entries()) {
-    if (!entry.start || !entry.end) continue;
+    if (!entry.start || !entry.end) {
+      if (entry.start) console.warn(`MarkVault: orphaned block double-anchor start (uuid=${uuid}, no matching end)`);
+      if (entry.end) console.warn(`MarkVault: orphaned block double-anchor end (uuid=${uuid}, no matching start)`);
+      continue;
+    }
+    // 🔧 BUG-1 修复：校验 end 在 start 之后
+    if (entry.end.anchorOffset < entry.start.anchorOffset) {
+      console.warn(`MarkVault: block double-anchor end before start (uuid=${uuid}), skipping`);
+      continue;
+    }
 
     const lines = content.split('\n');
     const targetLine = findBlockTargetLine(content, entry.start.anchorLine);

@@ -13,8 +13,8 @@ import type { Annotation } from '../types/annotation';
 import {
   parseBlockAnchors,
   buildBlockAnchor,
-  updateBlockAnchor,
-  removeBlockAnchor,
+  updateAnyAnchor,
+  removeAnyAnchor,
   parseBlockDoubleAnchors,
   buildBlockAnchorStart,
   buildBlockAnchorEnd,
@@ -102,7 +102,17 @@ export class BlockFormat implements AnnotationFormat {
     }
 
     for (const [uuid, entry] of doubleByUuid.entries()) {
-      if (!entry.start || !entry.end) continue;
+      if (!entry.start || !entry.end) {
+        // 🔧 BUG-1 修复：孤立锚点输出警告日志，辅助调试
+        if (entry.start) console.warn(`MarkVault: orphaned block double-anchor start (uuid=${uuid}, no matching end)`);
+        if (entry.end) console.warn(`MarkVault: orphaned block double-anchor end (uuid=${uuid}, no matching start)`);
+        continue;
+      }
+      // 🔧 BUG-1 修复：校验 end 在 start 之后，防止数据损坏时错误配对
+      if (entry.end.anchorOffset < entry.start.anchorOffset) {
+        console.warn(`MarkVault: block double-anchor end before start (uuid=${uuid}), skipping`);
+        continue;
+      }
 
       const targetLine = findBlockTargetLine(content, entry.start.anchorLine);
       const endLine = findBlockContentEndLine(content, entry.end.anchorLine);
@@ -142,17 +152,30 @@ export class BlockFormat implements AnnotationFormat {
     return buildBlockAnchor(annotation as Parameters<typeof buildBlockAnchor>[0]);
   }
 
+  /**
+   * 更新 block 或 span 锚点
+   * 🔧 BUG-15 修复：使用 updateAnyAnchor 替代 updateBlockAnchor，
+   * 确保 span 锚点（%%markvault-span:...%%）也能被正确更新
+   */
   update(content: string, uuid: string, changes: FormatUpdates): string | null {
-    return updateBlockAnchor(content, uuid, {
+    const result = updateAnyAnchor(content, uuid, {
       type: changes.type,
       color: changes.color,
       note: changes.note,
       alias: changes.alias,
     });
+    // updateAnyAnchor 总是返回 string（未匹配时返回原 content），按接口语义转换
+    return result !== content ? result : null;
   }
 
+  /**
+   * 移除 block 或 span 锚点
+   * 🔧 BUG-15 修复：使用 removeAnyAnchor 替代 removeBlockAnchor，
+   * 确保 span 锚点也能被正确移除
+   */
   remove(content: string, uuid: string): string | null {
-    return removeBlockAnchor(content, uuid) || null;
+    const result = removeAnyAnchor(content, uuid);
+    return result !== content ? result : null;
   }
 
   strip(content: string): string {

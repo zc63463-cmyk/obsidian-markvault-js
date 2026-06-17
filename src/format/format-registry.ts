@@ -28,9 +28,17 @@ export class FormatRegistry {
     return [...this.formats.values()];
   }
 
+  /** 清空所有已注册的格式（供热重载使用） */
+  clear(): void {
+    this.formats.clear();
+  }
+
   /**
    * 从 Markdown 内容解析所有格式的标注
    * 每个格式独立 try-catch，单个格式异常不影响其他格式
+   *
+   * 🔧 BUG-13 修复：parseAll() 加入 UUID 去重逻辑，防止 native 标注被
+   * MarkFormat 和 NativeFormat 双重拾取（与回退路径 seen Map 对齐）
    */
   parseAll(content: string, filePath: string): ParsedAnnotation[] {
     const results: ParsedAnnotation[] = [];
@@ -41,7 +49,16 @@ export class FormatRegistry {
         console.error(`MarkVault: format "${format.id}" parse error`, err);
       }
     }
-    return results;
+
+    // UUID 去重：native 格式优先于 mark 格式（native 的偏移更准确）
+    const seen = new Map<string, ParsedAnnotation>();
+    for (const ann of results) {
+      const existing = seen.get(ann.uuid);
+      if (!existing || (ann.format === 'native' && existing.format !== 'native')) {
+        seen.set(ann.uuid, ann);
+      }
+    }
+    return [...seen.values()];
   }
 
   /**
@@ -70,12 +87,15 @@ export class FormatRegistry {
 
   /**
    * 剥离所有已注册格式的标记，保留纯文本
+   *
+   * 🔧 Phase H 修复：移除硬编码 'span'（span 由 BlockFormat 统一处理），
+   * BlockFormat.strip() 已覆盖 %%markvault-span:...%% 格式。
    */
   stripAll(content: string): string {
     let result = content;
-    // 先剥离行内格式（<mark> 标签），再剥离块级格式，最后处理 native
-    // 排序：mark → block → region → native（避免 native 的 HTML wrapper 被 mark strip 提前处理）
-    const order = ['mark', 'block', 'span', 'region', 'native'];
+    // 顺序：mark → block（含 span）→ region → native
+    // native 的 HTML wrapper 需要先由 mark strip 处理
+    const order = ['mark', 'block', 'region', 'native'];
     for (const id of order) {
       const format = this.formats.get(id);
       if (format) {
@@ -85,13 +105,28 @@ export class FormatRegistry {
     return result;
   }
 
-  /** 从标注对象推断对应的格式 id */
+  /** 从标注对象推断对应的格式 id
+   *
+   * 🔧 BUG-14 修复：annotation.format 对 block/span/region 为 undefined，
+   * 之前回退到 'mark' 导致 CRUD 操作路由到 MarkFormat（只能处理 <mark> 标签）。
+   * 现改为根据 annotation.kind 推断正确的格式 id。
+   */
   private resolveFormat(annotation: Annotation): AnnotationFormat {
-    // 优先使用显式字段
-    const id = annotation.format || 'mark';
+    // 优先使用显式 format 字段
+    if (annotation.format) {
+      const format = this.formats.get(annotation.format);
+      if (!format) {
+        throw new Error(`FormatRegistry: no format registered for id "${annotation.format}"`);
+      }
+      return format;
+    }
+    // 根据 kind 推断格式 id
+    const id = annotation.kind === 'block' || annotation.kind === 'span' ? 'block'
+             : annotation.kind === 'region' ? 'region'
+             : 'mark';
     const format = this.formats.get(id);
     if (!format) {
-      throw new Error(`FormatRegistry: no format registered for id "${id}"`);
+      throw new Error(`FormatRegistry: no format registered for inferred id "${id}" (kind=${annotation.kind})`);
     }
     return format;
   }
