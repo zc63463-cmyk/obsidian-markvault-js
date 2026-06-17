@@ -12,7 +12,6 @@
  */
 
 import type { Annotation, SpanRange } from '../types/annotation';
-import type { AnnotationType } from '../types/annotation';
 import { computeBlockSignature, computeSpanSignature, detectBlockTypeAtLine } from './block-fingerprint';
 import { parseNativeAnnotations } from './native-annotation';
 import { parseRegionAnnotations } from './region-annotation';
@@ -26,8 +25,6 @@ import {
   findBlockContentEndLine,
   findSpanEndLine,
   computeSpanRanges,
-  escapeAnchorField,
-  decodeAnchorField,
 } from './block-annotation-parser';
 
 // ─── Track A re-exports ──────────────────────────────────────
