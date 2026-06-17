@@ -81,6 +81,13 @@ export async function migrateFromIndexedDB(): Promise<number> {
         spanRanges: cleanAnn.spanRanges,
         fields: cleanAnn.fields,
         targetHash: cleanAnn.targetHash,
+        // 🔧 P1-15 修复：补全 v3.0+ 字段，防止迁移后数据丢失
+        motivation: cleanAnn.motivation,
+        groups: cleanAnn.groups,
+        flags: cleanAnn.flags,
+        relations: cleanAnn.relations,
+        alias: cleanAnn.alias,
+        format: cleanAnn.format,
       };
 
       await annotationStore.addAnnotation(annotation);

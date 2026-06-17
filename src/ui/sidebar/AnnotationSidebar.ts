@@ -516,11 +516,17 @@ export class AnnotationSidebar extends ItemView {
 
       const idx = content.indexOf(searchStr);
       if (idx === -1) {
-        // 锚点可能被删除，降级为行号定位
+        // 🔧 P1-1 修复：锚点被删除时降级为行号定位，使用更精确的目标行
+        // block→targetLine, span→anchorLine, inline→startLine
         console.warn(`MarkVault: UUID ${annotation.uuid} not found in source`);
-        editor.setCursor({ line: annotation.startLine, ch: 0 });
+        const fallbackLine = annotation.kind === 'block'
+          ? (annotation.targetLine ?? annotation.anchorLine ?? annotation.startLine)
+          : annotation.kind === 'span'
+            ? (annotation.anchorLine ?? annotation.startLine)
+            : annotation.startLine;
+        editor.setCursor({ line: fallbackLine, ch: 0 });
         editor.scrollIntoView(
-          { from: { line: annotation.startLine, ch: 0 }, to: { line: annotation.startLine + 1, ch: 0 } },
+          { from: { line: fallbackLine, ch: 0 }, to: { line: fallbackLine + 1, ch: 0 } },
           true,
         );
         return;

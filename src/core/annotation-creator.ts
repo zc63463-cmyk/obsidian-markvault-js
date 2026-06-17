@@ -41,6 +41,8 @@ export interface AnnotationCreateParams {
   targetHash?: string;
   spanRanges?: SpanRange[];
   format?: 'mark' | 'native';
+  // v3.0: 自定义字段（模板创建时传入）
+  fields?: Record<string, string>;
   // v4.1: 显式指定 motivation（覆盖自动推断）
   motivation?: Annotation['motivation'];
 }
@@ -94,6 +96,8 @@ export function buildAnnotation(params: AnnotationCreateParams): Annotation {
     anchorLine: params.anchorLine,
     targetHash: params.targetHash,
     spanRanges: params.spanRanges,
+    // v3.0: 自定义字段
+    fields: params.fields,
   };
 
   return annotation;

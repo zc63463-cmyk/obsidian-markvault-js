@@ -188,6 +188,8 @@ export class AnnotationCreator {
           console.log(`MarkVault: created reading-mode region annotation ${uuid} in ${filePath}`);
         } else {
         // ── 自然语法行内标注：隐身锚点 + 原生 HTML 包裹 ──
+        // 🔧 P1-8 修复：startLine 从 startOffset 正确计算而非硬编码 0
+        const inlineStartLine = content.substring(0, startOffset).split('\n').length - 1;
         const annotation = buildAnnotation({
           uuid,
           filePath,
@@ -197,7 +199,7 @@ export class AnnotationCreator {
           kind: 'inline',
           startOffset,
           endOffset,
-          startLine: 0,
+          startLine: inlineStartLine,
           contextBefore: content.substring(Math.max(0, startOffset - 40), startOffset),
           contextAfter: content.substring(endOffset, Math.min(content.length, endOffset + 40)),
           format: 'native',

@@ -22,7 +22,7 @@ import { computeSpanSignature } from './block-fingerprint';
  *  旧版 [^%]* 会在 note 中的 % 处提前终止，导致整个锚点无法匹配。
  *  [^\n]* 是安全的，因为锚点不跨行，且 %% 终止符会正确锚定匹配边界。
  */
-export const REGION_ANCHOR_REGEX = /%%markvault-region:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%/g;
+export const REGION_ANCHOR_REGEX = /%%markvault-region:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*?)(?::([^%]*))?%%/g;
 
 /** 锚点字段中的特殊字符转义（数字后缀 \0=\ \1=% \2=:） */
 function escapeAnchorField(s: string): string {
@@ -41,10 +41,11 @@ function escapeRegex(s: string): string {
 
 /** 生成 region 锚点字符串 */
 export function buildRegionAnchor(
-  annotation: Pick<Annotation, 'uuid' | 'type' | 'color' | 'note'>,
+  annotation: Pick<Annotation, 'uuid' | 'type' | 'color' | 'note' | 'alias'>,
   position: 'start' | 'end',
 ): string {
-  return `%%markvault-region:${annotation.uuid}:${annotation.type}:${annotation.color}:${position}:${escapeAnchorField(annotation.note || '')}%%`;
+  const escapedAlias = annotation.alias ? `:${escapeAnchorField(annotation.alias)}` : '';
+  return `%%markvault-region:${annotation.uuid}:${annotation.type}:${annotation.color}:${position}:${escapeAnchorField(annotation.note || '')}${escapedAlias}%%`;
 }
 
 /** region 范围定位结果 */
@@ -71,12 +72,14 @@ export function findRegionRange(content: string, uuid: string): RegionRange | nu
     type: AnnotationType;
     color: string;
     note: string;
+    alias?: string;
     position: 'start' | 'end';
   }[] = [];
 
   REGION_ANCHOR_REGEX.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = REGION_ANCHOR_REGEX.exec(content)) !== null) {
+    const alias = m[6] ? decodeAnchorField(m[6]) : undefined;
     matches.push({
       index: m.index,
       length: m[0].length,
@@ -84,6 +87,7 @@ export function findRegionRange(content: string, uuid: string): RegionRange | nu
       type: m[2] as AnnotationType,
       color: m[3],
       note: decodeAnchorField(m[5]),
+      ...(alias ? { alias } : {}),
       position: m[4] as 'start' | 'end',
     });
   }
@@ -120,7 +124,7 @@ export function parseRegionAnnotations(
 
   // 先收集所有锚点，按 uuid 分组
   const byUuid = new Map<string, {
-    start?: { index: number; length: number; type: AnnotationType; color: string; note: string };
+    start?: { index: number; length: number; type: AnnotationType; color: string; note: string; alias?: string };
     end?: { index: number; length: number };
   }>();
 
@@ -129,6 +133,7 @@ export function parseRegionAnnotations(
   while ((m = REGION_ANCHOR_REGEX.exec(content)) !== null) {
     const uuid = m[1];
     const position = m[4] as 'start' | 'end';
+    const alias = m[6] ? decodeAnchorField(m[6]) : undefined;
     const entry = byUuid.get(uuid) || {};
     if (position === 'start') {
       // 如果同一个 uuid 有多个 start，只保留第一个
@@ -139,6 +144,7 @@ export function parseRegionAnnotations(
           type: m[2] as AnnotationType,
           color: m[3],
           note: decodeAnchorField(m[5]),
+          ...(alias ? { alias } : {}),
         };
       }
     } else {
@@ -176,6 +182,7 @@ export function parseRegionAnnotations(
       updatedAt: 0,
       kind: 'region',
       targetHash: computeSpanSignature(content.substring(contentStart, contentEnd)),
+      ...(entry.start.alias ? { alias: entry.start.alias } : {}),
       _source: 'markdown' as const,
     });
   }

@@ -79,8 +79,12 @@ export async function applyIncrementalOffsetFix(
 }> {
   if (changes.length === 0 || allAnnotations.length === 0) return { updated: 0, deleted: 0 };
 
-  // 按 fromA 从大到小排序（从后往前处理，避免后续偏移干扰前面的计算）
+  // 🔧 P1-6 修复：统一排序方向
+  // 变更按 fromA 降序（从后往前），标注也按 startOffset 降序
+  // 这样两者都从文档末尾向开头遍历，保证前面变更的偏移修正
+  // 不会影响后面变更对同一标注的处理
   const sortedChanges = [...changes].sort((a, b) => b.fromA - a.fromA);
+  const sortedAnnotations = [...allAnnotations].sort((a, b) => b.startOffset - a.startOffset);
 
   const toUpdate: Array<{ uuid: string; startOffset: number; endOffset: number; spanRanges?: SpanRange[] }> = [];
   const toDelete: string[] = [];
@@ -88,7 +92,7 @@ export async function applyIncrementalOffsetFix(
   for (const change of sortedChanges) {
     if (change.delta === 0) continue; // 等长替换，偏移不变
 
-    for (const ann of allAnnotations) {
+    for (const ann of sortedAnnotations) {
       // ── Span 标注：修正 spanRanges + 锚点偏移 ──
       if (ann.kind === 'span' && ann.spanRanges && ann.spanRanges.length > 0) {
         // 先检查锚点是否被删除：锚点偏移在变更范围内
@@ -332,6 +336,16 @@ export async function applyIncrementalOffsetFix(
         };
         if (u.spanRanges) {
           updates.spanRanges = u.spanRanges;
+        }
+        // 🔧 P1-7 修复：偏移修正后清空 context，避免 contextBefore/contextAfter
+        // 引用过时的文本范围。下次 forceSync 会重新计算。
+        // 检查是否是 inline/block 标注（span 标注的 offset 变化不影响 context）
+        const ann = allAnnotations.find(a => a.uuid === u.uuid);
+        if (ann && ann.kind !== 'span') {
+          if (u.startOffset !== ann.startOffset || u.endOffset !== ann.endOffset) {
+            updates.contextBefore = '';
+            updates.contextAfter = '';
+          }
         }
         // 注意：offset fix 是系统操作，不更新 updatedAt
         await annotationStore.updateAnnotation(u.uuid, updates);

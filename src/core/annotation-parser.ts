@@ -505,8 +505,8 @@ export function buildSpanAnchor(annotation: {
 
 // ─── Track B-v2: Block 双锚点标注 ─────────────────────────
 
-/** Block 双锚点正则：%%markvault-block:<uuid>:<type>:<color>:<start|end>:<note>%% */
-export const BLOCK_DOUBLE_ANCHOR_REGEX = /%%markvault-block:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*)%%/g;
+/** Block 双锚点正则：%%markvault-block:<uuid>:<type>:<color>:<start|end>:<note>[:<alias>]%% */
+export const BLOCK_DOUBLE_ANCHOR_REGEX = /%%markvault-block:([^:%]+):([^:%]+):([^:%]+):(start|end):([^%]*?)(?::([^%]*))?%%/g;
 
 /** 双锚点 note 字段转义（数字后缀 \0=\ \1=% \2=:）
  *
@@ -528,8 +528,10 @@ export function buildBlockAnchorStart(annotation: {
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
 }): string {
-  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:start:${escapeBlockAnchorField(annotation.note || '')}%%`;
+  const escapedAlias = annotation.alias ? `:${escapeBlockAnchorField(annotation.alias)}` : '';
+  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:start:${escapeBlockAnchorField(annotation.note || '')}${escapedAlias}%%`;
 }
 
 /** 生成 Block 双锚点的 end 锚点 */
@@ -538,8 +540,10 @@ export function buildBlockAnchorEnd(annotation: {
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
 }): string {
-  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:end:${escapeBlockAnchorField(annotation.note || '')}%%`;
+  const escapedAlias = annotation.alias ? `:${escapeBlockAnchorField(annotation.alias)}` : '';
+  return `%%markvault-block:${annotation.uuid}:${annotation.type}:${annotation.color}:end:${escapeBlockAnchorField(annotation.note || '')}${escapedAlias}%%`;
 }
 
 /** Block 双锚点解析结果 */
@@ -548,6 +552,7 @@ export interface ParsedBlockDoubleAnchor {
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
   /** start / end */
   position: 'start' | 'end';
   /** 锚点在全文中的字符偏移 */
@@ -560,7 +565,8 @@ export interface ParsedBlockDoubleAnchor {
 
 /**
  * 解析 Block 双锚点标注
- * 格式：%%markvault-block:<uuid>:<type>:<color>:start:<note>%% ... %%markvault-block:<uuid>:...:end:<note>%%
+ * 格式（新）：%%markvault-block:<uuid>:<type>:<color>:start:<note>:<alias>%% ... %%markvault-block:<uuid>:...:end:<note>:<alias>%%
+ * 格式（旧）：%%markvault-block:<uuid>:<type>:<color>:start:<note>%% ... %%markvault-block:<uuid>:...:end:<note>%%
  */
 export function parseBlockDoubleAnchors(content: string): ParsedBlockDoubleAnchor[] {
   const results: ParsedBlockDoubleAnchor[] = [];
@@ -571,11 +577,13 @@ export function parseBlockDoubleAnchors(content: string): ParsedBlockDoubleAncho
     const anchorOffset = match.index;
     const anchorLength = match[0].length;
     const lineCount = content.substring(0, anchorOffset).split('\n').length;
+    const alias = match[6] ? decodeBlockAnchorField(match[6]) : undefined;
     results.push({
       uuid: match[1],
       type: match[2] as AnnotationType,
       color: match[3],
       note: decodeBlockAnchorField(match[5]),
+      ...(alias ? { alias } : {}),
       position: match[4] as 'start' | 'end',
       anchorOffset,
       anchorLength,
@@ -592,6 +600,7 @@ export interface BlockDoubleAnchorRange {
   type: AnnotationType;
   color: string;
   note: string;
+  alias?: string;
   startAnchorOffset: number;
   startAnchorEnd: number;
   endAnchorOffset: number;
@@ -625,6 +634,7 @@ export function findBlockDoubleAnchorRange(content: string, uuid: string): Block
     type: startMatch.type,
     color: startMatch.color,
     note: startMatch.note,
+    ...(startMatch.alias ? { alias: startMatch.alias } : {}),
     startAnchorOffset: startMatch.anchorOffset,
     startAnchorEnd: startMatch.anchorOffset + startMatch.anchorLength,
     endAnchorOffset: endMatch.anchorOffset,
@@ -823,9 +833,9 @@ export function updateBlockAnchor(
     const type = updates.type ?? range.type;
     const color = updates.color ?? range.color;
     const note = updates.note !== undefined ? updates.note : range.note;
-    // v5.3: 双锚点暂不支持 alias 段（双锚点格式未扩展），保留原有逻辑
-    const startAnchor = buildBlockAnchorStart({ uuid, type, color, note });
-    const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note });
+    const alias = updates.alias !== undefined ? updates.alias : range.alias;
+    const startAnchor = buildBlockAnchorStart({ uuid, type, color, note, alias });
+    const endAnchor = buildBlockAnchorEnd({ uuid, type, color, note, alias });
     return (
       content.substring(0, range.startAnchorOffset) +
       startAnchor +
@@ -1097,6 +1107,7 @@ export function parseAllAnnotationsFromMarkdown(
       targetLine,
       anchorLine: entry.start.anchorLine,
       targetHash,
+      ...(entry.start.alias ? { alias: entry.start.alias } : {}),
       _source: 'markdown' as const,
     });
   }

@@ -13,7 +13,7 @@
  * - 响应式：ResizeObserver 跟随窗口缩放
  */
 
-import { ItemView, WorkspaceLeaf, TFile, Modal, App, Menu } from 'obsidian';
+import { ItemView, WorkspaceLeaf, TFile, Modal, App, Menu, MarkdownView } from 'obsidian';
 import ForceGraph from 'force-graph';
 import type { NodeObject, LinkObject } from 'force-graph';
 import { annotationStore } from '../../db/annotation-store';
@@ -673,7 +673,24 @@ export class RelationGraphView extends ItemView {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (file instanceof TFile) {
       const leaf = this.app.workspace.getLeaf(false);
-      leaf.openFile(file);
+      leaf.openFile(file).then(() => {
+        // 🔧 P1-2 修复：打开文件后滚动到标注的目标行
+        const view = leaf.view;
+        if (view instanceof MarkdownView && view.editor) {
+          const targetLine = annotation?.kind === 'block'
+            ? (annotation.targetLine ?? annotation.anchorLine ?? annotation.startLine)
+            : annotation?.kind === 'span'
+              ? (annotation.anchorLine ?? annotation.startLine)
+              : (annotation?.startLine ?? 0);
+          if (targetLine > 0) {
+            view.editor.setCursor({ line: targetLine, ch: 0 });
+            view.editor.scrollIntoView(
+              { from: { line: targetLine, ch: 0 }, to: { line: targetLine + 1, ch: 0 } },
+              true,
+            );
+          }
+        }
+      });
     }
   }
 
