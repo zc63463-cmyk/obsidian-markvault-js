@@ -29,7 +29,7 @@ export function stripExtraFields(annotation: Annotation): Annotation {
   if (annotation.blockType !== undefined) clean.blockType = annotation.blockType;
   if (annotation.targetLine !== undefined) clean.targetLine = annotation.targetLine;
   if (annotation.anchorLine !== undefined) clean.anchorLine = annotation.anchorLine;
-  if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges;
+  if (annotation.spanRanges !== undefined) clean.spanRanges = annotation.spanRanges.map(r => ({ ...r }));
   if (annotation.fields !== undefined) {
     if (Object.keys(annotation.fields).length > 0) {
       clean.fields = { ...annotation.fields };
@@ -38,7 +38,8 @@ export function stripExtraFields(annotation: Annotation): Annotation {
   if (annotation.format !== undefined) clean.format = annotation.format;
   if (annotation.targetHash !== undefined) clean.targetHash = annotation.targetHash;
   if (annotation.relations !== undefined && annotation.relations.length > 0) {
-    clean.relations = [...annotation.relations];
+    // 🔧 C-2 修复：每个 relation 对象展开拷贝，避免 invalidateRelation 修改 invalidAt/source 时影响原始对象
+    clean.relations = annotation.relations.map(r => ({ ...r }));
   }
   if (annotation.flags !== undefined) {
     const f = annotation.flags;

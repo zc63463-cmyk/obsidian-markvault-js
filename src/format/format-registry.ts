@@ -88,14 +88,15 @@ export class FormatRegistry {
   /**
    * 剥离所有已注册格式的标记，保留纯文本
    *
-   * 🔧 Phase H 修复：移除硬编码 'span'（span 由 BlockFormat 统一处理），
-   * BlockFormat.strip() 已覆盖 %%markvault-span:...%% 格式。
+   * 🔧 B-3 修复：stripAll 顺序调整为 native → mark → block → region
+   * native 的 stripNativeAnnotations 依赖 findNativeWrapper 定位 <mark> wrapper，
+   * 如果 MarkFormat.strip() 先执行会删掉 <mark>，导致 native 锚点残留。
    */
   stripAll(content: string): string {
     let result = content;
-    // 顺序：mark → block（含 span）→ region → native
-    // native 的 HTML wrapper 需要先由 mark strip 处理
-    const order = ['mark', 'block', 'region', 'native'];
+    // 顺序：native → mark → block（含 span）→ region
+    // native 必须先于 mark：native strip 需要配对 <mark data-mv> wrapper
+    const order = ['native', 'mark', 'block', 'region'];
     for (const id of order) {
       const format = this.formats.get(id);
       if (format) {

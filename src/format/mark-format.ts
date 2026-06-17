@@ -13,6 +13,7 @@ import {
   updateMarkTag,
   removeMarkTag,
 } from '../core/annotation-parser';
+import { encodeFields } from '../utils/fields';
 
 export class MarkFormat implements AnnotationFormat {
   readonly id = 'mark' as const;
@@ -26,13 +27,17 @@ export class MarkFormat implements AnnotationFormat {
   }
 
   update(content: string, uuid: string, changes: FormatUpdates): string | null {
+    // 🔧 B-5 修复：fields 可能是 Record<string, string>，需用 encodeFields 转换
+    const fieldsStr = typeof changes.fields === 'string'
+      ? changes.fields
+      : changes.fields ? encodeFields(changes.fields) : undefined;
     return updateMarkTag(content, uuid, {
       note: changes.note,
       tags: changes.tags,
       color: changes.color,
       type: changes.type,
       alias: changes.alias,
-      fields: typeof changes.fields === 'string' ? changes.fields : undefined,
+      fields: fieldsStr,
     });
   }
 

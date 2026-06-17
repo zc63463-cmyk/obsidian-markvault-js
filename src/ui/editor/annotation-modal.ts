@@ -1252,11 +1252,17 @@ export class AnnotationModal extends Modal {
       // 验证内容确实发生了变化
       if (newContent !== content) {
         this.plugin.modifyGuard.acquire(this.annotation.filePath);
-        // 🔧 B-2 修复：使用 vault.process 原子读写，替代 vault.modify + try-catch-rollback
-        // vault.process 保证：回调抛错 → MD 不变；回调成功 → MD 已更新
-        await this.app.vault.process(file, () => newContent);
-        console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
-        this.plugin.modifyGuard.release(this.annotation.filePath);
+        try {
+          // 🔧 B-2 修复：使用 vault.process 原子读写，try-finally 保证 modifyGuard 释放
+          // vault.process 保证：回调抛错 → MD 不变；回调成功 → MD 已更新
+          await this.app.vault.process(file, () => newContent);
+          console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
+        } catch (processErr) {
+          console.error(`MarkVault modal: MD update failed for ${this.annotation.uuid}`, processErr);
+          throw processErr;
+        } finally {
+          this.plugin.modifyGuard.release(this.annotation.filePath);
+        }
       } else {
         console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
       }
