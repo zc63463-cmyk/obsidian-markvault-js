@@ -488,7 +488,11 @@ export class AnnotationSidebar extends ItemView {
       const editor = (view as MarkdownView).editor;
       if (!editor) return;
 
-      const content = await this.app.vault.read(file);
+      // 🔧 P0-2 修复：优先从编辑器获取内容（反映未保存变更），
+      // 避免vault.read()缓存导致跳转到错误位置
+      const cmView = (view as any).editor?.cm as import('@codemirror/view').EditorView | undefined;
+      const content = cmView ? cmView.state.doc.toString() : editor.getValue();
+
       let searchStr: string;
       if (annotation.kind === 'block') {
         searchStr = `markvault:${annotation.uuid}`;
@@ -522,6 +526,8 @@ export class AnnotationSidebar extends ItemView {
         return;
       }
 
+      // 🔧 P0-2 修复：使用编辑器内容的偏移量直接定位
+      // 由于 content 现在来自编辑器本身，offsetToPos 可以正确映射
       const pos = editor.offsetToPos(idx);
       editor.setCursor(pos);
       editor.scrollIntoView({

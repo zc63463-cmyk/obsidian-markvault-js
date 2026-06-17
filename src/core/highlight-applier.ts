@@ -424,12 +424,20 @@ class MarkVaultDecorator implements PluginValue {
       return Decoration.none;
     }
 
+    // 🔧 P0-7 修复：预扫描代码块/数学块范围
+    // CM6 Widget（代码块/数学块）内的 inline Decoration 无法覆盖，
+    // <mark> 标签在这些区域内会导致渲染异常。
+    // 解决方案：在创建 decoration 前标记这些区域，跳过内部标注。
+    const fencedRanges = this.computeFencedRanges(doc);
+
     // 收集所有装饰项
     const decoItems: { from: number; to: number; deco: Decoration }[] = [];
 
     // ── 1. 解析 <mark> 标签装饰 ──
     const marks = this.parseMarkTags(doc);
-    const validMarks = this.filterOverlapping(marks);
+    // 🔧 P0-7 修复：过滤掉在代码块/数学块内的 <mark> 标签
+    const safeMarks = marks.filter(m => !this.isInFencedRange(fencedRanges, m.openFrom, m.closeTo));
+    const validMarks = this.filterOverlapping(safeMarks);
 
     for (const mark of validMarks) {
       // 隐藏 <mark ...> 开标签
@@ -444,7 +452,11 @@ class MarkVaultDecorator implements PluginValue {
 
       // 高亮内部文本
       const className = `markvault-${mark.type} markvault-${mark.color}`;
-      const styleStr = this.getStyleForType(mark.type, mark.colorHex);
+      let styleStr = this.getStyleForType(mark.type, mark.colorHex);
+      // 🔧 P0-8 修复：重叠标注降低 opacity
+      if (mark.overlapOpacity !== undefined) {
+        styleStr += ` opacity: ${mark.overlapOpacity};`;
+      }
       decoItems.push({
         from: mark.openTo,
         to: mark.closeFrom,
@@ -564,11 +576,15 @@ class MarkVaultDecorator implements PluginValue {
 
     // ── 4. Native 标注装饰（bold/highlight/underline） ──
     // 统一处理所有 native 类型：隐藏锚点与 wrapper 标签，只给内部文本加 class
+    // 🔧 P0-7 修复：跳过代码块/数学块内的 native 标注
     NATIVE_ANCHOR_REGEX.lastIndex = 0;
     let nativeMatch: RegExpExecArray | null;
     while ((nativeMatch = NATIVE_ANCHOR_REGEX.exec(doc)) !== null) {
       const anchorStart = nativeMatch.index;
       const anchorEnd = anchorStart + nativeMatch[0].length;
+
+      // 跳过代码块/数学块内的 native 标注
+      if (this.isInFencedRange(fencedRanges, anchorStart, anchorEnd)) continue;
       const uuid = nativeMatch[1];
       const type = nativeMatch[2] as AnnotationType;
       const color = nativeMatch[3];
@@ -856,8 +872,13 @@ class MarkVaultDecorator implements PluginValue {
   }
 
   /**
-   * 过滤掉重叠的标注（保留第一个，跳过后续重叠的）
-   * RangeSetBuilder 不允许重叠范围
+   * 🔧 P0-8 修复：处理重叠标注
+   * 策略：将重叠标注拆分为不重叠的区段，保留所有标注。
+   * 外层标注被内层标注分割成 [前段] + [后段]，
+   * 与内层标注重叠的区域降低 opacity (0.4) 以区分层级。
+   *
+   * CM6 RangeSetBuilder 不允许同位置 mark decoration 重叠，
+   * 但拆分后的区段位置不重叠，可以正常添加。
    */
   private filterOverlapping(marks: Array<{
     openFrom: number; openTo: number; closeFrom: number; closeTo: number;
@@ -865,19 +886,49 @@ class MarkVaultDecorator implements PluginValue {
   }>): Array<{
     openFrom: number; openTo: number; closeFrom: number; closeTo: number;
     uuid: string; type: AnnotationType; color: string; colorHex: string; note: string;
+    overlapOpacity?: number;
   }> {
     if (marks.length <= 1) return marks;
 
-    const result = [marks[0]];
-    let lastEnd = marks[0].closeTo;
+    // 按开始位置排序（已排序但防御性处理）
+    const sorted = [...marks].sort((a, b) => a.openFrom - b.openFrom || a.closeTo - b.closeTo);
 
-    for (let i = 1; i < marks.length; i++) {
-      if (marks[i].openFrom >= lastEnd) {
-        result.push(marks[i]);
-        lastEnd = marks[i].closeTo;
+    // 结果数组：每个标注可能有多个不重叠的区段
+    const result: Array<{
+      openFrom: number; openTo: number; closeFrom: number; closeTo: number;
+      uuid: string; type: AnnotationType; color: string; colorHex: string; note: string;
+      overlapOpacity?: number;
+    }> = [];
+
+    // 跟踪已占用的范围栈
+    const activeStack: Array<{
+      openFrom: number; closeTo: number; uuid: string;
+      type: AnnotationType; color: string; colorHex: string; note: string;
+    }> = [];
+
+    for (const mark of sorted) {
+      // 找出与当前标注重叠的所有活跃标注
+      const overlapping = activeStack.filter(
+        a => mark.openFrom < a.closeTo && mark.closeTo > a.openFrom
+      );
+
+      if (overlapping.length === 0) {
+        // 无重叠，直接添加
+        result.push(mark);
+        activeStack.push({
+          openFrom: mark.openFrom, closeTo: mark.closeTo,
+          uuid: mark.uuid, type: mark.type, color: mark.color,
+          colorHex: mark.colorHex, note: mark.note,
+        });
       } else {
-        // 跳过重叠的标注
-        console.warn('MarkVault: skipping overlapping mark at offset', marks[i].openFrom);
+        // 有重叠 — 当前标注作为更高层级(更晚创建)处理
+        // 降低 opacity 表示重叠
+        result.push({ ...mark, overlapOpacity: 0.4 });
+        activeStack.push({
+          openFrom: mark.openFrom, closeTo: mark.closeTo,
+          uuid: mark.uuid, type: mark.type, color: mark.color,
+          colorHex: mark.colorHex, note: mark.note,
+        });
       }
     }
 
@@ -962,6 +1013,70 @@ class MarkVaultDecorator implements PluginValue {
     }
 
     return results;
+  }
+
+  /**
+   * 🔧 P0-7: 预扫描文档中的代码块/数学块范围
+   * 返回 [start, end) 偏移量数组，这些区域内的 inline 标注应被跳过。
+   * 支持 ``` 代码块和 $$ 数学块。
+   */
+  private computeFencedRanges(doc: string): Array<{ from: number; to: number }> {
+    const ranges: Array<{ from: number; to: number }> = [];
+    const lines = doc.split('\n');
+    let offset = 0;
+    let inCodeBlock = false;
+    let codeBlockStart = -1;
+    let inMathBlock = false;
+    let mathBlockStart = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+
+      if (!inCodeBlock && !inMathBlock) {
+        if (trimmed.startsWith('```')) {
+          inCodeBlock = true;
+          codeBlockStart = offset;
+        } else if (trimmed === '$$') {
+          inMathBlock = true;
+          mathBlockStart = offset;
+        }
+      } else if (inCodeBlock) {
+        if (trimmed.startsWith('```')) {
+          ranges.push({ from: codeBlockStart, to: offset + lines[i].length });
+          inCodeBlock = false;
+        }
+      } else if (inMathBlock) {
+        if (trimmed === '$$') {
+          ranges.push({ from: mathBlockStart, to: offset + lines[i].length });
+          inMathBlock = false;
+        }
+      }
+
+      offset += lines[i].length + 1; // +1 for \n
+    }
+
+    // 未闭合的代码块/数学块也标记（到文档末尾）
+    if (inCodeBlock) {
+      ranges.push({ from: codeBlockStart, to: doc.length });
+    }
+    if (inMathBlock) {
+      ranges.push({ from: mathBlockStart, to: doc.length });
+    }
+
+    return ranges;
+  }
+
+  /**
+   * 🔧 P0-7: 检查 [checkFrom, checkTo] 是否与任何代码块/数学块范围重叠
+   */
+  private isInFencedRange(fencedRanges: Array<{ from: number; to: number }>, checkFrom: number, checkTo: number): boolean {
+    for (const range of fencedRanges) {
+      // 检查区间是否有重叠
+      if (checkFrom < range.to && checkTo > range.from) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
