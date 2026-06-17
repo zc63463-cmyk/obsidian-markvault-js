@@ -55,9 +55,10 @@ export class PersistLayer {
 
   /** 索引写入互斥锁 */
   private _indexWriting: boolean = false;
-
+  private _indexWaiters: Array<() => void> = [];
   /** meta 写入互斥锁 */
   private _metaWriting: boolean = false;
+  private _metaWaiters: Array<() => void> = [];
 
   /** 元数据 */
   private _meta: StoreMeta = {
@@ -791,16 +792,8 @@ export class PersistLayer {
   /** 写入 _index.json（原子写入 + 互斥锁） */
   async _writeIndexFile(): Promise<void> {
     if (this._indexWriting) {
-      await new Promise<void>(resolve => {
-        const check = () => {
-          if (!this._indexWriting) {
-            resolve();
-          } else {
-            setTimeout(check, 50);
-          }
-        };
-        check();
-      });
+      // 🔧 P2-E 修复: 用 Promise 回调替代 setTimeout 轮询
+      await new Promise<void>(resolve => this._indexWaiters.push(resolve));
       if (!this._indexDirty) return;
     }
 
@@ -827,6 +820,9 @@ export class PersistLayer {
       }
     } finally {
       this._indexWriting = false;
+      // 唤醒所有等待者
+      const waiters = this._indexWaiters.splice(0);
+      waiters.forEach(fn => fn());
     }
   }
 
@@ -840,16 +836,8 @@ export class PersistLayer {
   /** 写入 _meta.json（原子写入 + 互斥锁） */
   private async _writeMetaFile(): Promise<void> {
     if (this._metaWriting) {
-      await new Promise<void>(resolve => {
-        const check = () => {
-          if (!this._metaWriting) {
-            resolve();
-          } else {
-            setTimeout(check, 50);
-          }
-        };
-        check();
-      });
+      // 🔧 P2-E 修复: 用 Promise 回调替代 setTimeout 轮询
+      await new Promise<void>(resolve => this._metaWaiters.push(resolve));
     }
 
     this._metaWriting = true;
@@ -875,6 +863,9 @@ export class PersistLayer {
       }
     } finally {
       this._metaWriting = false;
+      // 唤醒所有等待者
+      const waiters = this._metaWaiters.splice(0);
+      waiters.forEach(fn => fn());
     }
   }
 

@@ -4,12 +4,13 @@ import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
 import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
-import { ConfirmModal } from '../confirm-modal';
+import { ConfirmModal, PromptModal } from '../confirm-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
 import { updateNativeAnnotation, removeNativeAnnotation } from '../../core/native-annotation';
 import { updateRegionAnnotation, removeRegionAnnotation } from '../../core/region-annotation';
 import { encodeFields, applyTemplate } from '../../utils/fields';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
+import { containsMermaid, attachMermaidExpandButton, openMermaidPreview } from './mermaid-preview-overlay';
 
 /**
  * 批注编辑 Modal
@@ -318,9 +319,14 @@ export class AnnotationModal extends Modal {
       text: '+ Add Group',
       cls: 'markvault-modal-add-group-btn',
     });
-    addGroupBtn.addEventListener('click', () => {
+    addGroupBtn.addEventListener('click', async () => {
       const existingGroups = getGroupNames();
-      const groupName = prompt('Enter group name:\n\nExisting groups: ' + existingGroups.join(', '));
+      const groupName = await PromptModal.open(this.app, {
+        title: 'Add Group',
+        message: 'Existing groups: ' + (existingGroups.join(', ') || '(none)'),
+        placeholder: 'Enter group name...',
+        okText: 'Add',
+      });
       if (groupName && groupName.trim() && !this.groupsValue.includes(groupName.trim())) {
         this.groupsValue.push(groupName.trim());
         this.renderGroupTags(groupsListEl);
@@ -409,475 +415,18 @@ export class AnnotationModal extends Modal {
 
   /** 检测文本是否包含 mermaid 代码块 */
   private _containsMermaid(text: string): boolean {
-    return /```mermaid\s*[\s\S]*?```/.test(text);
+    return containsMermaid(text);
   }
 
   /**
    * 附加全屏展开按钮到预览/quote 容器
-   * @param container - quote 或 preview 容器
-   * @param source - 标识来源 ('quote' | 'preview')
    */
-  private _attachExpandButton(container: HTMLElement, source: 'quote' | 'preview') {
-    // 使用 position:relative 确保按钮定位正确
-    container.style.position = 'relative';
-
-    const btn = container.createEl('button', {
-      cls: 'markvault-mermaid-expand-btn',
-      attr: { title: 'Fullscreen preview (Expand mermaid diagram)', 'aria-label': 'Expand mermaid preview' },
-    });
-    // SVG 全屏图标 (类似 Obsidian 的展开图标)
-    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="15 3 21 3 21 9"></polyline>
-      <polyline points="9 21 3 21 3 15"></polyline>
-      <line x1="21" y1="3" x2="14" y2="10"></line>
-      <line x1="3" y1="21" x2="10" y2="14"></line>
-    </svg>`;
-
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._openMermaidPreview();
-    });
+  private _attachExpandButton(container: HTMLElement, _source: 'quote' | 'preview') {
+    attachMermaidExpandButton(container, () => this._openMermaidPreview());
   }
 
-  /**
-   * Mermaid 全屏预览浮层 — V4 PanZoom 实现
-   *
-   * 基于三个参考项目的深度研究成果重写:
-   *
-   * 核心架构 (viewport + canvas 双层):
-   *   viewport: overflow:hidden 容器，拦截所有输入事件
-   *   canvas:   CSS transform 双重变换 translate(panX, panY) scale(zoom)
-   *
-   * 关键改进 (vs V3):
-   *   1. 动态 transition 管理 — 拖拽/滚轮时禁用，按钮/双击/重置时启用
-   *      (参考 obsidian-mermaid-fullscreen: onMouseDown→transition:none, onMouseUp→恢复)
-   *   2. requestAnimationFrame 节流 — wheel/mousemove 不再直写 DOM，合并到下一帧
-   *   3. 正确的事件监听器生命周期 — mousedown 时注册 document mousemove/mouseup，
-   *      mouseup 时注销，而非 V3 的"创建时注册，首次 mouseup 后丢失"Bug
-   *   4. 指数缩放 — wheel 使用乘法因子而非加法，更自然 (参考 anvaka/panzoom)
-   *   5. fitScale 计算时序 — 双重 rAF + SVG viewBox 回退
-   *   6. 完整清理 — close 时移除所有监听器，无内存泄漏
-   */
   private _openMermaidPreview() {
-    // ── Zoom/Pan 状态 ──
-    const state = {
-      zoom: 1.0,
-      fitScale: 1.0,
-      panX: 0,
-      panY: 0,
-      isDragging: false,
-      dragStartX: 0,
-      dragStartY: 0,
-    };
-    const ZOOM_FACTOR = 1.08;          // 指数缩放因子 (每次滚轮 ×1.08 或 ÷1.08)
-    const ZOOM_STEP = 0.25;            // 工具栏按钮步长 (线性)
-    const MAX_ZOOM = 5.0;              // 最高 500%
-    const MIN_ZOOM_FACTOR = 0.15;     // 最低 15% (允许在 fitScale 基础上继续缩小)
-    const ANIM_DURATION = '0.18s';     // 平滑动画时长 (transition 启用时)
-    const ANIM_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)'; // 弹性缓动
-    const WHEEL_ANIM_RESTORE_MS = 80;  // 滚轮结束后恢复 transition 的延迟
-
-    // rAF 节流追踪
-    let rafId = 0;
-    // 滚轮 transition 恢复定时器
-    let wheelTransTimer: ReturnType<typeof setTimeout> | null = null;
-    // 所有需要清理的监听器 (close 时一次性移除)
-    const cleanupFns: (() => void)[] = [];
-
-    // ═══════ DOM 结构 ═══════
-    const overlay = document.createElement('div');
-    overlay.addClass('markvault-mermaid-overlay');
-
-    const modal = overlay.createDiv({ cls: 'markvault-mermaid-modal' });
-
-    // ── 工具栏 ──
-    const toolbar = modal.createDiv({ cls: 'markvault-mermaid-toolbar' });
-    const leftGroup = toolbar.createDiv({ cls: 'markvault-mermaid-toolbar-left' });
-    leftGroup.createSpan({ text: 'Mermaid Diagram Preview', cls: 'markvault-mermaid-title' });
-
-    const zoomGroup = toolbar.createDiv({ cls: 'markvault-mermaid-zoom-group' });
-
-    const zoomOutBtn = zoomGroup.createEl('button', {
-      cls: 'markvault-mermaid-zoom-btn',
-      attr: { title: 'Zoom out (-)', 'aria-label': 'Zoom out' },
-    });
-    zoomOutBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
-
-    const zoomLabel = zoomGroup.createSpan({ text: 'Fit', cls: 'markvault-mermaid-zoom-label' });
-
-    const zoomInBtn = zoomGroup.createEl('button', {
-      cls: 'markvault-mermaid-zoom-btn',
-      attr: { title: 'Zoom in (+)', 'aria-label': 'Zoom in' },
-    });
-    zoomInBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
-
-    const resetBtn = zoomGroup.createEl('button', {
-      cls: 'markvault-mermaid-zoom-btn markvault-mermaid-zoom-reset',
-      attr: { title: 'Reset to fit (Ctrl+0)', 'aria-label': 'Reset zoom' },
-    });
-    resetBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>`;
-
-    const rightGroup = toolbar.createDiv({ cls: 'markvault-mermaid-toolbar-right' });
-    const closeBtn = rightGroup.createEl('button', {
-      cls: 'markvault-mermaid-close-btn',
-      attr: { title: 'Close (Esc)', 'aria-label': 'Close preview' },
-    });
-    closeBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-
-    // ── 视口 + 变换层 ──
-    const viewport = modal.createDiv({ cls: 'markvault-mermaid-viewport' });
-    const canvas = viewport.createDiv({ cls: 'markvault-mermaid-canvas' });
-
-    // ═══════ Markdown 渲染 + fitScale 计算 ═══════
-    const previewComponent = new Component();
-    MarkdownRenderer.renderMarkdown(
-      this.annotation.text, canvas, this.annotation.filePath, previewComponent,
-    ).then(() => {
-      // 双重 rAF 确保浏览器完成布局后再测量
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          computeFitScale();
-          panzoomSetFit();
-        });
-      });
-    }).catch((err: unknown) => {
-      console.error('MarkVault: mermaid preview render failed', err);
-      canvas.createEl('pre', { text: this.annotation.text, cls: 'markvault-mermaid-fallback' });
-    });
-
-    /** 计算 fitScale — 使用 SVG 尺寸，优先 viewBox，回退 getBoundingClientRect */
-    function computeFitScale() {
-      const svg = canvas.querySelector('svg');
-      const vw = viewport.clientWidth;
-      const vh = viewport.clientHeight;
-      if (!svg || vw <= 0 || vh <= 0) { state.fitScale = 1.0; return; }
-
-      // 优先从 viewBox 获取 SVG 原始尺寸 (更准确，不受 CSS 影响)
-      const viewBox = svg.getAttribute('viewBox');
-      let svgW: number, svgH: number;
-      if (viewBox) {
-        const parts = viewBox.split(/[\s,]+/).map(Number);
-        svgW = parts[2] || 0;
-        svgH = parts[3] || 0;
-      } else {
-        // 回退: getBoundingClientRect (可能受 max-width 等影响)
-        const rect = svg.getBoundingClientRect();
-        svgW = rect.width;
-        svgH = rect.height;
-      }
-
-      if (svgW <= 0 || svgH <= 0) { state.fitScale = 1.0; return; }
-
-      // 适配到视口内，留 padding
-      const padW = 40, padH = 32; // 20px 左右 + 16px 上下 padding
-      const scaleW = (vw - padW) / svgW;
-      const scaleH = (vh - padH) / svgH;
-      state.fitScale = Math.min(1.0, scaleW, scaleH);
-    }
-
-    // ═══════ PanZoom 核心 ═══════
-
-    /** 将当前 state 写入 canvas.style.transform (无 transition) */
-    const applyTransform = () => {
-      canvas.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
-    };
-
-    /** 启用 canvas 的 CSS transition (用于按钮/双击/重置的平滑动画) */
-    const enableTransition = () => {
-      canvas.style.transition = `transform ${ANIM_DURATION} ${ANIM_EASE}`;
-    };
-
-    /** 禁用 canvas 的 CSS transition (用于拖拽/滚轮，防止延迟) */
-    const disableTransition = () => {
-      canvas.style.transition = 'none';
-    };
-
-    /** 更新缩放百分比标签 */
-    const updateZoomLabel = () => {
-      zoomLabel.setText(`${Math.round(state.zoom * 100)}%`);
-    };
-
-    /**
-     * 光标中心缩放 — 核心算法
-     * 参考 mermaid-view-enhancer:
-     *   currentPoint = (cursor - pan) / zoom   // 光标在 canvas 坐标系中的位置
-     *   pan' = cursor - currentPoint × zoom'   // 缩放后保持光标位置不变
-     */
-    const zoomAt = (newZoom: number, cx: number, cy: number) => {
-      const minZoom = Math.min(MIN_ZOOM_FACTOR, state.fitScale);
-      const clamped = Math.max(minZoom, Math.min(MAX_ZOOM, newZoom));
-      if (clamped === state.zoom) return;
-      const ptX = (cx - state.panX) / state.zoom;
-      const ptY = (cy - state.panY) / state.zoom;
-      state.zoom = clamped;
-      state.panX = cx - ptX * clamped;
-      state.panY = cy - ptY * clamped;
-      applyTransform();
-      updateZoomLabel();
-    };
-
-    /** 适配到容器 (fit-to-width) — 带 transition 平滑动画 */
-    const panzoomSetFit = () => {
-      enableTransition();
-      state.zoom = state.fitScale;
-      state.panX = 0;
-      state.panY = 0;
-      applyTransform();
-      updateZoomLabel();
-      // 动画结束后关闭 transition (防止后续拖拽/滚轮受影响)
-      setTimeout(disableTransition, 180);
-    };
-
-    // ═══════ 事件: 鼠标滚轮 (指数缩放 + rAF 节流) ═══════
-
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // 拖拽中忽略滚轮 (防冲突)
-      if (state.isDragging) return;
-
-      // 禁用 transition → 立即响应，无延迟
-      disableTransition();
-      // 清除之前的恢复定时器 (连续滚轮时保持 transition:none)
-      if (wheelTransTimer !== null) {
-        clearTimeout(wheelTransTimer);
-        wheelTransTimer = null;
-      }
-
-      // rAF 节流: 如果已有待处理帧，跳过本次
-      if (rafId) return;
-
-      rafId = requestAnimationFrame(() => {
-        rafId = 0;
-
-        const rect = viewport.getBoundingClientRect();
-        const cx = e.clientX - rect.left;
-        const cy = e.clientY - rect.top;
-
-        // 指数缩放: deltaY > 0 → 放大, < 0 → 缩小
-        // 乘法因子比加法更自然 (参考 anvaka/panzoom)
-        const factor = e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
-        zoomAt(state.zoom * factor, cx, cy);
-      });
-
-      // 滚轮停止后恢复 transition (用于后续按钮操作)
-      wheelTransTimer = setTimeout(() => {
-        wheelTransTimer = null;
-      }, WHEEL_ANIM_RESTORE_MS);
-    };
-
-    viewport.addEventListener('wheel', onWheel, { passive: false });
-    cleanupFns.push(() => viewport.removeEventListener('wheel', onWheel));
-
-    // ═══════ 事件: 鼠标拖拽 (mousedown→document mousemove/mouseup) ═══════
-
-    const onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 0) return; // 只响应左键
-      e.preventDefault();
-
-      state.isDragging = true;
-      state.dragStartX = e.clientX - state.panX;
-      state.dragStartY = e.clientY - state.panY;
-
-      // 拖拽时禁用 transition → 消除 rubber-band 延迟感
-      disableTransition();
-
-      viewport.addClass('markvault-mermaid-grabbing');
-
-      // 拖拽期间在 document 上监听 (确保鼠标移出视口也能继续拖拽)
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-    };
-
-    const onMouseMove = (e: MouseEvent) => {
-      if (!state.isDragging) return;
-
-      // rAF 节流
-      if (rafId) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = 0;
-        state.panX = e.clientX - state.dragStartX;
-        state.panY = e.clientY - state.dragStartY;
-        applyTransform();
-      });
-    };
-
-    const onMouseUp = () => {
-      if (!state.isDragging) return;
-      state.isDragging = false;
-      viewport.removeClass('markvault-mermaid-grabbing');
-
-      // 拖拽结束 → 移除 document 监听器 (不再需要，下次 mousedown 再注册)
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-
-    viewport.addEventListener('mousedown', onMouseDown);
-    cleanupFns.push(() => viewport.removeEventListener('mousedown', onMouseDown));
-    // 注意: mousemove/mouseup 在 mousedown 时才注册，mouseup 时注销
-    // close 时也需安全移除 (以防拖拽中被关闭)
-    cleanupFns.push(() => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    });
-
-    // ═══════ 事件: 双击 (fit ↔ 100% 切换) ═══════
-
-    viewport.addEventListener('dblclick', (e: MouseEvent) => {
-      e.preventDefault();
-      // 双击需要平滑动画 → 启用 transition
-      enableTransition();
-      if (state.zoom > state.fitScale * 1.05) {
-        // 当前已放大 → 回到 fit
-        panzoomSetFit();
-      } else {
-        // 当前是 fit → 跳到 100%，光标位置居中
-        const rect = viewport.getBoundingClientRect();
-        zoomAt(1.0, e.clientX - rect.left, e.clientY - rect.top);
-        // 动画结束后关闭 transition
-        setTimeout(disableTransition, 180);
-      }
-    });
-
-    // ═══════ 事件: 触摸 (pinch zoom + single finger drag) ═══════
-    // 参考 mermaid-view-enhancer 的触摸实现
-
-    let lastTouchDist = 0;
-    let touchRafId = 0;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        // 双指: pinch zoom
-        const [t1, t2] = [e.touches[0], e.touches[1]];
-        lastTouchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-        disableTransition();
-      } else if (e.touches.length === 1) {
-        // 单指: 拖拽
-        state.isDragging = true;
-        state.dragStartX = e.touches[0].clientX - state.panX;
-        state.dragStartY = e.touches[0].clientY - state.panY;
-        disableTransition();
-      }
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      e.preventDefault(); // 阻止页面滚动
-
-      if (e.touches.length === 2) {
-        // Pinch zoom + rAF 节流
-        if (touchRafId) return;
-        touchRafId = requestAnimationFrame(() => {
-          touchRafId = 0;
-          const [t1, t2] = [e.touches[0], e.touches[1]];
-          const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-          if (lastTouchDist > 0) {
-            const rect = viewport.getBoundingClientRect();
-            const cx = (t1.clientX + t2.clientX) / 2 - rect.left;
-            const cy = (t1.clientY + t2.clientY) / 2 - rect.top;
-            zoomAt(state.zoom * (dist / lastTouchDist), cx, cy);
-          }
-          lastTouchDist = dist;
-        });
-      } else if (e.touches.length === 1 && state.isDragging) {
-        // 单指拖拽 + rAF 节流
-        if (touchRafId) return;
-        touchRafId = requestAnimationFrame(() => {
-          touchRafId = 0;
-          state.panX = e.touches[0].clientX - state.dragStartX;
-          state.panY = e.touches[0].clientY - state.dragStartY;
-          applyTransform();
-        });
-      }
-    };
-
-    const onTouchEnd = () => {
-      state.isDragging = false;
-      lastTouchDist = 0;
-      if (touchRafId) { cancelAnimationFrame(touchRafId); touchRafId = 0; }
-    };
-
-    viewport.addEventListener('touchstart', onTouchStart, { passive: false });
-    viewport.addEventListener('touchmove', onTouchMove, { passive: false });
-    viewport.addEventListener('touchend', onTouchEnd);
-    cleanupFns.push(() => {
-      viewport.removeEventListener('touchstart', onTouchStart);
-      viewport.removeEventListener('touchmove', onTouchMove);
-      viewport.removeEventListener('touchend', onTouchEnd);
-    });
-
-    // ═══════ 工具栏按钮 (带 transition 平滑动画) ═══════
-
-    zoomInBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      enableTransition();
-      const rect = viewport.getBoundingClientRect();
-      zoomAt(state.zoom + ZOOM_STEP, rect.width / 2, rect.height / 2);
-      setTimeout(disableTransition, 180);
-    });
-
-    zoomOutBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      enableTransition();
-      const rect = viewport.getBoundingClientRect();
-      zoomAt(state.zoom - ZOOM_STEP, rect.width / 2, rect.height / 2);
-      setTimeout(disableTransition, 180);
-    });
-
-    resetBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      panzoomSetFit();
-    });
-
-    // ═══════ 键盘快捷键 ═══════
-
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { close(); return; }
-      if (e.ctrlKey && e.key === '0') { e.preventDefault(); panzoomSetFit(); return; }
-      if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
-        e.preventDefault();
-        enableTransition();
-        const rect = viewport.getBoundingClientRect();
-        zoomAt(state.zoom + ZOOM_STEP, rect.width / 2, rect.height / 2);
-        setTimeout(disableTransition, 180);
-        return;
-      }
-      if (e.ctrlKey && e.key === '-') {
-        e.preventDefault();
-        enableTransition();
-        const rect = viewport.getBoundingClientRect();
-        zoomAt(state.zoom - ZOOM_STEP, rect.width / 2, rect.height / 2);
-        setTimeout(disableTransition, 180);
-        return;
-      }
-    };
-    document.addEventListener('keydown', keyHandler);
-    cleanupFns.push(() => document.removeEventListener('keydown', keyHandler));
-
-    // ═══════ 关闭 ═══════
-
-    const close = () => {
-      // 取消所有待处理的 rAF
-      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
-      if (touchRafId) { cancelAnimationFrame(touchRafId); touchRafId = 0; }
-      // 清除定时器
-      if (wheelTransTimer !== null) { clearTimeout(wheelTransTimer); wheelTransTimer = null; }
-      // 移除所有监听器 (一次性清理)
-      for (const fn of cleanupFns) fn();
-      cleanupFns.length = 0;
-      // 卸载渲染组件
-      previewComponent.unload();
-      // 关闭动画
-      overlay.addClass('markvault-mermaid-overlay-closing');
-      setTimeout(() => overlay.remove(), 200);
-    };
-
-    closeBtn.addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-
-    // ═══════ 挂载到 DOM ═══════
-    document.body.appendChild(overlay);
-    requestAnimationFrame(() => overlay.addClass('markvault-mermaid-overlay-visible'));
+    openMermaidPreview(this.annotation.text, this.annotation.filePath);
   }
 
   onClose() {
@@ -886,6 +435,7 @@ export class AnnotationModal extends Modal {
     this.component_.unload();
   }
 
+  /** 更新预览样式 */
   /** 更新预览样式 */
   private updatePreview() {
     const previewEl = this.contentEl.querySelector('.markvault-modal-preview') as HTMLElement;

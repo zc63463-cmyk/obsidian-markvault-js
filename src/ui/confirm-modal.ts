@@ -113,3 +113,99 @@ export interface ConfirmModalConfig {
   /** 是否为危险操作（OK 按钮变红） */
   dangerous?: boolean;
 }
+
+// ─── PromptModal — 替代 window.prompt() ─────────────────
+
+/**
+ * 可复用的输入对话框 — 替代 window.prompt()
+ *
+ * Obsidian 主题适配，支持：
+ * - 标题、提示文本、默认值
+ * - Promise<string | null> 返回值（null = 取消，与 prompt() 语义一致）
+ */
+export class PromptModal extends Modal {
+  private result: string | null = null;
+  private _resolve!: (value: string | null) => void;
+  private config: PromptModalConfig;
+  private inputComp?: TextComponent;
+
+  private constructor(app: App, config: PromptModalConfig) {
+    super(app);
+    this.config = config;
+  }
+
+  static open(app: App, config: PromptModalConfig | string): Promise<string | null> {
+    const cfg: PromptModalConfig =
+      typeof config === 'string' ? { message: config } : config;
+    const modal = new PromptModal(app, cfg);
+    return modal._show();
+  }
+
+  private _show(): Promise<string | null> {
+    return new Promise(resolve => {
+      this._resolve = resolve;
+      this.open();
+    });
+  }
+
+  onOpen() {
+    const { contentEl, titleEl } = this;
+    const cfg = this.config;
+
+    titleEl.setText(cfg.title || 'Input');
+
+    if (cfg.message) {
+      const messageEl = contentEl.createDiv({ cls: 'markvault-confirm-message' });
+      const lines = cfg.message.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) messageEl.createEl('br');
+        messageEl.appendText(lines[i]);
+      }
+    }
+
+    this.inputComp = new TextComponent(contentEl);
+    this.inputComp.inputEl.addClass('markvault-prompt-input');
+    this.inputComp.setValue(cfg.defaultValue || '');
+    this.inputComp.setPlaceholder(cfg.placeholder || '');
+    if (cfg.onEnter) {
+      this.inputComp.inputEl.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          this.result = this.inputComp!.getValue();
+          this.close();
+        }
+      });
+    }
+
+    const buttonBar = contentEl.createDiv({ cls: 'markvault-confirm-buttons' });
+    const okBtn = buttonBar.createEl('button', { text: cfg.okText || 'OK', cls: 'mod-cta' });
+    okBtn.addEventListener('click', () => {
+      this.result = this.inputComp!.getValue();
+      this.close();
+    });
+
+    const cancelBtn = buttonBar.createEl('button', { text: cfg.cancelText || 'Cancel' });
+    cancelBtn.addEventListener('click', () => {
+      this.result = null;
+      this.close();
+    });
+
+    setTimeout(() => this.inputComp!.inputEl.focus(), 50);
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this._resolve(this.result);
+  }
+}
+
+export interface PromptModalConfig {
+  message?: string;
+  title?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  okText?: string;
+  cancelText?: string;
+  /** 按 Enter 直接提交（默认 true） */
+  onEnter?: boolean;
+}
