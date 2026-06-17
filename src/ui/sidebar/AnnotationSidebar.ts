@@ -17,6 +17,7 @@ import { removeMarkTag, removeBlockAnchor, removeSpanAnchor } from '../../core/a
 import { removeNativeAnnotation } from '../../core/native-annotation';
 import { removeRegionAnnotation } from '../../core/region-annotation';
 import { StatsView } from './views/StatsView';
+import { OrphanPanel } from './views/OrphanPanel';
 import { CurrentFileToolbar } from './components/CurrentFileToolbar';
 import { FilterBar } from './components/FilterBar';
 import { BatchBar } from './components/BatchBar';
@@ -26,7 +27,7 @@ import { AnnotationCard } from './components/AnnotationCard';
 export const MARKVAULT_SIDEBAR_VIEW_TYPE = 'markvault-sidebar';
 
 /** 侧边栏 Tab 类型 */
-type SidebarTab = 'current' | 'all' | 'stats';
+type SidebarTab = 'current' | 'all' | 'stats' | 'orphans';
 
 export class AnnotationSidebar extends ItemView {
   private filter: AnnotationFilter = {
@@ -56,6 +57,7 @@ export class AnnotationSidebar extends ItemView {
   private pluginInstance: import('../../utils/plugin-interface').MarkVaultPluginInterface | null = null;
 
   private statsView: StatsView;
+  private orphanPanel: OrphanPanel;
   private currentFileToolbar: CurrentFileToolbar;
   private filterBar: FilterBar;
   private batchBar: BatchBar;
@@ -66,6 +68,10 @@ export class AnnotationSidebar extends ItemView {
     super(leaf);
     this.statsView = new StatsView({
       jumpToAnnotation: (ann) => this.jumpToAnnotation(ann),
+    });
+    this.orphanPanel = new OrphanPanel({
+      app: this.app,
+      getPluginInstance: () => this.pluginInstance,
     });
     this.currentFileToolbar = new CurrentFileToolbar({
       app: this.app,
@@ -211,6 +217,9 @@ export class AnnotationSidebar extends ItemView {
       case 'stats':
         await this.renderStatsView(contentArea);
         break;
+      case 'orphans':
+        await this.renderOrphansView(contentArea);
+        break;
     }
   }
 
@@ -223,6 +232,7 @@ export class AnnotationSidebar extends ItemView {
       { id: 'current', icon: '📄', label: 'Current' },
       { id: 'all', icon: '📚', label: 'All Notes' },
       { id: 'stats', icon: '📊', label: 'Stats' },
+      { id: 'orphans', icon: '🔍', label: 'Orphans' },
     ];
 
     for (const tab of tabs) {
@@ -332,6 +342,12 @@ export class AnnotationSidebar extends ItemView {
   private async renderStatsView(container: HTMLElement) {
     this.allAnnotationsCache = await getAllAnnotations();
     this.statsView.render(container, this.allAnnotationsCache);
+  }
+
+  // ─── 孤儿标注视图 ──────────────────────────────────────
+
+  private async renderOrphansView(container: HTMLElement) {
+    await this.orphanPanel.render(container);
   }
 
   // ─── 过滤栏 ─────────────────────────────────────────────

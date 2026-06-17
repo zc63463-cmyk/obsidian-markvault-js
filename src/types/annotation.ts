@@ -511,6 +511,8 @@ export interface AnnotationTemplate {
   tags?: string[];                     // 预填标签
   icon?: string;                      // 显示图标（用于右键菜单）
   hotkey?: string;                    // 建议快捷键（仅作显示，实际绑定由 Obsidian 命令面板处理）
+  // v5.14: 认知模板 — 自动填充 flags 维度
+  flags?: Partial<AnnotationFlag>;    // 预填学习状态（mastery/confidence/reviewPriority/needsCorrection）
 }
 
 /** 预设标注模板 */
@@ -630,6 +632,9 @@ export interface AnnotationStats {
 
   // v5.3: 图谱别名统计
   withAlias: number;
+
+  // v5.14: 孤儿标注统计
+  orphanCount: number;
 }
 
 /** 批量更新偏移项 */
@@ -653,6 +658,7 @@ export interface MarkVaultSettings {
   defaultTemplateId: string;              // 默认模板 ID（空字符串表示无默认模板）
   useNativeSyntax: boolean;               // 使用自然 Markdown 语法（隐身锚点 + 原生包裹）
   annotationTemplates: AnnotationTemplate[];  // v4.1: 标注模板（预设 type+color+motivation 组合）
+  customTemplates: AnnotationTemplate[];      // v5.14: 用户自定义模板（Settings CRUD 管理）
   customRelationTypes: RelationTypeConfig[];  // v4.3: 关系类型配置（Schema-First）
 }
 
@@ -686,5 +692,6 @@ export const DEFAULT_SETTINGS: MarkVaultSettings = {
   ],
   defaultTemplateId: '',
   annotationTemplates: DEFAULT_ANNOTATION_TEMPLATES,
+  customTemplates: [],                          // v5.14: 用户自定义模板（初始为空）
   customRelationTypes: DEFAULT_RELATION_TYPE_CONFIGS,
 };

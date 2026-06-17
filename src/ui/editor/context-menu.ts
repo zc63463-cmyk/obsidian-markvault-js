@@ -337,6 +337,13 @@ export async function createAnnotationFromTemplate(
     updates.tags = annotation.tags;
   }
 
+  // v5.14: 应用模板的 flags（认知模板维度）
+  if (template.flags) {
+    const mergedFlags = { ...annotation.flags, ...template.flags };
+    annotation.flags = mergedFlags;
+    updates.flags = mergedFlags;
+  }
+
   // 5. 持久化模板覆盖的值
   if (Object.keys(updates).length > 0) {
     await updateAnnotation(annotation.uuid, updates);
@@ -910,6 +917,18 @@ export function registerCommands(plugin: MarkVaultPluginInterface): void {
 
   // 🆕 v4.1: 标注模板命令（每个模板注册一个独立命令，可绑定快捷键）
   for (const tpl of plugin.settings.annotationTemplates) {
+    plugin.addCommand({
+      id: `annotate-template-${tpl.id}`,
+      name: `Template: ${tpl.name}`,
+      icon: 'zap',
+      editorCallback: async (editor: Editor, view: MarkdownView) => {
+        await createAnnotationFromTemplate(plugin, editor, view, tpl);
+      },
+    });
+  }
+
+  // v5.14: 用户自定义模板命令（包含认知模板）
+  for (const tpl of plugin.settings.customTemplates) {
     plugin.addCommand({
       id: `annotate-template-${tpl.id}`,
       name: `Template: ${tpl.name}`,

@@ -158,6 +158,7 @@ export class QueryEngine {
       total: annotations.length, byType, byColor, withNotes, withTags, withFields,
       withRelations, withGroups, withFlags, byMastery, byReviewPriority, needsCorrection,
       byMotivation, withAlias,
+      orphanCount: 0,  // 孤儿标注需要异步检测，此处默认 0，由 OrphanPanel 单独扫描
     };
   }
 }

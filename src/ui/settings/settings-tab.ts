@@ -1,7 +1,8 @@
 import { PluginSettingTab, App, Setting } from 'obsidian';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import { PRESET_COLORS, DEFAULT_SETTINGS, DEFAULT_RELATION_TYPE_CONFIGS, RelationSchema } from '../../types/annotation';
-import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig } from '../../types/annotation';
+import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig, AnnotationTemplate } from '../../types/annotation';
+import { generateCognitiveTemplates } from '../../core/template-generator';
 import { annotationStore } from '../../db/annotation-store';
 import { AddRelationTypeModal } from './add-relation-type-modal';
 import { ConfirmModal } from '../confirm-modal';
@@ -162,6 +163,50 @@ export class MarkVaultSettingTab extends PluginSettingTab {
     });
     restoreBtn.addEventListener('click', async () => {
       this.plugin.settings.fieldTemplates = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.fieldTemplates));
+      await this.plugin.saveSettings();
+      this.display();
+    });
+
+    // ── Annotation Templates (v5.14: 认知模板 + 用户自定义) ──
+    containerEl.createEl('h3', { text: 'Annotation Templates' });
+    containerEl.createDiv({ cls: 'markvault-templates-desc', text: 'Predefined type+color+motivation+flags combinations for quick annotation creation.' });
+
+    const annTemplatesContainer = containerEl.createDiv({ cls: 'markvault-annotation-templates-container' });
+    this.renderAnnotationTemplatesSection(annTemplatesContainer);
+
+    const annTemplateActions = containerEl.createDiv({ cls: 'markvault-template-actions' });
+
+    const addCognitiveBtn = annTemplateActions.createEl('button', { text: '+ Add Cognitive Templates' });
+    addCognitiveBtn.addEventListener('click', async () => {
+      const cognitive = generateCognitiveTemplates();
+      for (const tpl of cognitive) {
+        // 避免重复
+        if (!this.plugin.settings.customTemplates.some(t => t.id === tpl.id)) {
+          this.plugin.settings.customTemplates.push(tpl);
+        }
+      }
+      await this.plugin.saveSettings();
+      this.display();
+    });
+
+    const addCustomAnnBtn = annTemplateActions.createEl('button', {
+      text: '+ New Custom Template',
+      cls: 'mod-cta',
+    });
+    addCustomAnnBtn.addEventListener('click', async () => {
+      this.plugin.settings.customTemplates.push({
+        id: 'custom-' + Date.now(),
+        name: 'Custom Template',
+        type: 'highlight',
+        color: 'yellow',
+      });
+      await this.plugin.saveSettings();
+      this.display();
+    });
+
+    const restoreAnnBtn = annTemplateActions.createEl('button', { text: 'Clear Custom Templates' });
+    restoreAnnBtn.addEventListener('click', async () => {
+      this.plugin.settings.customTemplates = [];
       await this.plugin.saveSettings();
       this.display();
     });
@@ -557,5 +602,146 @@ export class MarkVaultSettingTab extends PluginSettingTab {
     for (const filePath of affectedFiles) {
       annotationStore.markFileDirty(filePath);
     }
+  }
+
+  // ── Annotation Templates 渲染 (v5.14) ──
+
+  private renderAnnotationTemplatesSection(container: HTMLElement): void {
+    container.empty();
+
+    // 内置模板（只读展示）
+    container.createEl('h4', { text: 'Built-in Templates', cls: 'markvault-section-subtitle' });
+    const builtInList = container.createDiv({ cls: 'markvault-templates-list' });
+    for (const tpl of this.plugin.settings.annotationTemplates) {
+      this.renderAnnotationTemplateItem(builtInList, tpl, true);
+    }
+
+    // 用户自定义模板（可编辑/删除）
+    container.createEl('h4', { text: 'Custom Templates', cls: 'markvault-section-subtitle' });
+    const customList = container.createDiv({ cls: 'markvault-templates-list' });
+
+    if (this.plugin.settings.customTemplates.length === 0) {
+      customList.createDiv({ text: 'No custom templates. Click "+ New Custom Template" or "+ Add Cognitive Templates" to add.', cls: 'markvault-templates-empty' });
+    }
+
+    for (let i = 0; i < this.plugin.settings.customTemplates.length; i++) {
+      const tpl = this.plugin.settings.customTemplates[i];
+      this.renderAnnotationTemplateItem(customList, tpl, false, i);
+    }
+  }
+
+  private renderAnnotationTemplateItem(
+    container: HTMLElement,
+    tpl: AnnotationTemplate,
+    readOnly: boolean,
+    customIndex?: number,
+  ): void {
+    const item = container.createDiv({ cls: 'markvault-template-item' });
+
+    // 图标 + 名称
+    const header = item.createDiv({ cls: 'markvault-template-item-header' });
+    if (tpl.icon) header.createSpan({ text: tpl.icon, cls: 'markvault-template-item-icon' });
+    header.createSpan({ text: tpl.name, cls: 'markvault-template-item-name' });
+
+    // 标签
+    const tags = item.createDiv({ cls: 'markvault-template-item-tags' });
+    tags.createSpan({ text: tpl.type, cls: 'markvault-template-item-tag' });
+    tags.createSpan({ text: tpl.color, cls: 'markvault-template-item-tag' });
+    if (tpl.motivation) tags.createSpan({ text: tpl.motivation, cls: 'markvault-template-item-tag' });
+    if (tpl.flags) {
+      const flagStrs: string[] = [];
+      if (tpl.flags.mastery) flagStrs.push(`mastery:${tpl.flags.mastery}`);
+      if (tpl.flags.confidence !== undefined) flagStrs.push(`confidence:${tpl.flags.confidence}`);
+      if (tpl.flags.needsCorrection) flagStrs.push('needsCorrection');
+      if (tpl.flags.reviewPriority) flagStrs.push(`priority:${tpl.flags.reviewPriority}`);
+      for (const fs of flagStrs) {
+        tags.createSpan({ text: `🧠 ${fs}`, cls: 'markvault-template-item-tag markvault-flag-tag' });
+      }
+    }
+
+    // 操作按钮
+    if (!readOnly && customIndex !== undefined) {
+      const actions = item.createDiv({ cls: 'markvault-template-item-actions' });
+
+      // 编辑
+      const editBtn = actions.createEl('button', { text: 'Edit' });
+      editBtn.addEventListener('click', () => {
+        this.showEditAnnotationTemplateModal(customIndex);
+      });
+
+      // 删除
+      const deleteBtn = actions.createEl('button', { text: 'Delete', cls: 'mod-warning' });
+      deleteBtn.addEventListener('click', async () => {
+        this.plugin.settings.customTemplates.splice(customIndex, 1);
+        await this.plugin.saveSettings();
+        this.display();
+      });
+    }
+  }
+
+  private showEditAnnotationTemplateModal(index: number): void {
+    const tpl = this.plugin.settings.customTemplates[index];
+    if (!tpl) return;
+
+    // 简单的 Obsidian Modal 编辑 — 使用 prompt 替代复杂表单
+    // 因为 Obsidian Modal 需要大量样板代码，这里用 Settings 内联编辑
+    const modal = new (require('obsidian') as any).Modal(this.app);
+    modal.titleEl.setText(`Edit Template: ${tpl.name}`);
+
+    const { contentEl } = modal;
+
+    // Name
+    contentEl.createDiv({ text: 'Name:' });
+    const nameInput = contentEl.createEl('input', { type: 'text', value: tpl.name });
+    nameInput.style.width = '100%';
+    nameInput.style.marginBottom = '10px';
+
+    // Type
+    contentEl.createDiv({ text: 'Type:' });
+    const typeSelect = contentEl.createEl('select');
+    for (const t of ['highlight', 'bold', 'underline']) {
+      typeSelect.createEl('option', { value: t, text: t, attr: t === tpl.type ? { selected: '' } : {} });
+    }
+    typeSelect.style.marginBottom = '10px';
+
+    // Color
+    contentEl.createDiv({ text: 'Color:' });
+    const colorSelect = contentEl.createEl('select');
+    for (const c of PRESET_COLORS) {
+      colorSelect.createEl('option', { value: c.id, text: c.label, attr: c.id === tpl.color ? { selected: '' } : {} });
+    }
+    colorSelect.style.marginBottom = '10px';
+
+    // Motivation
+    contentEl.createDiv({ text: 'Motivation:' });
+    const motivationSelect = contentEl.createEl('select');
+    motivationSelect.createEl('option', { value: '', text: '(auto)' });
+    for (const m of ['highlighting', 'commenting', 'questioning', 'editing', 'bookmarking', 'replying', 'classifying']) {
+      motivationSelect.createEl('option', { value: m, text: m, attr: m === tpl.motivation ? { selected: '' } : {} });
+    }
+    motivationSelect.style.marginBottom = '10px';
+
+    // Icon
+    contentEl.createDiv({ text: 'Icon (emoji):' });
+    const iconInput = contentEl.createEl('input', { type: 'text', value: tpl.icon || '' });
+    iconInput.style.marginBottom = '10px';
+
+    // Save button
+    const saveBtn = contentEl.createEl('button', { text: 'Save', cls: 'mod-cta' });
+    saveBtn.addEventListener('click', async () => {
+      this.plugin.settings.customTemplates[index] = {
+        ...tpl,
+        name: nameInput.value || tpl.name,
+        type: typeSelect.value as any,
+        color: colorSelect.value,
+        motivation: motivationSelect.value as any || undefined,
+        icon: iconInput.value || undefined,
+      };
+      await this.plugin.saveSettings();
+      modal.close();
+      this.display();
+    });
+
+    modal.open();
   }
 }

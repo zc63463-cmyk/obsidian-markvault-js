@@ -455,6 +455,11 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       this.settings.customRelationTypes = DEFAULT_SETTINGS.customRelationTypes;
     }
 
+    // v5.14: 兼容旧设置 — customTemplates 为 undefined 时初始化为空数组
+    if (!this.settings.customTemplates) {
+      this.settings.customTemplates = [];
+    }
+
     // v4.3: 重建 RelationSchema（设置加载后必须重建）
     this.relationSchema = new RelationSchema(this.settings.customRelationTypes);
   }
