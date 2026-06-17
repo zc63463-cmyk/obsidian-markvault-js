@@ -36,7 +36,7 @@ import {
 } from './core/annotation-parser';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from './core/md-context';
 import { markdownToPlainWithMap } from './core/markdown-plain';
-import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, removeEditorView, clearActiveEditorViews, requestRegionLayerRedraw, clearSpanCache, clearRegionCache, clearBlockCache, setAnnotationClickHandler } from './core/highlight-applier';
+import { markvaultDecorationPlugin, markvaultRegionLayer, setFilePathResolver, setActiveEditorView, removeEditorView, clearActiveEditorViews, requestRegionLayerRedraw, clearSpanCache, clearRegionCache, clearBlockCache, setAnnotationClickHandler } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
 import { buildAnnotation, finalizeAnnotation } from './core/annotation-creator';
@@ -242,7 +242,11 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       // 1. 标注高亮 Decoration Plugin
       this.registerEditorExtension(markvaultDecorationPlugin);
 
-      // 2. 偏移追踪 Extension
+      // 2. Region 背景层 — RectangleMarker 几何覆盖层
+      // 可覆盖代码块/公式块/图片等 CM6 Widget，Decoration.mark 无法触及
+      this.registerEditorExtension(markvaultRegionLayer);
+
+      // 3. 偏移追踪 Extension
       this.registerEditorExtension(
         createOffsetTrackerExtension((changes) => {
           this.readingProcessor.handleDocChange(changes);
