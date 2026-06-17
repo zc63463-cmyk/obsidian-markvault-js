@@ -30,7 +30,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from '@codemirror/view';
-import { PRESET_COLORS, type AnnotationType, type SpanRange } from '../types/annotation';
+import { PRESET_COLORS, type AnnotationType } from '../types/annotation';
 import { findNativeWrapper, NATIVE_ANCHOR_REGEX } from './native-annotation';
 import { REGION_ANCHOR_REGEX } from './region-annotation';
 import { parseBlockAnchors, findBlockTargetLine, parseBlockDoubleAnchors } from './annotation-parser';
@@ -174,115 +174,24 @@ const ATTR_EXTRACT_REGEX = /\b([\w-]+)="([^"]*)"/g;
 const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
 
 
-// ─── Span Annotation Cache ──────────────────────────────────
-
-/** Span 标注缓存数据（从 DB 加载） */
-export interface SpanAnnotationData {
-  uuid: string;
-  type: AnnotationType;
-  color: string;
-  anchorLine: number;
-  spanRanges: SpanRange[];
-  note: string;
-}
-
-/**
- * 全局 span 标注缓存，按文件路径索引
- * 在 main.ts 的 updateSpanCache() 中更新
- * MarkVaultDecorator 构建装饰时从此缓存读取
- */
-const spanCache = new Map<string, SpanAnnotationData[]>();
-
-/** 更新指定文件的 span 标注缓存 */
-export function updateSpanCacheForFile(filePath: string, annotations: SpanAnnotationData[]): void {
-  if (annotations.length > 0) {
-    spanCache.set(filePath, annotations);
-  } else {
-    spanCache.delete(filePath);
-  }
-}
-
-/** 获取指定文件的 span 标注缓存 */
-export function getSpanCacheForFile(filePath: string): SpanAnnotationData[] {
-  return spanCache.get(filePath) || [];
-}
-
-/** 清除指定文件的 span 标注缓存 */
-export function clearSpanCacheForFile(filePath: string): void {
-  spanCache.delete(filePath);
-}
-
-/** 清除所有 span 缓存 */
-export function clearSpanCache(): void {
-  spanCache.clear();
-}
-
-// ─── Region Annotation Cache ──────────────────────────────────
-
-/** Region 标注缓存数据（从 DB 加载） */
-export interface RegionAnnotationData {
-  uuid: string;
-  type: AnnotationType;
-  color: string;
-  startOffset: number;
-  endOffset: number;
-  note: string;
-}
-
-const regionCache = new Map<string, RegionAnnotationData[]>();
-
-export function updateRegionCacheForFile(filePath: string, annotations: RegionAnnotationData[]): void {
-  if (annotations.length > 0) {
-    regionCache.set(filePath, annotations);
-  } else {
-    regionCache.delete(filePath);
-  }
-}
-
-export function getRegionCacheForFile(filePath: string): RegionAnnotationData[] {
-  return regionCache.get(filePath) || [];
-}
-
-export function clearRegionCacheForFile(filePath: string): void {
-  regionCache.delete(filePath);
-}
-
-export function clearRegionCache(): void {
-  regionCache.clear();
-}
-
-// ─── Block Annotation Cache ──────────────────────────────────
-
-/** Block 标注缓存数据（从 DB 加载） */
-export interface BlockAnnotationData {
-  uuid: string;
-  type: AnnotationType;
-  color: string;
-  targetLine: number;
-  note: string;
-}
-
-const blockCache = new Map<string, BlockAnnotationData[]>();
-
-export function updateBlockCacheForFile(filePath: string, annotations: BlockAnnotationData[]): void {
-  if (annotations.length > 0) {
-    blockCache.set(filePath, annotations);
-  } else {
-    blockCache.delete(filePath);
-  }
-}
-
-export function getBlockCacheForFile(filePath: string): BlockAnnotationData[] {
-  return blockCache.get(filePath) || [];
-}
-
-export function clearBlockCacheForFile(filePath: string): void {
-  blockCache.delete(filePath);
-}
-
-export function clearBlockCache(): void {
-  blockCache.clear();
-}
+// ─── 缓存层导入（从 annotation-cache.ts 提取）──────────────────
+export {
+  type SpanAnnotationData,
+  type RegionAnnotationData,
+  type BlockAnnotationData,
+  updateSpanCacheForFile,
+  getSpanCacheForFile,
+  clearSpanCacheForFile,
+  clearSpanCache,
+  updateRegionCacheForFile,
+  getRegionCacheForFile,
+  clearRegionCacheForFile,
+  clearRegionCache,
+  updateBlockCacheForFile,
+  getBlockCacheForFile,
+  clearBlockCacheForFile,
+  clearBlockCache,
+} from './annotation-cache';
 
 // ─── Widget Types ────────────────────────────────────────
 
