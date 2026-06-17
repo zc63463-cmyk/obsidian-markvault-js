@@ -12,8 +12,7 @@
  * @module block-annotation-parser
  */
 
-import type { Annotation, SpanRange } from '../types/annotation';
-import type { AnnotationType } from '../types/annotation';
+import type { Annotation, SpanRange, AnnotationType } from '../types/annotation';
 import { computeBlockSignature, computeSpanSignature, detectBlockTypeAtLine } from './block-fingerprint';
 import { scanMarkdownContexts } from './md-context';
 import { escapeRegex } from './inline-annotation-parser';

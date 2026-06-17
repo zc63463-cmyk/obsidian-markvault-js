@@ -25,6 +25,7 @@ import {
   findBlockContentEndLine,
   findSpanEndLine,
   computeSpanRanges,
+  type ParsedBlockDoubleAnchor,
 } from './block-annotation-parser';
 
 // ─── Track A re-exports ──────────────────────────────────────
@@ -167,7 +168,7 @@ export function parseAllAnnotationsFromMarkdown(
   // 3. Block 双锚点标注
   try {
   const doubleBlockAnchors = parseBlockDoubleAnchors(content);
-  const doubleByUuid = new Map<string, { start?: import('./block-annotation-parser').ParsedBlockDoubleAnchor; end?: import('./block-annotation-parser').ParsedBlockDoubleAnchor }>();
+  const doubleByUuid = new Map<string, { start?: ParsedBlockDoubleAnchor; end?: ParsedBlockDoubleAnchor }>();
   for (const anchor of doubleBlockAnchors) {
     const entry = doubleByUuid.get(anchor.uuid) || {};
     if (anchor.position === 'start') {

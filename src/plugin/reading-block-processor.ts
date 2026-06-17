@@ -12,7 +12,7 @@ import { TFile, type MarkdownPostProcessorContext } from 'obsidian';
 import type { AnnotationType } from '../types/annotation';
 import { DEFAULT_SETTINGS } from '../types/annotation';
 import { annotationStore } from '../db/annotation-store';
-import { findBlockTargetLine, findBlockContentEndLine, parseBlockDoubleAnchors } from '../core/annotation-parser';
+import { findBlockTargetLine, findBlockContentEndLine, parseBlockDoubleAnchors, decodeAnchorField, decodeBlockAnchorField } from '../core/annotation-parser';
 import { scanMarkdownContexts } from '../core/md-context';
 import type { ReadingHost } from './reading-processor';
 import { findNextContentElement } from './reading-native-processor';
@@ -32,7 +32,7 @@ export async function processBlockAnchors(
   const anchorNodes: { uuid: string; type: string; color: string; note: string; node: Node; anchorKind: 'block' | 'span' }[] = [];
   const doubleAnchors = new Map<string, { start?: Node; end?: Node; type: string; color: string; note: string }>();
 
-  const decodeNote = (raw: string) => raw.replace(/\\p/g, '%').replace(/\\c/g, ':');
+  const decodeNote = (raw: string) => decodeBlockAnchorField(raw);
 
   let currentNode: Node | null;
   while ((currentNode = walker.nextNode())) {
@@ -42,7 +42,7 @@ export async function processBlockAnchors(
       if (blockMatch) {
         anchorNodes.push({
           uuid: blockMatch[1], type: blockMatch[2], color: blockMatch[3],
-          note: blockMatch[4] ? blockMatch[4].replace(/\\c/g, ':') : '',
+          note: blockMatch[4] ? decodeAnchorField(blockMatch[4]) : '',
           node: currentNode, anchorKind: 'block',
         });
       }
@@ -50,7 +50,7 @@ export async function processBlockAnchors(
       if (spanMatch) {
         anchorNodes.push({
           uuid: spanMatch[1], type: spanMatch[2], color: spanMatch[3],
-          note: spanMatch[4] ? spanMatch[4].replace(/\\c/g, ':') : '',
+          note: spanMatch[4] ? decodeAnchorField(spanMatch[4]) : '',
           node: currentNode, anchorKind: 'span',
         });
       }
@@ -73,7 +73,7 @@ export async function processBlockAnchors(
       if (blockMatch) {
         anchorNodes.push({
           uuid: blockMatch[1], type: blockMatch[2], color: blockMatch[3],
-          note: blockMatch[4] ? blockMatch[4].replace(/\\c/g, ':') : '',
+          note: blockMatch[4] ? decodeAnchorField(blockMatch[4]) : '',
           node: currentNode, anchorKind: 'block',
         });
         continue;
@@ -82,7 +82,7 @@ export async function processBlockAnchors(
       if (spanMatch) {
         anchorNodes.push({
           uuid: spanMatch[1], type: spanMatch[2], color: spanMatch[3],
-          note: spanMatch[4] ? spanMatch[4].replace(/\\c/g, ':') : '',
+          note: spanMatch[4] ? decodeAnchorField(spanMatch[4]) : '',
           node: currentNode, anchorKind: 'span',
         });
         continue;
@@ -225,7 +225,7 @@ export async function applyBlockDecorationsFromSource(
       if (targetLine > sectionEnd || targetLine < sectionStart) continue;
       matches.push({
         uuid: m[1], type: m[2], color: m[3],
-        note: m[4].replace(/\\c/g, ':').replace(/\\p/g, '%'),
+        note: decodeAnchorField(m[4]),
         startLine: targetLine, endLine: targetLine,
       });
     }
