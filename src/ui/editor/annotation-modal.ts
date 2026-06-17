@@ -814,15 +814,19 @@ export class AnnotationModal extends Modal {
           this.plugin.modifyGuard.release(this.annotation.filePath);
         }
       } else {
-        // 🔧 非异常：block/span/region/native 锚点格式不存 tags/fields/groups 等认知字段，
-        // 仅 Store 更新即可。仅当 note/color/type/alias 均未变化时才可能是异常。
-        const mdFields = ['note', 'color', 'type', 'alias'] as const;
-        const mdFieldsChanged = mdFields.some(f => updates[f as keyof typeof updates] !== undefined);
-        if (mdFieldsChanged) {
-          // 传入了会写 MD 的字段但 MD 没变，可能是锚点格式不匹配
+        // 🔧 非异常：block/span/region/native 锚点格式不存 tags/fields/groups/motivation/flags，
+        // 仅 Store 更新即可。仅当 note/color/type/alias 确实发生变化但 MD 没变时才可能是异常。
+        const noteChanged = this.noteValue !== this.annotation.note;
+        const colorChanged = updates.color !== undefined;
+        const typeChanged = updates.type !== undefined;
+        const oldAlias = this.annotation.alias ?? '';
+        const newAlias = aliasForMD ?? '';
+        const aliasChanged = newAlias !== oldAlias;
+        if (noteChanged || colorChanged || typeChanged || aliasChanged) {
+          // MD 字段确实变了但 MD 没变，可能是锚点格式不匹配
           console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
         } else {
-          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (tags/fields/groups)`);
+          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (tags/fields/groups/flags/motivation)`);
         }
       }
     }
