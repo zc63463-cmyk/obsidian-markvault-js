@@ -52,10 +52,8 @@ export {
 } from './editor-view-manager';
 
 // ─── Regex Patterns ──────────────────────────────────────
-// 🔧 P1-D: MARK_FULL_REGEX / ATTR_EXTRACT_REGEX 提取到 decoration-helpers.ts
-
-/** 匹配 %%markvault:%% 锚点行（note 段可选） */
-const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
+// 🔧 P1-D: MARK_FULL_REGEX / ATTR_EXTRACT_REGEX → decoration-helpers.ts
+// 🔧 P1-D: BLOCK_ANCHOR_REGEX 未使用（block 隐藏用内联 test），已删除
 
 
 // ─── 缓存层导入（从 annotation-cache.ts 提取）──────────────────
@@ -292,7 +290,7 @@ class MarkVaultDecorator implements PluginValue {
             if (from > vpTo || to < vpFrom) continue;
 
             const className = `markvault-${spanAnn.type} markvault-${spanAnn.color}`;
-            const styleStr = this.getStyleForType(spanAnn.type, colorHex);
+            const styleStr = getStyleForType(spanAnn.type, colorHex);
             decoItems.push({
               from,
               to,
@@ -439,14 +437,7 @@ class MarkVaultDecorator implements PluginValue {
     // ── 4. Region 锚点隐藏 + 内容装饰 ──
     // 在编辑模式下隐藏 %%markvault-region:...:start%% 和 %%markvault-region:...:end%%
     // 并给锚点之间的内容加 CSS class（mark/line），替代 CM6 layer 几何覆盖层。
-    interface RegionAnchorMatch {
-      index: number;
-      length: number;
-      uuid: string;
-      type: AnnotationType;
-      color: string;
-      position: 'start' | 'end';
-    }
+    // 🔧 P1-D: RegionAnchorMatch 已从 decoration-helpers.ts 导入，不再重复定义
     const regionAnchors: RegionAnchorMatch[] = [];
     REGION_ANCHOR_REGEX.lastIndex = 0;
     let regionMatch: RegExpExecArray | null;

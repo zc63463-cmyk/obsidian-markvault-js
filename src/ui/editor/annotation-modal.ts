@@ -815,18 +815,35 @@ export class AnnotationModal extends Modal {
         }
       } else {
         // 🔧 非异常：block/span/region/native 锚点格式不存 tags/fields/groups/motivation/flags，
-        // 仅 Store 更新即可。仅当 note/color/type/alias 确实发生变化但 MD 没变时才可能是异常。
+        // 仅 Store 更新即可。仅当会写 MD 的字段确实发生变化但 MD 没变时才可能是异常。
+        // 注意：不同 kind 写入 MD 的字段不同，需按 kind 判断。
+        const kind = this.annotation.kind;
+        const fmt = this.annotation.format;
         const noteChanged = this.noteValue !== this.annotation.note;
         const colorChanged = updates.color !== undefined;
         const typeChanged = updates.type !== undefined;
         const oldAlias = this.annotation.alias ?? '';
         const newAlias = aliasForMD ?? '';
         const aliasChanged = newAlias !== oldAlias;
-        if (noteChanged || colorChanged || typeChanged || aliasChanged) {
-          // MD 字段确实变了但 MD 没变，可能是锚点格式不匹配
-          console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
+
+        // 按 kind 确定哪些字段会写入 MD
+        // native: 只存 uuid/type/color → 仅 color/type 影响 MD
+        // region: 存 note/type/color → note/color/type 影响 MD，alias 不写入
+        // block/span/inline: 存 note/type/color/alias → 全部影响 MD
+        let mdFieldsChanged: boolean;
+        if (fmt === 'native') {
+          mdFieldsChanged = colorChanged || typeChanged;
+        } else if (kind === 'region') {
+          mdFieldsChanged = noteChanged || colorChanged || typeChanged;
         } else {
-          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (tags/fields/groups/flags/motivation)`);
+          mdFieldsChanged = noteChanged || colorChanged || typeChanged || aliasChanged;
+        }
+
+        if (mdFieldsChanged) {
+          // MD 字段确实变了但 MD 没变，可能是锚点格式不匹配
+          console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid} (kind=${kind})`);
+        } else {
+          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (kind=${kind})`);
         }
       }
     }

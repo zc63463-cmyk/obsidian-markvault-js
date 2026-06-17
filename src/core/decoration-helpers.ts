@@ -8,7 +8,7 @@
  */
 
 import { EditorSelection, type Extension } from '@codemirror/state';
-import type { AnnotationType } from '../types/annotation';
+import { PRESET_COLORS, type AnnotationType } from '../types/annotation';
 
 // ─── 正则常量 ──────────────────────────────────────────────
 
@@ -77,6 +77,7 @@ export function parseAttributes(raw: string): Record<string, string> {
 
 /**
  * 解析文档中的 <mark> 标签
+ * 🔧 P1-D 审查修复：对齐原始实现的 4 处差异
  */
 export function parseMarkTags(doc: string): ParsedMark[] {
   const marks: ParsedMark[] = [];
@@ -84,21 +85,47 @@ export function parseMarkTags(doc: string): ParsedMark[] {
   let match: RegExpExecArray | null;
   while ((match = MARK_FULL_REGEX.exec(doc)) !== null) {
     const attrs = parseAttributes(match[1]);
+
+    // 必须有 data-uuid 才是 MarkVault 标注
     const uuid = attrs['data-uuid'];
     if (!uuid) continue;
+
+    // native 标注由专门的 native 循环处理，避免重复装饰
+    if (attrs['class'] && attrs['class'].includes('markvault-native')) continue;
+
     const type = (attrs['data-type'] || 'highlight') as AnnotationType;
     const color = attrs['data-color'] || 'yellow';
     const note = attrs['data-note'] || '';
+
+    // 🔧 BUG-1 修复：用 gtIndex 精确定位开标签结束位置（原始实现方式）
+    const gtIndex = match[0].indexOf('>');
+    if (gtIndex === -1) continue;
+    const openFrom = match.index;
+    const openTo = openFrom + gtIndex + 1;
+
+    // 内部文本范围
+    const innerStart = openTo;
+    const innerEnd = innerStart + match[2].length;
+    const closeFrom = innerEnd;
+    const closeTo = openFrom + match[0].length;
+
+    // 验证范围有效性
+    if (closeTo > doc.length || innerEnd < innerStart) continue;
+
+    // 🔧 BUG-2 修复：colorHex 必须从 PRESET_COLORS 解析为实际 hex 值
+    const preset = PRESET_COLORS.find(c => c.id === color);
+    const colorHex = preset ? preset.hex : color;
+
     marks.push({
-      openFrom: match.index,
-      openTo: match.index + match[1].length + 6, // <mark + space + attrs + >
-      closeFrom: match.index + match[0].length - 7, // </mark>
-      closeTo: match.index + match[0].length,
+      openFrom,
+      openTo,
+      closeFrom,
+      closeTo,
       uuid,
       type,
       color,
-      colorHex: color, // 实际 hex 由调用方从 PRESET_COLORS 解析
-      note,
+      colorHex,
+      note: note || '',
     });
   }
   return marks;
