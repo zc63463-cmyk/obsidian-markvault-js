@@ -43,6 +43,14 @@ export class ReadingModeProcessor {
   private pendingOffsetFix: Promise<void> | null = null;
   private pendingChanges: ChangeInfo[] = [];
 
+  /** 🔧 P0-2 修复：region 解析缓存，避免每个 section 重复全文档正则扫描 */
+  private _regionParseCache = new Map<string, {
+    content: string;
+    regions: Array<Annotation & { _source: 'markdown' }>;
+    timestamp: number;
+  }>();
+  private static REGION_CACHE_TTL = 5000; // 5 秒内复用
+
   constructor(private plugin: ReadingHost) {}
 
   /** Register the markdown post processor — call from plugin.onload() */
@@ -138,10 +146,34 @@ export class ReadingModeProcessor {
     }
   }
 
+  /**
+   * 🔧 P0-2 修复：获取缓存的 region 解析结果
+   * 同一文件在 TTL 内只解析一次，避免每个 section 重复全文档正则扫描
+   */
+  private _getCachedRegions(filePath: string, content: string): Array<Annotation & { _source: 'markdown' }> {
+    const now = Date.now();
+    const cached = this._regionParseCache.get(filePath);
+    // 缓存命中：同一内容且未过期
+    if (cached && cached.content === content && (now - cached.timestamp) < ReadingModeProcessor.REGION_CACHE_TTL) {
+      return cached.regions;
+    }
+    // 解析并缓存
+    const regions = parseRegionAnnotations(content, filePath);
+    this._regionParseCache.set(filePath, { content, regions, timestamp: now });
+    // 清理过期缓存（惰性淘汰）
+    for (const [key, entry] of this._regionParseCache) {
+      if ((now - entry.timestamp) >= ReadingModeProcessor.REGION_CACHE_TTL) {
+        this._regionParseCache.delete(key);
+      }
+    }
+    return regions;
+  }
+
   /** Destroy reading mode UI — call from plugin.onunload() */
   destroy(): void {
     this.readingToolbar?.destroy();
     this.readingClickDelegate?.destroy();
+    this._regionParseCache.clear();
   }
 
   /** Handle CM6 document changes for offset tracking */
@@ -763,7 +795,8 @@ export class ReadingModeProcessor {
       const sectionStart = info.lineStart;
       const sectionEnd = info.lineEnd;
 
-      const regions = parseRegionAnnotations(content, sourcePath);
+      // 🔧 P0-2 修复：使用缓存避免每个 section 重复全文档正则扫描
+      const regions = this._getCachedRegions(sourcePath, content);
       if (regions.length === 0) return;
 
       const matched = regions.filter(r => {

@@ -49,16 +49,35 @@ export const regionCacheUpdatedEffect = StateEffect.define<void>();
 /** 🔧 P1-22 修复：追踪所有活跃的 EditorView，而非仅一个 */
 const activeEditorViews = new Set<EditorView>();
 
-/** 注入当前活跃的 EditorView（在 main.ts 的 active-leaf-change 中调用） */
+/**
+ * 注入当前活跃的 EditorView（在 main.ts 的 active-leaf-change / sync-engine 中调用）
+ * 🔧 P0-1 修复：view=null 时清理已销毁的 view，而非静默忽略
+ */
 export function setActiveEditorView(view: EditorView | null): void {
   if (view) {
     activeEditorViews.add(view);
+  } else {
+    // 🔧 P0-1：null 表示当前无活跃编辑器，清理所有已销毁的 view
+    for (const v of activeEditorViews) {
+      try {
+        if ((v as any).destroyed || !v.state?.field) {
+          activeEditorViews.delete(v);
+        }
+      } catch {
+        activeEditorViews.delete(v);
+      }
+    }
   }
 }
 
 /** 🔧 P1-22 修复：移除已销毁的 EditorView（在 onunload 中调用） */
 export function removeEditorView(view: EditorView): void {
   activeEditorViews.delete(view);
+}
+
+/** 🔧 P0-1 修复：清除所有活跃的 EditorView（在 plugin onunload 中调用） */
+export function clearActiveEditorViews(): void {
+  activeEditorViews.clear();
 }
 
 /**
@@ -1033,6 +1052,10 @@ class MarkVaultDecorator implements PluginValue {
    * 找出 region 范围内属于代码块 / 公式块的行
    * 编辑模式下这些行是 CM6 widget，inline mark 覆盖不到，需要单独加行级标识。
    */
+  /**
+   * 🔧 P0-3 优化：限制 findRegionBlockLines 遍历范围
+   * 先从文档开头扫描围栏状态（不收集结果），再仅在 region 范围内收集
+   */
   private findRegionBlockLines(
     cmDoc: import('@codemirror/state').Text,
     startOffset: number,
@@ -1045,7 +1068,20 @@ class MarkVaultDecorator implements PluginValue {
     let inCodeBlock = false;
     let inMathBlock = false;
 
-    for (let ln = 1; ln <= cmDoc.lines; ln++) {
+    // 阶段1：从文档开头到 startLine-1，只追踪围栏状态
+    for (let ln = 1; ln < startLine; ln++) {
+      const trimmed = cmDoc.line(ln).text.trim();
+      if (!inCodeBlock && !inMathBlock) {
+        if (trimmed.startsWith('```')) inCodeBlock = true;
+        else if (trimmed === '$$') inMathBlock = true;
+      } else {
+        if (inCodeBlock && trimmed.startsWith('```')) inCodeBlock = false;
+        else if (inMathBlock && trimmed === '$$') inMathBlock = false;
+      }
+    }
+
+    // 阶段2：仅在 region 范围内扫描并收集结果
+    for (let ln = startLine; ln <= endLine; ln++) {
       const line = cmDoc.line(ln);
       const trimmed = line.text.trim();
 
@@ -1063,7 +1099,7 @@ class MarkVaultDecorator implements PluginValue {
         }
       }
 
-      if (ln >= startLine && ln <= endLine && (inCodeBlock || inMathBlock)) {
+      if (inCodeBlock || inMathBlock) {
         result.push({ from: line.from });
       }
     }

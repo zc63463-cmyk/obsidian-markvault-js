@@ -36,7 +36,7 @@ import {
 } from './core/annotation-parser';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from './core/md-context';
 import { markdownToPlainWithMap } from './core/markdown-plain';
-import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, removeEditorView, requestRegionLayerRedraw, clearSpanCache, clearRegionCache, clearBlockCache, setAnnotationClickHandler } from './core/highlight-applier';
+import { markvaultDecorationPlugin, setFilePathResolver, setActiveEditorView, removeEditorView, clearActiveEditorViews, requestRegionLayerRedraw, clearSpanCache, clearRegionCache, clearBlockCache, setAnnotationClickHandler } from './core/highlight-applier';
 import { createOffsetTrackerExtension, applyIncrementalOffsetFix, type ChangeInfo } from './core/offset-tracker';
 import { batchRecoverOffsets } from './core/offset-recovery';
 import { buildAnnotation, finalizeAnnotation } from './core/annotation-creator';
@@ -389,9 +389,8 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
   async onunload() {
     console.log('MarkVault: unloading plugin');
     // 🔧 BUG-8 修复：立即清除 CM6 EditorView 引用，防止异步 dispatch 到已销毁的 view
-    // 🔧 P1-22 修复：使用 removeEditorView 替代 setActiveEditorView(null)
-    // 注意：Set 的清理由 setActiveEditorView 中的 destroyed 检查完成
-    setActiveEditorView(null);
+    // 🔧 P0-1 修复：使用 clearActiveEditorViews() 彻底清空 Set
+    clearActiveEditorViews();
     // 🔧 Phase H 修复：清除模块级缓存和闭包引用，防止热重载后脏数据
     setFilePathResolver(null);
     setAnnotationClickHandler(null);
