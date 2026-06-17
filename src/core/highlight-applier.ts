@@ -62,6 +62,13 @@ const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)
 
 
 // ─── 缓存层导入（从 annotation-cache.ts 提取）──────────────────
+// 🔧 P0 修复: re-export 不创建本地绑定，本地调用的函数需要单独 import
+import {
+  getSpanCacheForFile,
+  getBlockCacheForFile,
+  getRegionCacheForFile,
+} from './annotation-cache';
+
 export {
   type SpanAnnotationData,
   type RegionAnnotationData,
