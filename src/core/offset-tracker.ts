@@ -120,34 +120,66 @@ export async function applyIncrementalOffsetFix(
             continue;
           }
 
-          // 范围与变更重叠
-          const overlapStart = Math.max(range.from, change.fromA);
-          const overlapEnd = Math.min(range.to, change.toA);
-          const overlapLen = overlapEnd - overlapStart;
-          const rangeLen = range.to - range.from;
+          // 范围与变更重叠 — 细化区间处理
+          const rangeFromBeforeChange = range.from < change.fromA;
+          const rangeToInChange = range.to > change.fromA && range.to <= change.toA;
+          const rangeToAfterChange = range.to > change.toA;
 
-          if (change.deletedLen > 0 && overlapLen > rangeLen * 0.5) {
-            // 删除了超过 50% 的范围 → 移除此 range
+          if (rangeToInChange) {
+            // range 尾部落在 [fromA, toA) 区间
+            if (change.deletedLen > 0) {
+              // 删除了 range 尾部 → range 收缩到 fromA
+              const newTo = Math.max(range.from, change.fromA);
+              if (newTo > range.from) {
+                newRanges.push({ from: range.from, to: newTo });
+                allDeleted = false;
+              }
+              rangesModified = true;
+              continue;
+            }
+            // 纯插入 → 调整 range.to
+            newRanges.push({ from: range.from, to: range.to + change.delta });
             rangesModified = true;
+            allDeleted = false;
             continue;
           }
 
-          // 部分重叠 → 保留并调整
-          let newFrom = range.from;
-          let newTo = range.to;
-
-          if (range.from >= change.fromA) {
-            newFrom = change.fromA + change.insertedLen + (range.from - change.toA);
-            newTo = change.fromA + change.insertedLen + (range.to - change.toA);
-          } else if (range.to >= change.fromA) {
-            newTo = range.to + change.delta;
-          }
-
-          if (newTo > newFrom && newFrom >= 0) {
-            newRanges.push({ from: newFrom, to: newTo });
+          if (rangeFromBeforeChange && rangeToAfterChange) {
+            // range 跨越整个变更 → range.to 平移 delta
+            newRanges.push({ from: range.from, to: range.to + change.delta });
+            rangesModified = true;
             allDeleted = false;
+            continue;
           }
-          rangesModified = true;
+
+          // 兜底：原有 50% 重叠阈值 + 部分重叠调整
+          {
+            const overlapStart = Math.max(range.from, change.fromA);
+            const overlapEnd = Math.min(range.to, change.toA);
+            const overlapLen = overlapEnd - overlapStart;
+            const rangeLen = range.to - range.from;
+
+            if (change.deletedLen > 0 && overlapLen > rangeLen * 0.5) {
+              rangesModified = true;
+              continue;
+            }
+
+            let newFrom = range.from;
+            let newTo = range.to;
+
+            if (range.from >= change.fromA) {
+              newFrom = change.fromA + change.insertedLen + (range.from - change.toA);
+              newTo = change.fromA + change.insertedLen + (range.to - change.toA);
+            } else if (range.to >= change.fromA) {
+              newTo = range.to + change.delta;
+            }
+
+            if (newTo > newFrom && newFrom >= 0) {
+              newRanges.push({ from: newFrom, to: newTo });
+              allDeleted = false;
+            }
+            rangesModified = true;
+          }
         }
 
         if (allDeleted) {
@@ -194,39 +226,89 @@ export async function applyIncrementalOffsetFix(
         continue;
       }
 
-      // 情况 3: 变更与标注重叠
-      const overlapStart = Math.max(ann.startOffset, change.fromA);
-      const overlapEnd = Math.min(ann.endOffset, change.toA);
-      const overlapLen = overlapEnd - overlapStart;
-      const annotationLen = ann.endOffset - ann.startOffset;
+      // 情况 3: 变更与标注重叠 — 细分为 4 子情况
+      const annStartBeforeChange = ann.startOffset < change.fromA;
+      const annStartInChange = ann.startOffset >= change.fromA && ann.startOffset < change.toA;
+      const annEndInChange = ann.endOffset > change.fromA && ann.endOffset <= change.toA;
+      const annEndAfterChange = ann.endOffset > change.toA;
 
-      // 变更删除了标注的大部分内容（>50%）→ 删除标注
-      if (change.deletedLen > 0 && overlapLen > annotationLen * 0.5) {
-        toDelete.push(ann.uuid);
+      // 3a: 标注完全被变更包含 (start 在变更内, end 在变更内)
+      if (annStartInChange && annEndInChange) {
+        if (change.deletedLen > 0) {
+          toDelete.push(ann.uuid);
+          continue;
+        }
+        // 纯插入在标注内部 → 调整 end
+        const newEnd = ann.endOffset + change.delta;
+        if (newEnd > ann.startOffset) {
+          toUpdate.push({ uuid: ann.uuid, startOffset: ann.startOffset, endOffset: newEnd });
+          ann.endOffset = newEnd;
+        } else {
+          toDelete.push(ann.uuid);
+        }
         continue;
       }
 
-      // 部分重叠 — 保留标注，调整偏移
-      let newStart = ann.startOffset;
-      let newEnd = ann.endOffset;
-
-      if (ann.startOffset >= change.fromA) {
-        newStart = change.fromA + change.insertedLen + (ann.startOffset - change.toA);
-        newEnd = change.fromA + change.insertedLen + (ann.endOffset - change.toA);
-      } else {
-        newEnd = ann.endOffset + change.delta;
+      // 3b: 标注尾部被变更覆盖 (start 在变更前, end 在 [fromA, toA])
+      if (annStartBeforeChange && annEndInChange) {
+        if (change.deletedLen > 0) {
+          // end 收缩到 fromA
+          const newEnd = change.fromA;
+          if (newEnd > ann.startOffset) {
+            toUpdate.push({ uuid: ann.uuid, startOffset: ann.startOffset, endOffset: newEnd });
+            ann.endOffset = newEnd;
+          } else {
+            toDelete.push(ann.uuid);
+          }
+        } else {
+          // 纯插入在标注尾部 → 调整 end
+          const newEnd = ann.endOffset + change.delta;
+          toUpdate.push({ uuid: ann.uuid, startOffset: ann.startOffset, endOffset: newEnd });
+          ann.endOffset = newEnd;
+        }
+        continue;
       }
 
-      if (newStart >= 0 && newEnd > newStart) {
-        toUpdate.push({
-          uuid: ann.uuid,
-          startOffset: newStart,
-          endOffset: newEnd,
-        });
-        ann.startOffset = newStart;
+      // 3c: 标注跨越整个变更 (start 在变更前, end 在变更后)
+      if (annStartBeforeChange && annEndAfterChange) {
+        // end 平移 delta
+        const newEnd = ann.endOffset + change.delta;
+        toUpdate.push({ uuid: ann.uuid, startOffset: ann.startOffset, endOffset: newEnd });
         ann.endOffset = newEnd;
-      } else {
-        toDelete.push(ann.uuid);
+        continue;
+      }
+
+      // 3d: 标注起始在变更内, end 在变更后
+      if (annStartInChange && annEndAfterChange) {
+        // start 移到 fromA + insertedLen, end 平移 delta
+        const newStart = change.fromA + change.insertedLen;
+        const newEnd = ann.endOffset + change.delta;
+        if (newEnd > newStart) {
+          toUpdate.push({ uuid: ann.uuid, startOffset: newStart, endOffset: newEnd });
+          ann.startOffset = newStart;
+          ann.endOffset = newEnd;
+        } else {
+          toDelete.push(ann.uuid);
+        }
+        continue;
+      }
+
+      // 3e: 兜底 — 保留原有的 >50% 删除检查
+      {
+        const overlapStart = Math.max(ann.startOffset, change.fromA);
+        const overlapEnd = Math.min(ann.endOffset, change.toA);
+        const overlapLen = overlapEnd - overlapStart;
+        const annotationLen = ann.endOffset - ann.startOffset;
+        if (change.deletedLen > 0 && annotationLen > 0 && overlapLen > annotationLen * 0.5) {
+          toDelete.push(ann.uuid);
+          continue;
+        }
+        // 无法精确匹配子情况，保守保留
+        const newEnd = ann.endOffset + change.delta;
+        if (newEnd > ann.startOffset) {
+          toUpdate.push({ uuid: ann.uuid, startOffset: ann.startOffset, endOffset: newEnd });
+          ann.endOffset = newEnd;
+        }
       }
     }
   }

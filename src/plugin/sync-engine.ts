@@ -144,6 +144,7 @@ export class AnnotationSyncEngine {
     let blocksRecovered = 0;
     let spansRecovered = 0;
     let failed = 0;
+    const failedDetails: Array<{ uuid: string; reason: string }> = [];
 
     this.plugin.modifyGuard.acquire(filePath);
     try {
@@ -208,6 +209,7 @@ export class AnnotationSyncEngine {
 
           if (!anchor && !doubleRange) {
             // Markdown 中已找不到该锚点，无法自动恢复
+            failedDetails.push({ uuid: ann.uuid, reason: 'anchor_missing' });
             failed++;
             continue;
           }
@@ -255,8 +257,8 @@ export class AnnotationSyncEngine {
                 });
                 blocksRecovered++;
               } else {
-                failed++;
-              }
+                failedDetails.push({ uuid: ann.uuid, reason: 'block_fingerprint_search_failed' });
+                failed++;              }
             } else {
               // 指纹一致或没有指纹，仅同步 anchorLine
               if (anchor!.anchorLine !== ann.anchorLine) {
@@ -297,6 +299,7 @@ export class AnnotationSyncEngine {
                 if (foundLine !== null) {
                   actualTargetLine = foundLine;
                 } else {
+                  failedDetails.push({ uuid: ann.uuid, reason: 'span_fingerprint_search_failed' });
                   failed++;
                   continue;
                 }
@@ -317,6 +320,7 @@ export class AnnotationSyncEngine {
                 spansRecovered++;
               }
             } else {
+              failedDetails.push({ uuid: ann.uuid, reason: 'span_target_line_out_of_bounds' });
               failed++;
             }
           }
@@ -334,6 +338,7 @@ export class AnnotationSyncEngine {
         for (const ann of regionAnnotations) {
           const parsed = regionByUuid.get(ann.uuid);
           if (!parsed) {
+            failedDetails.push({ uuid: ann.uuid, reason: 'region_anchor_missing' });
             failed++;
             continue;
           }
@@ -362,6 +367,26 @@ export class AnnotationSyncEngine {
       await this.plugin.updateSpanCache(filePath);
       await this.plugin.updateRegionCache(filePath);
       this.scheduleSidebarRefresh();
+
+      // P0-1 修复：恢复失败时发送通知并标记标注状态
+      if (failedDetails.length > 0) {
+        for (const detail of failedDetails) {
+          try {
+            const ann = await annotationStore.getAnnotation(detail.uuid);
+            if (ann) {
+              await annotationStore.updateAnnotation(detail.uuid, {
+                flags: { ...ann.flags, needsCorrection: true },
+              });
+            }
+          } catch {
+            // 标注可能已被删除，忽略
+          }
+        }
+        new Notice(`⚠️ ${failedDetails.length} 个标注恢复失败，已标记为需修正`, 5000);
+      }
+      if (inlineRecovered + blocksRecovered + spansRecovered > 0) {
+        new Notice(`✅ 已恢复 ${inlineRecovered + blocksRecovered + spansRecovered} 个标注位置`, 3000);
+      }
     } finally {
       this.plugin.modifyGuard.release(filePath);
     }

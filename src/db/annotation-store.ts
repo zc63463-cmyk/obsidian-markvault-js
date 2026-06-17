@@ -276,6 +276,11 @@ export class AnnotationStore {
       }
     }
 
+    // 🔧 P0-9 修复：自动更新 updatedAt（除非调用方显式传入）
+    if ((filteredChanges as Record<string, unknown>)['updatedAt'] === undefined) {
+      (filteredChanges as Record<string, unknown>)['updatedAt'] = Date.now();
+    }
+
     // 合并变更
     const newAnn: Annotation = stripExtraFields({ ...oldAnn, ...filteredChanges });
     this.indexLayer.byUuid.set(uuid, newAnn);
@@ -427,6 +432,7 @@ export class AnnotationStore {
     if (ann.tags.includes(tag)) return;
 
     this.indexLayer.removeFromIndex(uuid);
+    ann.updatedAt = Date.now(); // P0-9: 自动更新 updatedAt
     ann.tags.push(tag);
     this.indexLayer.addToIndex(ann);
     this.persistLayer._markDirty(ann.filePath);
@@ -445,6 +451,7 @@ export class AnnotationStore {
     if (idx === -1) return;
 
     this.indexLayer.removeFromIndex(uuid);
+    ann.updatedAt = Date.now(); // P0-9: 自动更新 updatedAt
     ann.tags.splice(idx, 1);
     this.indexLayer.addToIndex(ann);
     this.persistLayer._markDirty(ann.filePath);
@@ -460,6 +467,7 @@ export class AnnotationStore {
     }
 
     this.indexLayer.removeFromIndex(uuid);
+    ann.updatedAt = Date.now(); // P0-9: 自动更新 updatedAt
     ann.flags = { ...ann.flags, ...flagChanges };
     this.indexLayer.addToIndex(ann);
     this.persistLayer._markDirty(ann.filePath);
@@ -477,6 +485,7 @@ export class AnnotationStore {
     if (ann.groups?.includes(group)) return;
 
     this.indexLayer.removeFromIndex(uuid);
+    ann.updatedAt = Date.now(); // P0-9: 自动更新 updatedAt
     if (!ann.groups) {
       ann.groups = [];
     }
@@ -496,6 +505,7 @@ export class AnnotationStore {
     if (idx === -1) return;
 
     this.indexLayer.removeFromIndex(uuid);
+    ann.updatedAt = Date.now(); // P0-9: 自动更新 updatedAt
     ann.groups.splice(idx, 1);
     if (ann.groups.length === 0) {
       delete ann.groups;

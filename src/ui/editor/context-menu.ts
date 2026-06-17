@@ -730,8 +730,18 @@ async function createBlockAnnotation(
 
   // 如果目标块是列表项，把锚点缩进到列表层级，
   // 避免插入非列表行导致有序列表断裂和阅读模式 section 分割。
-  const editorLines = editor.getValue().split('\n');
+  const editorContent = editor.getValue();
+  const editorLines = editorContent.split('\n');
   const { startAnchorPrefix, endAnchorPrefix } = getBlockAnchorPrefixesForListItem(editorLines, anchorLine);
+
+  // P0-5 修复：提取 contextBefore/contextAfter（与阅读模式保持一致）
+  const blockStartOffset = editor.posToOffset({ line: blockInfo.startLine, ch: 0 });
+  const blockEndOffset = editor.posToOffset({ line: blockInfo.endLine + 1, ch: 0 });
+  const contextBefore = editorContent.substring(Math.max(0, blockStartOffset - 80), blockStartOffset);
+  const contextAfter = editorContent.substring(
+    Math.min(editorContent.length, blockEndOffset),
+    Math.min(editorContent.length, blockEndOffset + 80),
+  );
 
   // 计算两个锚点插入后，块内容在文档中的结束位置（用于 endOffset 近似）
   const startAnchorWithNewline = startAnchorPrefix + startAnchor + '\n';
@@ -748,8 +758,8 @@ async function createBlockAnnotation(
     endOffset: anchorOffset + startAnchorWithNewline.length + blockInfo.content.length + 1 + endAnchorWithNewline.length,
     startLine: anchorLine,
     endLine: blockInfo.endLine + 2,
-    contextBefore: '',
-    contextAfter: '',
+    contextBefore,
+    contextAfter,
     blockType: blockInfo.type,
     targetLine: anchorLine + 1,
     anchorLine,

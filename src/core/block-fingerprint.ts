@@ -169,8 +169,12 @@ export function findBlockLineBySignature(
 /**
  * 在目标区域附近搜索匹配的 span 文本
  *
+ * P0-4 修复：从候选行开始累积多行文本计算指纹，
+ * 因为 targetHash 是多行文本的指纹（computeSpanSignature），
+ * 逐行单行指纹比较永远不匹配多行 span。
+ *
  * @param lines 文档行数组
- * @param signature 目标 span 文本指纹
+ * @param signature 目标 span 文本指纹（多行指纹）
  * @param preferredLine 首选起始行
  * @param searchWindow 搜索半径
  * @returns 匹配到的起始行号，未找到返回 null
@@ -194,12 +198,25 @@ export function findSpanLineBySignature(
     if (line.length === 0) continue;
     if (/^%%markvault(-span)?:/.test(line)) continue;
 
-    const candidateSig = computeSignature(line);
-    if (candidateSig === signature) {
-      const dist = Math.abs(i - preferredLine);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestLine = i;
+    // 从此行开始累积多行文本，最多尝试 20 行
+    let accumulated = '';
+    for (let j = i; j < Math.min(lines.length, i + 20); j++) {
+      const trimmed = lines[j].trim();
+      if (/^%%markvault(-span)?:/.test(trimmed)) break;
+      if (trimmed.length === 0 && accumulated.length > 0) {
+        accumulated += ' ';
+        continue;
+      }
+      accumulated += (accumulated ? ' ' : '') + trimmed;
+
+      const candidateSig = computeSpanSignature(accumulated);
+      if (candidateSig === signature) {
+        const dist = Math.abs(i - preferredLine);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestLine = i;
+        }
+        break; // 找到匹配，无需继续累积
       }
     }
   }
