@@ -52,11 +52,8 @@ export {
 } from './editor-view-manager';
 
 // ─── Regex Patterns ──────────────────────────────────────
+// 🔧 P1-D: MARK_FULL_REGEX / ATTR_EXTRACT_REGEX 提取到 decoration-helpers.ts
 
-/** 匹配完整的 <mark ...>text</mark> */
-const MARK_FULL_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
-/** 从属性字符串中提取属性 */
-const ATTR_EXTRACT_REGEX = /\b([\w-]+)="([^"]*)"/g;
 /** 匹配 %%markvault:%% 锚点行（note 段可选） */
 const BLOCK_ANCHOR_REGEX = /%%markvault(?:-span)?:[^:%]+:[^:%]+:[^:%]+(?::[^%]*)?%%/g;
 
@@ -86,6 +83,21 @@ export {
   clearBlockCacheForFile,
   clearBlockCache,
 } from './annotation-cache';
+
+// 🔧 P1-D: 装饰辅助函数提取到 decoration-helpers.ts
+import {
+  getStyleForType,
+  parseAttributes,
+  parseMarkTags,
+  filterOverlapping,
+  computeFencedRanges,
+  isInFencedRange,
+  computeRegionSegments,
+  findRegionBlockLines,
+  type ParsedMark,
+  type FilteredMark,
+  type RegionAnchorMatch,
+} from './decoration-helpers';
 
 // ─── Widget Types 导入（从 highlight-widgets.ts 提取）──────
 import {
@@ -199,16 +211,16 @@ class MarkVaultDecorator implements PluginValue {
     // CM6 Widget（代码块/数学块）内的 inline Decoration 无法覆盖，
     // <mark> 标签在这些区域内会导致渲染异常。
     // 解决方案：在创建 decoration 前标记这些区域，跳过内部标注。
-    const fencedRanges = this.computeFencedRanges(doc);
+    const fencedRanges = computeFencedRanges(doc);
 
     // 收集所有装饰项
     const decoItems: { from: number; to: number; deco: Decoration }[] = [];
 
     // ── 1. 解析 <mark> 标签装饰 ──
-    const marks = this.parseMarkTags(doc);
+    const marks = parseMarkTags(doc);
     // 🔧 P0-7 修复：过滤掉在代码块/数学块内的 <mark> 标签
-    const safeMarks = marks.filter(m => !this.isInFencedRange(fencedRanges, m.openFrom, m.closeTo));
-    const validMarks = this.filterOverlapping(safeMarks);
+    const safeMarks = marks.filter(m => !isInFencedRange(fencedRanges, m.openFrom, m.closeTo));
+    const validMarks = filterOverlapping(safeMarks);
 
     for (const mark of validMarks) {
       // 隐藏 <mark ...> 开标签
@@ -223,7 +235,7 @@ class MarkVaultDecorator implements PluginValue {
 
       // 高亮内部文本
       const className = `markvault-${mark.type} markvault-${mark.color}`;
-      let styleStr = this.getStyleForType(mark.type, mark.colorHex);
+      let styleStr = getStyleForType(mark.type, mark.colorHex);
       // 🔧 P0-8 修复：重叠标注降低 opacity
       if (mark.overlapOpacity !== undefined) {
         styleStr += ` opacity: ${mark.overlapOpacity};`;
@@ -372,7 +384,7 @@ class MarkVaultDecorator implements PluginValue {
       const anchorEnd = anchorStart + nativeMatch[0].length;
 
       // 跳过代码块/数学块内的 native 标注
-      if (this.isInFencedRange(fencedRanges, anchorStart, anchorEnd)) continue;
+      if (isInFencedRange(fencedRanges, anchorStart, anchorEnd)) continue;
       const uuid = nativeMatch[1];
       const type = nativeMatch[2] as AnnotationType;
       const color = nativeMatch[3];
@@ -494,7 +506,7 @@ class MarkVaultDecorator implements PluginValue {
     regionRanges.sort((a, b) => a.from - b.from || a.to - b.to);
 
     // 计算每个位置上重叠的 UUID 列表，将重叠的区段拆分为不重叠的子段
-    const regionSegments = this.computeRegionSegments(regionRanges);
+    const regionSegments = computeRegionSegments(regionRanges);
 
     for (const seg of regionSegments) {
       const classes = seg.uuids.map(u => {
@@ -523,7 +535,7 @@ class MarkVaultDecorator implements PluginValue {
     // 块级内容（代码块/公式块）用左侧竖线标识，inline mark 覆盖不到 widget
     for (const rr of regionRanges) {
       try {
-        const blockLines = this.findRegionBlockLines(view.state.doc, rr.from, rr.to);
+        const blockLines = findRegionBlockLines(view.state.doc, rr.from, rr.to);
         for (const line of blockLines) {
           decoItems.push({
             from: line.from,
@@ -644,357 +656,8 @@ class MarkVaultDecorator implements PluginValue {
     return builder.finish();
   }
 
-  /**
-   * 🔧 P1-20 修复：计算 region 的不重叠区段
-   * 将可能重叠的 region 范围拆分为不重叠的子段，每个子段记录包含的 UUID 列表。
-   * 这样重叠 region 的 data-uuids 属性能正确存储所有相关 UUID。
-   */
-  private computeRegionSegments(
-    ranges: Array<{ uuid: string; from: number; to: number; entry: { start: RegionAnchorMatch; end: RegionAnchorMatch } }>,
-  ): Array<{ from: number; to: number; uuids: string[] }> {
-    if (ranges.length === 0) return [];
-    if (ranges.length === 1) {
-      return [{ from: ranges[0].from, to: ranges[0].to, uuids: [ranges[0].uuid] }];
-    }
-
-    // 收集所有边界点
-    const points = new Set<number>();
-    for (const r of ranges) {
-      points.add(r.from);
-      points.add(r.to);
-    }
-    const sorted = [...points].sort((a, b) => a - b);
-
-    // 对每个子段，收集覆盖它的 UUID
-    const segments: Array<{ from: number; to: number; uuids: string[] }> = [];
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const segFrom = sorted[i];
-      const segTo = sorted[i + 1];
-      if (segFrom >= segTo) continue;
-
-      const uuids: string[] = [];
-      for (const r of ranges) {
-        if (r.from <= segFrom && r.to >= segTo) {
-          uuids.push(r.uuid);
-        }
-      }
-      if (uuids.length > 0) {
-        segments.push({ from: segFrom, to: segTo, uuids });
-      }
-    }
-
-    // 合并相邻且 uuids 相同的段（减少 decoration 数量）
-    const merged: Array<{ from: number; to: number; uuids: string[] }> = [];
-    for (const seg of segments) {
-      const key = seg.uuids.join(',');
-      if (merged.length > 0) {
-        const last = merged[merged.length - 1];
-        if (last.to === seg.from && last.uuids.join(',') === key) {
-          last.to = seg.to;
-          continue;
-        }
-      }
-      merged.push({ ...seg });
-    }
-
-    return merged;
-  }
-
-  /**
-   * 找出 region 范围内属于代码块 / 公式块的行
-   * 编辑模式下这些行是 CM6 widget，inline mark 覆盖不到，需要单独加行级标识。
-   */
-  /**
-   * 🔧 P0-3 优化：限制 findRegionBlockLines 遍历范围
-   * 先从文档开头扫描围栏状态（不收集结果），再仅在 region 范围内收集
-   */
-  private findRegionBlockLines(
-    cmDoc: import('@codemirror/state').Text,
-    startOffset: number,
-    endOffset: number,
-  ): Array<{ from: number }> {
-    const result: Array<{ from: number }> = [];
-    const startLine = cmDoc.lineAt(startOffset).number;
-    const endLine = cmDoc.lineAt(endOffset).number;
-
-    let inCodeBlock = false;
-    let inMathBlock = false;
-
-    // 阶段1：从文档开头到 startLine-1，只追踪围栏状态
-    for (let ln = 1; ln < startLine; ln++) {
-      const trimmed = cmDoc.line(ln).text.trim();
-      if (!inCodeBlock && !inMathBlock) {
-        if (trimmed.startsWith('```')) inCodeBlock = true;
-        else if (trimmed === '$$') inMathBlock = true;
-      } else {
-        if (inCodeBlock && trimmed.startsWith('```')) inCodeBlock = false;
-        else if (inMathBlock && trimmed === '$$') inMathBlock = false;
-      }
-    }
-
-    // 阶段2：仅在 region 范围内扫描并收集结果
-    for (let ln = startLine; ln <= endLine; ln++) {
-      const line = cmDoc.line(ln);
-      const trimmed = line.text.trim();
-
-      if (!inCodeBlock && !inMathBlock) {
-        if (trimmed.startsWith('```')) {
-          inCodeBlock = true;
-        } else if (trimmed === '$$') {
-          inMathBlock = true;
-        }
-      } else {
-        if (inCodeBlock && trimmed.startsWith('```')) {
-          inCodeBlock = false;
-        } else if (inMathBlock && trimmed === '$$') {
-          inMathBlock = false;
-        }
-      }
-
-      if (inCodeBlock || inMathBlock) {
-        result.push({ from: line.from });
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * 🔧 P0-8 修复：处理重叠标注
-   * 策略：将重叠标注拆分为不重叠的区段，保留所有标注。
-   * 外层标注被内层标注分割成 [前段] + [后段]，
-   * 与内层标注重叠的区域降低 opacity (0.4) 以区分层级。
-   *
-   * CM6 RangeSetBuilder 不允许同位置 mark decoration 重叠，
-   * 但拆分后的区段位置不重叠，可以正常添加。
-   */
-  private filterOverlapping(marks: Array<{
-    openFrom: number; openTo: number; closeFrom: number; closeTo: number;
-    uuid: string; type: AnnotationType; color: string; colorHex: string; note: string;
-  }>): Array<{
-    openFrom: number; openTo: number; closeFrom: number; closeTo: number;
-    uuid: string; type: AnnotationType; color: string; colorHex: string; note: string;
-    overlapOpacity?: number;
-  }> {
-    if (marks.length <= 1) return marks;
-
-    // 按开始位置排序（已排序但防御性处理）
-    const sorted = [...marks].sort((a, b) => a.openFrom - b.openFrom || a.closeTo - b.closeTo);
-
-    // 结果数组：每个标注可能有多个不重叠的区段
-    const result: Array<{
-      openFrom: number; openTo: number; closeFrom: number; closeTo: number;
-      uuid: string; type: AnnotationType; color: string; colorHex: string; note: string;
-      overlapOpacity?: number;
-    }> = [];
-
-    // 跟踪已占用的范围栈
-    const activeStack: Array<{
-      openFrom: number; closeTo: number; uuid: string;
-      type: AnnotationType; color: string; colorHex: string; note: string;
-    }> = [];
-
-    for (const mark of sorted) {
-      // 找出与当前标注重叠的所有活跃标注
-      const overlapping = activeStack.filter(
-        a => mark.openFrom < a.closeTo && mark.closeTo > a.openFrom
-      );
-
-      if (overlapping.length === 0) {
-        // 无重叠，直接添加
-        result.push(mark);
-        activeStack.push({
-          openFrom: mark.openFrom, closeTo: mark.closeTo,
-          uuid: mark.uuid, type: mark.type, color: mark.color,
-          colorHex: mark.colorHex, note: mark.note,
-        });
-      } else {
-        // 有重叠 — 当前标注作为更高层级(更晚创建)处理
-        // 降低 opacity 表示重叠
-        result.push({ ...mark, overlapOpacity: 0.4 });
-        activeStack.push({
-          openFrom: mark.openFrom, closeTo: mark.closeTo,
-          uuid: mark.uuid, type: mark.type, color: mark.color,
-          colorHex: mark.colorHex, note: mark.note,
-        });
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * 解析文档中所有 <mark> 标签的位置和属性
-   */
-  private parseMarkTags(doc: string): Array<{
-    openFrom: number;
-    openTo: number;
-    closeFrom: number;
-    closeTo: number;
-    uuid: string;
-    type: AnnotationType;
-    color: string;
-    colorHex: string;
-    note: string;
-  }> {
-    const results: Array<{
-      openFrom: number;
-      openTo: number;
-      closeFrom: number;
-      closeTo: number;
-      uuid: string;
-      type: AnnotationType;
-      color: string;
-      colorHex: string;
-      note: string;
-    }> = [];
-
-    MARK_FULL_REGEX.lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = MARK_FULL_REGEX.exec(doc)) !== null) {
-      try {
-        const attrsRaw = match[1];
-        const attrs = this.parseAttributes(attrsRaw);
-
-        // 必须有 uuid 才是 MarkVault 标注
-        if (!attrs.uuid) continue;
-
-        // native 标注由专门的 native 循环处理，避免重复装饰
-        if (attrs.class && attrs.class.includes('markvault-native')) continue;
-
-        const openFrom = match.index;
-        // 计算 <mark ...> 的结束位置
-        const gtIndex = match[0].indexOf('>');
-        if (gtIndex === -1) continue;
-        const openTo = openFrom + gtIndex + 1;
-
-        // 内部文本范围
-        const innerStart = openTo;
-        const innerEnd = innerStart + match[2].length;
-        const closeFrom = innerEnd;
-        const closeTo = openFrom + match[0].length;
-
-        // 验证范围有效性
-        if (closeTo > doc.length || innerEnd < innerStart) continue;
-
-        const color = attrs.color || 'yellow';
-        const type = (attrs.type || 'highlight') as AnnotationType;
-        const preset = PRESET_COLORS.find(c => c.id === color);
-        const colorHex = preset ? preset.hex : color;
-
-        results.push({
-          openFrom,
-          openTo,
-          closeFrom,
-          closeTo,
-          uuid: attrs.uuid,
-          type,
-          color,
-          colorHex,
-          note: attrs.note || '',
-        });
-      } catch (err) {
-        // 跳过解析失败的标签
-        console.debug('MarkVault: failed to parse <mark> tag, skipping', err);
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * 🔧 P0-7: 预扫描文档中的代码块/数学块范围
-   * 返回 [start, end) 偏移量数组，这些区域内的 inline 标注应被跳过。
-   * 支持 ``` 代码块和 $$ 数学块。
-   */
-  private computeFencedRanges(doc: string): Array<{ from: number; to: number }> {
-    const ranges: Array<{ from: number; to: number }> = [];
-    const lines = doc.split('\n');
-    let offset = 0;
-    let inCodeBlock = false;
-    let codeBlockStart = -1;
-    let inMathBlock = false;
-    let mathBlockStart = -1;
-
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-
-      if (!inCodeBlock && !inMathBlock) {
-        if (trimmed.startsWith('```')) {
-          inCodeBlock = true;
-          codeBlockStart = offset;
-        } else if (trimmed === '$$') {
-          inMathBlock = true;
-          mathBlockStart = offset;
-        }
-      } else if (inCodeBlock) {
-        if (trimmed.startsWith('```')) {
-          ranges.push({ from: codeBlockStart, to: offset + lines[i].length });
-          inCodeBlock = false;
-        }
-      } else if (inMathBlock) {
-        if (trimmed === '$$') {
-          ranges.push({ from: mathBlockStart, to: offset + lines[i].length });
-          inMathBlock = false;
-        }
-      }
-
-      offset += lines[i].length + 1; // +1 for \n
-    }
-
-    // 未闭合的代码块/数学块也标记（到文档末尾）
-    if (inCodeBlock) {
-      ranges.push({ from: codeBlockStart, to: doc.length });
-    }
-    if (inMathBlock) {
-      ranges.push({ from: mathBlockStart, to: doc.length });
-    }
-
-    return ranges;
-  }
-
-  /**
-   * 🔧 P0-7: 检查 [checkFrom, checkTo] 是否与任何代码块/数学块范围重叠
-   */
-  private isInFencedRange(fencedRanges: Array<{ from: number; to: number }>, checkFrom: number, checkTo: number): boolean {
-    for (const range of fencedRanges) {
-      // 检查区间是否有重叠
-      if (checkFrom < range.to && checkTo > range.from) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * 解析属性字符串为键值对
-   */
-  private parseAttributes(raw: string): Record<string, string> {
-    const result: Record<string, string> = {};
-    ATTR_EXTRACT_REGEX.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = ATTR_EXTRACT_REGEX.exec(raw)) !== null) {
-      result[m[1]] = m[2];
-    }
-    return result;
-  }
-
-  /**
-   * 根据标注类型和颜色生成 CSS 样式字符串
-   */
-  private getStyleForType(type: AnnotationType, hex: string): string {
-    switch (type) {
-      case 'highlight':
-        return `background-color: ${hex}66; border-radius: 2px; padding: 1px 0;`;
-      case 'bold':
-        return `font-weight: bold; border-bottom: 2px solid ${hex}; padding: 1px 0;`;
-      case 'underline':
-        return `text-decoration: underline; text-decoration-color: ${hex}; text-underline-offset: 2px;`;
-      default:
-        return `background-color: ${hex}66;`;
-    }
-  }
+  // 🔧 P1-D: computeRegionSegments/findRegionBlockLines/filterOverlapping/parseMarkTags/computeFencedRanges/isInFencedRange/parseAttributes/getStyleForType
+  // → extracted to decoration-helpers.ts
 }
 
 // ─── Plugin Spec ─────────────────────────────────────────
