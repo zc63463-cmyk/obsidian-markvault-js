@@ -7,19 +7,29 @@
  * 三类孤立原因：
  * - file_deleted: 标注所属文件已被删除
  * - anchor_missing: 文件存在但 MD 中找不到对应的锚点/标签
+ * - content_changed: 锚点存在但目标内容指纹不匹配（锚点漂移）
  */
 
 import type { App, TFile } from 'obsidian';
 import type { AnnotationStore } from './annotation-store';
 import { parseAllAnnotationsFromMarkdown } from '../core/annotation-parser';
+import {
+  computeBlockSignature,
+  computeSpanSignature,
+  computeSignature,
+  findBlockLineBySignature,
+  findSpanLineBySignature,
+  detectBlockTypeAtLine,
+} from '../core/block-fingerprint';
 
 /** 孤儿标注信息 */
 export interface OrphanInfo {
   uuid: string;
   filePath: string;
-  reason: 'file_deleted' | 'anchor_missing';
+  reason: 'file_deleted' | 'anchor_missing' | 'content_changed';
   text: string;           // DB 中的标注文本（用于预览）
   detectedAt: number;     // 检测时间戳
+  recoverable: boolean;   // 是否可通过 targetHash 恢复
 }
 
 /**
@@ -59,26 +69,49 @@ export async function detectOrphans(app: App, store: AnnotationStore): Promise<O
           reason: 'file_deleted',
           text: ann.text,
           detectedAt: now,
+          recoverable: false,
         });
       }
       continue;
     }
 
-    // 原因 2: 文件存在但 MD 中找不到对应 UUID
+    // 原因 2 & 3: 文件存在但 MD 中找不到对应 UUID / 或锚点存在但内容漂移
     try {
       const content = await app.vault.read(file as TFile);
+      const lines = content.split('\n');
       const mdAnnotations = parseAllAnnotationsFromMarkdown(content, filePath);
       const mdUuids = new Set(mdAnnotations.map(a => a.uuid));
 
       for (const ann of annotations) {
         if (!mdUuids.has(ann.uuid)) {
+          // 锚点在 MD 中完全缺失 → 尝试 targetHash 恢复判断
+          const recoverable = canRecoverByHash(ann, lines);
           orphans.push({
             uuid: ann.uuid,
             filePath,
             reason: 'anchor_missing',
             text: ann.text,
             detectedAt: now,
+            recoverable,
           });
+        } else {
+          // 锚点存在，检查 targetHash 是否匹配（内容漂移检测）
+          if (ann.targetHash && (ann.kind === 'block' || ann.kind === 'span')) {
+            const currentSig = computeCurrentSignature(ann, lines);
+            if (currentSig && currentSig !== ann.targetHash) {
+              // 指纹不匹配 → 内容已变更，但锚点仍在
+              // 检查是否能在附近找到匹配（可恢复）
+              const foundLine = findMatchByHash(ann, lines);
+              orphans.push({
+                uuid: ann.uuid,
+                filePath,
+                reason: 'content_changed',
+                text: ann.text,
+                detectedAt: now,
+                recoverable: foundLine !== null,
+              });
+            }
+          }
         }
       }
     } catch (err) {
@@ -91,12 +124,70 @@ export async function detectOrphans(app: App, store: AnnotationStore): Promise<O
           reason: 'anchor_missing',
           text: ann.text,
           detectedAt: now,
+          recoverable: false,
         });
       }
     }
   }
 
   return orphans;
+}
+
+/**
+ * 判断标注是否可通过 targetHash 在当前文档中恢复位置
+ */
+function canRecoverByHash(ann: typeof ann extends infer T ? T : never, lines: string[]): boolean {
+  if (!ann.targetHash) return false;
+  if (ann.kind !== 'block' && ann.kind !== 'span') return false;
+
+  return findMatchByHash(ann, lines) !== null;
+}
+
+/**
+ * 在文档中搜索 targetHash 匹配的行
+ */
+function findMatchByHash(
+  ann: { kind: string; targetHash: string; targetLine?: number; anchorLine?: number; blockType?: string },
+  lines: string[],
+): number | null {
+  const preferredLine = ann.targetLine ?? ann.anchorLine ?? 0;
+
+  if (ann.kind === 'block') {
+    return findBlockLineBySignature(
+      lines,
+      ann.blockType || 'paragraph',
+      ann.targetHash,
+      preferredLine,
+    );
+  } else if (ann.kind === 'span') {
+    return findSpanLineBySignature(
+      lines,
+      ann.targetHash,
+      preferredLine,
+    );
+  }
+
+  return null;
+}
+
+/**
+ * 计算标注在当前文档中对应位置的签名
+ */
+function computeCurrentSignature(
+  ann: { kind: string; targetLine?: number; anchorLine?: number; blockType?: string; text?: string },
+  lines: string[],
+): string | null {
+  const preferredLine = ann.targetLine ?? ann.anchorLine ?? 0;
+
+  if (ann.kind === 'block') {
+    return computeBlockSignature(lines, preferredLine, ann.blockType) || null;
+  } else if (ann.kind === 'span') {
+    if (preferredLine >= 0 && preferredLine < lines.length) {
+      return computeSpanSignature(lines[preferredLine]) || null;
+    }
+  }
+
+  return null;
 }
 
 /**

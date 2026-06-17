@@ -18,7 +18,7 @@ import { markdownToPlainWithMap } from '../core/markdown-plain';
 import { buildAnnotation, finalizeAnnotation } from '../core/annotation-creator';
 import { buildNativeAnnotation } from '../core/native-annotation';
 import { buildRegionAnchor } from '../core/region-annotation';
-import { computeSignature, computeSpanSignature } from '../core/block-fingerprint';
+import { computeSignature, computeBlockSignature, computeSpanSignature } from '../core/block-fingerprint';
 import {
   getBlockAnchorPrefixesForListItem,
   adjustRegionStartOffsetForListItem,
@@ -126,7 +126,7 @@ export class AnnotationCreator {
           blockType: blockInfo.type,
           targetLine: blockInfo.startLine + 1,
           anchorLine: blockInfo.startLine,
-          targetHash: computeSignature(blockContent),
+          targetHash: computeBlockSignature(lines, blockInfo.startLine, blockInfo.type) || computeSignature(blockContent),
         });
 
         await finalizeAnnotation(annotation, {

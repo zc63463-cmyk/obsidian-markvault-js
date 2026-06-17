@@ -14,6 +14,7 @@
 
 import type { Annotation, AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
+import { computeSpanSignature } from './block-fingerprint';
 
 /** 匹配 region start/end 锚点
  *  🔧 关键修复：note 字段使用 [^\n]* 而非 [^%]*，
@@ -174,7 +175,7 @@ export function parseRegionAnnotations(
       createdAt: 0,
       updatedAt: 0,
       kind: 'region',
-      targetHash: '',
+      targetHash: computeSpanSignature(content.substring(contentStart, contentEnd)),
       _source: 'markdown' as const,
     });
   }

@@ -80,6 +80,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
         anchorLine: cleanAnn.anchorLine,
         spanRanges: cleanAnn.spanRanges,
         fields: cleanAnn.fields,
+        targetHash: cleanAnn.targetHash,
       };
 
       await annotationStore.addAnnotation(annotation);

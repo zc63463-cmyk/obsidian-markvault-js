@@ -117,8 +117,16 @@ export class OrphanPanel {
         const info = item.createDiv({ cls: 'markvault-orphans-item-info' });
         info.createDiv({ cls: 'markvault-orphans-item-text', text: o.text.slice(0, 60) + (o.text.length > 60 ? '...' : '') });
         const meta = info.createDiv({ cls: 'markvault-orphans-item-meta' });
-        meta.createSpan({ text: o.reason === 'file_deleted' ? 'File deleted' : 'Anchor missing' });
-        meta.createSpan({ text: ' · ' });
+        const reasonLabel = o.reason === 'file_deleted' ? 'File deleted'
+          : o.reason === 'content_changed' ? 'Content changed'
+          : 'Anchor missing';
+        meta.createSpan({ text: reasonLabel });
+        if (o.recoverable) {
+          meta.createSpan({ text: ' · ', cls: 'markvault-orphans-recoverable-dot' });
+          meta.createSpan({ text: 'Recoverable', cls: 'markvault-orphans-recoverable' });
+        } else {
+          meta.createSpan({ text: ' · ' });
+        }
         meta.createSpan({ text: o.uuid.slice(0, 8) + '...' });
 
         // 单条删除按钮

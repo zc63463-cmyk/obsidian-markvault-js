@@ -21,7 +21,7 @@ import { annotationStore } from '../../db/annotation-store';
 import { buildMarkTag, buildBlockAnchorStart, buildBlockAnchorEnd, buildSpanAnchor, updateMarkTag } from '../../core/annotation-parser';
 import { buildNativeAnnotation } from '../../core/native-annotation';
 import { buildRegionAnchor } from '../../core/region-annotation';
-import { computeSignature, computeSpanSignature } from '../../core/block-fingerprint';
+import { computeSignature, computeBlockSignature, computeSpanSignature } from '../../core/block-fingerprint';
 import { generateId } from '../../utils/id';
 import { extractContext } from '../../utils/context';
 import { scanMarkdownContexts, detectBlockAtLine, type BlockInfo } from '../../core/md-context';
@@ -753,7 +753,7 @@ async function createBlockAnnotation(
     blockType: blockInfo.type,
     targetLine: anchorLine + 1,
     anchorLine,
-    targetHash: computeSignature(blockInfo.content),
+    targetHash: computeBlockSignature(editorLines, anchorLine, blockInfo.type) || computeSignature(blockInfo.content),
   });
 
   // 🔧 BUG-5.3 修复：在 replaceRange 前预填充 block 缓存
