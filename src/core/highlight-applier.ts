@@ -48,7 +48,7 @@ export {
   requestRegionLayerRedraw,
   setFilePathResolver,
   setAnnotationClickHandler,
-  type regionCacheUpdatedEffect,
+  regionCacheUpdatedEffect,
 } from './editor-view-manager';
 
 // ─── Regex Patterns ──────────────────────────────────────
@@ -98,6 +98,8 @@ class MarkVaultDecorator implements PluginValue {
   private clickHandler: ((e: MouseEvent) => void) | null = null;
   /** 🔧 P1-21 修复：debounce 定时器，快速连续输入时合并重绘 */
   private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 🔧 审查修复：保存 view 引用，destroy 时 removeEventListener */
+  private _view: EditorView | null = null;
 
   constructor(view: EditorView) {
     this.decorations = this.buildDecorations(view);
@@ -119,6 +121,7 @@ class MarkVaultDecorator implements PluginValue {
       }
     };
     view.dom.addEventListener('click', this.clickHandler);
+    this._view = view;
   }
 
   update(update: ViewUpdate) {
@@ -146,9 +149,13 @@ class MarkVaultDecorator implements PluginValue {
   }
 
   destroy() {
-    // 🔧 P1-17 修复：清理点击事件监听
+    // 🔧 审查修复：先移除事件监听器再置空引用，避免 listener 泄漏
     if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
+    if (this.clickHandler && this._view) {
+      this._view.dom.removeEventListener('click', this.clickHandler);
+    }
     this.clickHandler = null;
+    this._view = null;
   }
 
   private buildDecorations(view: EditorView): DecorationSet {

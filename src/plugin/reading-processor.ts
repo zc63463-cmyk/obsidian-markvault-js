@@ -7,7 +7,6 @@ import { requestRegionLayerRedraw } from '../core/highlight-applier';
 import type { ChangeInfo } from '../core/offset-tracker';
 import { applyIncrementalOffsetFix } from '../core/offset-tracker';
 import { parseRegionAnnotations, REGION_ANCHOR_REGEX, buildRegionAnchor } from '../core/region-annotation';
-import { parseRegionAnnotations, REGION_ANCHOR_REGEX, buildRegionAnchor } from '../core/region-annotation';
 import { markdownToPlainWithMap } from '../core/markdown-plain';
 import { ModifyGuard } from '../utils/modify-guard';
 import { ReadingModeToolbar } from '../ui/reading/ReadingModeToolbar';
