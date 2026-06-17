@@ -1264,7 +1264,16 @@ export class AnnotationModal extends Modal {
           this.plugin.modifyGuard.release(this.annotation.filePath);
         }
       } else {
-        console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
+        // 🔧 非异常：block/span/region/native 锚点格式不存 tags/fields/groups 等认知字段，
+        // 仅 Store 更新即可。仅当 note/color/type/alias 均未变化时才可能是异常。
+        const mdFields = ['note', 'color', 'type', 'alias'] as const;
+        const mdFieldsChanged = mdFields.some(f => updates[f as keyof typeof updates] !== undefined);
+        if (mdFieldsChanged) {
+          // 传入了会写 MD 的字段但 MD 没变，可能是锚点格式不匹配
+          console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid}`);
+        } else {
+          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (tags/fields/groups)`);
+        }
       }
     }
 
