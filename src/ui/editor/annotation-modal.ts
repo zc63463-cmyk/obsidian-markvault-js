@@ -11,6 +11,7 @@ import { updateRegionAnnotation, removeRegionAnnotation } from '../../core/regio
 import { encodeFields, applyTemplate } from '../../utils/fields';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import { containsMermaid, attachMermaidExpandButton, openMermaidPreview } from './mermaid-preview-overlay';
+import { computeSignature } from '../../core/block-fingerprint';
 
 /**
  * 批注编辑 Modal
@@ -789,6 +790,8 @@ export class AnnotationModal extends Modal {
         }) ?? content;
       } else {
         // 行内标注：更新 <mark> 标签
+        // 🆕 inline targetHash: 文本不变时 hash 不变，但若用户编辑了 text 需重新计算
+        const inlineTargetHash = computeSignature(this.annotation.text);
         newContent = updateMarkTag(content, this.annotation.uuid, {
           note: this.noteValue,
           tags,
@@ -796,6 +799,7 @@ export class AnnotationModal extends Modal {
           type: updates.type,
           fields: Object.keys(filteredFields).length > 0 ? encodeFields(filteredFields) : '',
           alias: aliasForMD, // F5: "" 表示删除 data-alias 属性
+          targetHash: inlineTargetHash,
         });
       }
 

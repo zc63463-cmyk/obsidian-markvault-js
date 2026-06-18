@@ -96,7 +96,8 @@ export async function detectOrphans(app: App, store: AnnotationStore): Promise<O
           });
         } else {
           // 锚点存在，检查 targetHash 是否匹配（内容漂移检测）
-          if (ann.targetHash && (ann.kind === 'block' || ann.kind === 'span')) {
+          // 🆕 inline 标注也有 targetHash，纳入漂移检测
+          if (ann.targetHash) {
             const currentSig = computeCurrentSignature(ann, lines);
             if (currentSig && currentSig !== ann.targetHash) {
               // 指纹不匹配 → 内容已变更，但锚点仍在
@@ -138,7 +139,8 @@ export async function detectOrphans(app: App, store: AnnotationStore): Promise<O
  */
 function canRecoverByHash(ann: typeof ann extends infer T ? T : never, lines: string[]): boolean {
   if (!ann.targetHash) return false;
-  if (ann.kind !== 'block' && ann.kind !== 'span') return false;
+  // 🆕 inline 标注也可通过 targetHash 恢复（文本搜索匹配）
+  if (ann.kind !== 'block' && ann.kind !== 'span' && ann.kind !== 'inline') return false;
 
   return findMatchByHash(ann, lines) !== null;
 }
@@ -165,6 +167,11 @@ function findMatchByHash(
       ann.targetHash,
       preferredLine,
     );
+  } else if (ann.kind === 'inline') {
+    // 🆕 inline targetHash: 在文档中搜索匹配文本的行
+    for (let i = 0; i < lines.length; i++) {
+      if (computeSignature(lines[i]) === ann.targetHash) return i;
+    }
   }
 
   return null;
@@ -174,16 +181,21 @@ function findMatchByHash(
  * 计算标注在当前文档中对应位置的签名
  */
 function computeCurrentSignature(
-  ann: { kind: string; targetLine?: number; anchorLine?: number; blockType?: string; text?: string },
+  ann: { kind: string; targetLine?: number; anchorLine?: number; blockType?: string; text?: string; startLine?: number },
   lines: string[],
 ): string | null {
-  const preferredLine = ann.targetLine ?? ann.anchorLine ?? 0;
+  const preferredLine = ann.targetLine ?? ann.anchorLine ?? ann.startLine ?? 0;
 
   if (ann.kind === 'block') {
     return computeBlockSignature(lines, preferredLine, ann.blockType) || null;
   } else if (ann.kind === 'span') {
     if (preferredLine >= 0 && preferredLine < lines.length) {
       return computeSpanSignature(lines[preferredLine]) || null;
+    }
+  } else if (ann.kind === 'inline') {
+    // 🆕 inline targetHash: 用标注文本计算当前签名
+    if (ann.text) {
+      return computeSignature(ann.text) || null;
     }
   }
 

@@ -15,6 +15,7 @@ import type { Annotation, MarkAttributes } from '../types/annotation';
 import type { AnnotationType } from '../types/annotation';
 import { generateId } from '../utils/id';
 import { encodeFields, decodeFields } from '../utils/fields';
+import { computeSignature } from './block-fingerprint';
 
 const MARK_REGEX = /<mark\s+([^>]*)>([\s\S]*?)<\/mark>/g;
 const ATTR_REGEX = /\b([\w-]+)="([^"]*)"/g;
@@ -88,6 +89,7 @@ function parseMarkVaultAnnotations(
       groupUuid: attrs.groupUuid, // 🔧 保留组 ID
       fields: attrs.fields ? decodeFields(attrs.fields) : undefined,
       alias: attrs.alias || undefined, // v5.3: 图谱显示别名
+      targetHash: attrs.targetHash || computeSignature(innerText), // 🆕 inline targetHash
       _source: 'markdown',
     });
   }
@@ -236,6 +238,12 @@ export function buildMarkTag(annotation: Annotation, groupUuid?: string): string
 
   attrs.push(`data-note="${escapeAttr(annotation.note || '')}"`);
 
+  // 🆕 inline targetHash: 存储文本指纹，使短文本/重复文本漂移后可恢复
+  const targetHash = annotation.targetHash || computeSignature(annotation.text);
+  if (targetHash) {
+    attrs.push(`data-target-hash="${targetHash}"`);
+  }
+
   if (groupUuid || annotation.groupUuid) {
     attrs.push(`data-group-uuid="${groupUuid || annotation.groupUuid}"`);
   }
@@ -283,7 +291,7 @@ export function removeMarkTag(content: string, uuid: string): { content: string;
 export function updateMarkTag(
   content: string,
   uuid: string,
-  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type' | 'alias'>> & { fields?: string },
+  updates: Partial<Pick<Annotation, 'note' | 'tags' | 'color' | 'type' | 'alias' | 'targetHash'>> & { fields?: string },
 ): string {
   const regex = new RegExp(
     `(<mark\\s+[^>]*data-uuid="${escapeRegex(uuid)}"[^>]*>)([\\s\\S]*?)(<\\/mark>)`,
@@ -359,6 +367,19 @@ export function updateMarkTag(
         }
       } else {
         newOpenTag = newOpenTag.replace(/\s*data-alias="[^"]*"/, '');
+      }
+    }
+
+    // 🆕 inline targetHash 更新
+    if (updates.targetHash !== undefined) {
+      if (updates.targetHash) {
+        if (/data-target-hash="/.test(newOpenTag)) {
+          newOpenTag = newOpenTag.replace(/data-target-hash="[^"]*"/, `data-target-hash="${updates.targetHash}"`);
+        } else {
+          newOpenTag = newOpenTag.replace(/>$/, ` data-target-hash="${updates.targetHash}">`);
+        }
+      } else {
+        newOpenTag = newOpenTag.replace(/\s*data-target-hash="[^"]*"/, '');
       }
     }
 

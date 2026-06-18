@@ -153,8 +153,8 @@ export async function syncFromMarkdown(
       updates.format = mdAnn.format;
     }
 
-    // targetHash: block/span 的目标内容指纹，从 Markdown 重新计算
-    if ((mdAnn.kind === 'block' || mdAnn.kind === 'span') && mdAnn.targetHash && mdAnn.targetHash !== dbAnn.targetHash) {
+    // targetHash: block/span/inline 的目标内容指纹，从 Markdown 重新计算
+    if (mdAnn.targetHash && mdAnn.targetHash !== dbAnn.targetHash) {
       updates.targetHash = mdAnn.targetHash;
     }
 

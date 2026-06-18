@@ -1,7 +1,8 @@
-# MindFlow v3.0 — Obsidian 思维导图插件设计文档
+# MindFlow v3.1 — Obsidian 思维导图插件设计文档
 
-> 版本: v3.0 | 日期: 2026-06-17 | 状态: DRAFT
+> 版本: v3.1 | 日期: 2026-06-18 | 状态: DRAFT
 >
+> v3.1 变更：新增认知结构类型 (structureType)、动态性澄清、byAnnotationRef 反向索引、认知工作台定位强化
 > v3.0 变更：整合路径2标注模型（docType统一扩展）、方案B文本标注（锚点+背景色分离）、选框标注复用PDF基础设施
 
 ## 1. 概述
@@ -10,10 +11,12 @@
 
 ### 1.1 核心定位
 
-1. **独立创建**思维导图 — 不是把当前文件映射成导图，而是独立 .md 文件
+1. **独立创建**思维导图 — 不是把当前文件映射成导图，而是独立 .md 文件；不依赖 MarkVault 也可独立使用（纯导图笔记）
 2. **MD 骨架种子** — .md 标题/列表作为只读初始骨架，用户自由扩展
 3. **标注系统全链路接入** — 批注作为子节点 + 导图文本标注 + 选框标注，统一 docType 扩展模型
 4. **数据层统一，渲染层分离** — 同一 Annotation 对象，编辑器/导图/PDF 各自最优渲染
+5. **认知工作台** — 导图不是标注的"投影面"，而是认知过程的生成现场。用户在组织标注的过程中产生新的理解（解题路径发现、知识点深层关联、认知结构演化），导图捕获的是思考过程而非整理结果
+6. **多维认知结构** — 支持多种认知结构形态（流程图/脉络图/组织结构图/过程图/鱼骨图），不同结构类型对应不同的认知模式（因果分析/体系构建/分类归属/步骤复盘/归因诊断）
 
 ### 1.2 四大差异化卖点
 
@@ -100,11 +103,39 @@ interface AnnotationOverlay {
 }
 ```
 
-### 2.3 .md 文件存储格式
+### 2.3 .md 文件存储格式 + MindmapMeta
+
+```typescript
+/** v3.1: 导图元数据 — 认知结构类型 + 布局配置 */
+interface MindmapMeta {
+  /** 认知结构类型（标记用户当时的认知意图） */
+  structureType: 'flow' | 'skeleton' | 'hierarchy' | 'process' | 'fishbone' | 'freeform';
+  /** 视觉布局（默认与 structureType 推荐搭配，用户可覆盖） */
+  layout?: 'tree-right' | 'radial' | 'org' | 'fishbone';
+}
+```
+
+**structureType 语义对照**：
+
+| structureType | 认知模式 | 父子关系语义 | 典型场景 | AI 分析解释 |
+|--------------|---------|-------------|---------|-----------|
+| `flow` | 流程图 | 步骤先后 | 解题步骤、推导链 | 顺序/因果链 |
+| `skeleton` | 脉络图 | 体系归属 | 章节复习、知识骨架 | 知识体系结构 |
+| `hierarchy` | 组织结构图 | 分类包含 | 分类整理 | 层级分类 |
+| `process` | 过程图 | 认知路径 | 解题路径复盘 | 动态认知演化 |
+| `fishbone` | 鱼骨图 | 因果归因 | 错题分析、问题诊断 | 根因分析 |
+| `freeform` | 自由混合 | 用户自定义 | 不拘泥单一结构 | 混合认知模式 |
+
+**设计原则**：
+- `structureType` 是认知语义（用户意图），`layout` 是视觉渲染（显示方式），两者可独立配置但有推荐搭配
+- 同一组标注可用不同 structureType 组织 → 每次组织是一次不同的认知行为
+- AI Agent 分析导图时，structureType 告知"用户当时在用什么认知模式思考这批标注"
+- structureType 选择本身是认知意图的外在表达
 
 ```markdown
 ---
 mindmap:
+  structureType: flow
   layout: tree-right
   nodes:
     - id: n3
@@ -685,6 +716,7 @@ getAnnotationsByDocType(docType: string): Annotation[] {
 |------|---|------|
 | `byDocType` | `docType: string` | 按文档类型查询标注 |
 | `byNodeId` | `mindmapSelector.nodeId` | 按导图节点 ID 查询标注 |
+| `byAnnotationRef` | `annotationRef: string` | 从标注 UUID 反查出现在哪些导图的哪些节点（反向索引） |
 
 ### 10.3 Annotation 接口扩展
 

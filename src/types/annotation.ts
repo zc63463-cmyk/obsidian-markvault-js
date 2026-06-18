@@ -435,6 +435,7 @@ export interface MarkAttributes {
   groupUuid?: string;  // 拆分标注组 ID
   fields?: string;     // URL 编码的 fields 字符串，如 "category=定义&importance=高"
   alias?: string;      // v5.3: 图谱显示别名
+  targetHash?: string; // 🆕 inline targetHash: 文本指纹
 }
 
 /** 块级标注锚点属性 */
