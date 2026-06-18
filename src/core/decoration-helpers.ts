@@ -7,7 +7,6 @@
  * @module decoration-helpers
  */
 
-import { EditorSelection, type Extension } from '@codemirror/state';
 import { PRESET_COLORS, type AnnotationType } from '../types/annotation';
 
 // ─── 正则常量 ──────────────────────────────────────────────
@@ -181,6 +180,7 @@ export function filterOverlapping(marks: ParsedMark[]): FilteredMark[] {
 /**
  * 🔧 P0-7 修复：预扫描代码块/数学块范围
  * CM6 Widget（代码块/数学块）内的 inline Decoration 无法覆盖。
+ * 🔧 P1-D 审查修复：补回未闭合块处理（原始实现有，提取时遗漏）
  */
 export function computeFencedRanges(doc: string): Array<{ from: number; to: number }> {
   const ranges: Array<{ from: number; to: number }> = [];
@@ -188,28 +188,42 @@ export function computeFencedRanges(doc: string): Array<{ from: number; to: numb
   let offset = 0;
   let inCodeBlock = false;
   let inMathBlock = false;
-  let blockStart = 0;
+  let codeBlockStart = -1;
+  let mathBlockStart = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
+
     if (!inCodeBlock && !inMathBlock) {
       if (trimmed.startsWith('```')) {
         inCodeBlock = true;
-        blockStart = offset;
+        codeBlockStart = offset;
       } else if (trimmed === '$$') {
         inMathBlock = true;
-        blockStart = offset;
+        mathBlockStart = offset;
       }
-    } else {
-      if (inCodeBlock && trimmed.startsWith('```')) {
+    } else if (inCodeBlock) {
+      if (trimmed.startsWith('```')) {
+        ranges.push({ from: codeBlockStart, to: offset + lines[i].length });
         inCodeBlock = false;
-        ranges.push({ from: blockStart, to: offset + lines[i].length });
-      } else if (inMathBlock && trimmed === '$$') {
+      }
+    } else if (inMathBlock) {
+      if (trimmed === '$$') {
+        ranges.push({ from: mathBlockStart, to: offset + lines[i].length });
         inMathBlock = false;
-        ranges.push({ from: blockStart, to: offset + lines[i].length });
       }
     }
-    offset += lines[i].length + 1;
+
+    offset += lines[i].length + 1; // +1 for \n
+  }
+
+  // 🔧 审查修复：未闭合的代码块/数学块也标记（到文档末尾）
+  // 编辑过程中代码块可能暂时未闭合，此时应阻止内部 decoration 渲染
+  if (inCodeBlock) {
+    ranges.push({ from: codeBlockStart, to: doc.length });
+  }
+  if (inMathBlock) {
+    ranges.push({ from: mathBlockStart, to: doc.length });
   }
 
   return ranges;

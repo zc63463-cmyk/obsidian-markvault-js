@@ -92,8 +92,6 @@ import {
   isInFencedRange,
   computeRegionSegments,
   findRegionBlockLines,
-  type ParsedMark,
-  type FilteredMark,
   type RegionAnchorMatch,
 } from './decoration-helpers';
 
