@@ -11,6 +11,7 @@
  */
 
 import type { App, TFile } from 'obsidian';
+import type { Annotation } from '../types/annotation';
 import type { AnnotationStore } from './annotation-store';
 import { parseAllAnnotationsFromMarkdown } from '../core/annotation-parser';
 import {
@@ -137,7 +138,7 @@ export async function detectOrphans(app: App, store: AnnotationStore): Promise<O
 /**
  * 判断标注是否可通过 targetHash 在当前文档中恢复位置
  */
-function canRecoverByHash(ann: typeof ann extends infer T ? T : never, lines: string[]): boolean {
+function canRecoverByHash(ann: Annotation, lines: string[]): boolean {
   if (!ann.targetHash) return false;
   // 🆕 inline 标注也可通过 targetHash 恢复（文本搜索匹配）
   if (ann.kind !== 'block' && ann.kind !== 'span' && ann.kind !== 'inline') return false;
@@ -149,28 +150,30 @@ function canRecoverByHash(ann: typeof ann extends infer T ? T : never, lines: st
  * 在文档中搜索 targetHash 匹配的行
  */
 function findMatchByHash(
-  ann: { kind: string; targetHash: string; targetLine?: number; anchorLine?: number; blockType?: string },
+  ann: { kind?: string; targetHash?: string; targetLine?: number; anchorLine?: number; blockType?: string },
   lines: string[],
 ): number | null {
+  if (!ann.targetHash) return null;
+  const targetHash = ann.targetHash;
   const preferredLine = ann.targetLine ?? ann.anchorLine ?? 0;
 
   if (ann.kind === 'block') {
     return findBlockLineBySignature(
       lines,
       ann.blockType || 'paragraph',
-      ann.targetHash,
+      targetHash,
       preferredLine,
     );
   } else if (ann.kind === 'span') {
     return findSpanLineBySignature(
       lines,
-      ann.targetHash,
+      targetHash,
       preferredLine,
     );
   } else if (ann.kind === 'inline') {
     // 🆕 inline targetHash: 在文档中搜索匹配文本的行
     for (let i = 0; i < lines.length; i++) {
-      if (computeSignature(lines[i]) === ann.targetHash) return i;
+      if (computeSignature(lines[i]) === targetHash) return i;
     }
   }
 
@@ -181,7 +184,7 @@ function findMatchByHash(
  * 计算标注在当前文档中对应位置的签名
  */
 function computeCurrentSignature(
-  ann: { kind: string; targetLine?: number; anchorLine?: number; blockType?: string; text?: string; startLine?: number },
+  ann: { kind?: string; targetLine?: number; anchorLine?: number; blockType?: string; text?: string; startLine?: number },
   lines: string[],
 ): string | null {
   const preferredLine = ann.targetLine ?? ann.anchorLine ?? ann.startLine ?? 0;

@@ -1,4 +1,5 @@
 import { Editor, MarkdownView, Menu, Notice, TFile } from 'obsidian';
+import { logger } from '../../utils/logger';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import type { AnnotationType, PresetColorId, Annotation, SpanRange, AnnotationTemplate } from '../../types/annotation';
 import { PRESET_COLORS } from '../../types/annotation';
@@ -385,7 +386,7 @@ export async function createAnnotation(
   const endBlock = detectBlockAtLine(fullContent, to.line);
   const spansBlocks = !startBlock || !endBlock || startBlock.startLine !== endBlock.startLine || startBlock.endLine !== endBlock.endLine;
 
-  console.log(`MarkVault: smart routing — hasSpecial=${scanResult.hasSpecialContent}, spansBlocks=${spansBlocks}, segments=${scanResult.segments.length}`);
+  logger.debug(`MarkVault: smart routing — hasSpecial=${scanResult.hasSpecialContent}, spansBlocks=${spansBlocks}, segments=${scanResult.segments.length}`);
 
   if (!scanResult.hasSpecialContent && !spansBlocks) {
     // 纯文本且同一块：走 native inline
@@ -393,7 +394,7 @@ export async function createAnnotation(
   }
 
   // 含特殊内容或跨块：统一走 region 标注（双锚点包围区域）
-  console.log('MarkVault: selection contains special content or spans blocks, using region annotation');
+  logger.debug('MarkVault: selection contains special content or spans blocks, using region annotation');
   return createRegionAnnotation(plugin, editor, view, type, color);
 }
 
@@ -444,12 +445,12 @@ async function createSimpleAnnotation(
       const nativeTag = buildNativeAnnotation(annotation);
       editor.replaceSelection(nativeTag);
       annotation.endOffset = startOffset + nativeTag.length;
-      console.log(`MarkVault: created native inline annotation ${uuid} in ${filePath}`);
+      logger.debug(`MarkVault: created native inline annotation ${uuid} in ${filePath}`);
     } else {
       const markTag = buildMarkTag(annotation);
       editor.replaceSelection(markTag);
       annotation.endOffset = startOffset + markTag.length;
-      console.log(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
+      logger.debug(`MarkVault: created inline annotation ${uuid} in ${filePath}`);
     }
 
     // 统一持久化：Store 写入 + 缓存刷新 + 侧边栏
@@ -560,7 +561,7 @@ async function createSpanAnnotation(
       range.to += insertedLen;
     }
 
-    console.log(`MarkVault: created span annotation ${uuid} with ${spanRanges.length} ranges in ${filePath}`);
+    logger.debug(`MarkVault: created span annotation ${uuid} with ${spanRanges.length} ranges in ${filePath}`);
 
     // 统一持久化
     await finalizeAnnotation(annotation, {
@@ -656,7 +657,7 @@ async function createRegionAnnotation(
       console.warn('MarkVault: failed to select region content after creation', selErr);
     }
 
-    console.log(`MarkVault: created region annotation ${uuid} in ${filePath}`);
+    logger.debug(`MarkVault: created region annotation ${uuid} in ${filePath}`);
 
     // 统一持久化
     await finalizeAnnotation(annotation, {
@@ -780,7 +781,7 @@ async function createBlockAnnotation(
     // 在目标块后插入 end 锚点（块已被 start 锚点推下一行）
     editor.replaceRange(endAnchorWithNewline, { line: anchorLine + blockLineCount + 1, ch: 0 });
 
-    console.log(`MarkVault: created block annotation ${uuid} for ${blockInfo.type} at line ${anchorLine}`);
+    logger.debug(`MarkVault: created block annotation ${uuid} for ${blockInfo.type} at line ${anchorLine}`);
 
     // 统一持久化
     await finalizeAnnotation(annotation, {

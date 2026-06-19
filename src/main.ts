@@ -1,4 +1,5 @@
 import { Plugin, MarkdownView, TFile, Notice, type MarkdownPostProcessorContext } from 'obsidian';
+import { logger } from './utils/logger';
 import type { MarkVaultSettings, AnnotationType, Annotation, SpanRange } from './types/annotation';
 import type { MarkVaultPluginInterface } from './utils/plugin-interface';
 import { DEFAULT_SETTINGS, RelationSchema } from './types/annotation';
@@ -55,6 +56,16 @@ import { ModifyGuard } from './utils/modify-guard';
 import { ReadingModeProcessor } from './plugin/reading-processor';
 import { AnnotationSearchEngine } from './search/search-engine';
 
+// ── MindFlow 思维导图模块 ──
+import { MindFlowView, MINDFLOW_VIEW_TYPE } from './mindflow/view/mindflow-view';
+
+// ── PDF 标注扩展模块 ──
+import { PDFRenderer } from './pdf/pdf-renderer';
+import { getActivePDFView, getPDFSelection, getPDFFromLeaf, isPDFLeaf, type PDFViewLike } from './pdf/viewer-bridge';
+import { createPDFAnnotation } from './pdf/pdf-creator';
+import { RendererRegistry } from './core/renderer';
+import { getAnnotationsForFile } from './db/annotation-repo';
+
 export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginInterface {
   settings: MarkVaultSettings = DEFAULT_SETTINGS;
   /** v4.3: 关系类型 Schema 实例 — 从 settings 动态构建 */
@@ -62,6 +73,11 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
   private sidebar: AnnotationSidebar | null = null;
   /** v4.3 Phase 2: 关系图谱视图 */
   private graphView: RelationGraphView | null = null;
+
+  // 🆕 PDF 标注扩展
+  private pdfRenderer: PDFRenderer | null = null;
+  private rendererRegistry: RendererRegistry = new RendererRegistry();
+  private _currentPdfFilePath: string | null = null;
 
   // 当前活跃文件的路径，用于偏移修正（SyncEngine 需要读写）
   activeFilePath: string | null = null;
@@ -86,6 +102,9 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
 
   // 🆕 阅读模式处理器
   readonly readingProcessor!: ReadingModeProcessor;
+
+  // 🆕 公开暴露 AnnotationStore，供 MindFlow 等视图访问
+  public annotationStore = annotationStore;
 
   // 🆕 AnnotationStore 是否初始化成功
   private _storeReady = false;
@@ -193,17 +212,31 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     (this as any).annotationCreator = new AnnotationCreator(this);
     (this as any).readingProcessor = new ReadingModeProcessor(this);
 
-    console.log('MarkVault: loading plugin...');
+    logger.debug('MarkVault: loading plugin...');
 
     // ── Phase G-2: 初始化 FormatRegistry 并注入到解析器 ──
     initFormatRegistry();
     injectFormatRegistry(formatRegistry);
 
+    // ── PDF 标注扩展: 初始化渲染器 ──
+    try {
+      this.pdfRenderer = new PDFRenderer(this.app);
+      this.pdfRenderer.setClickHandler((uuid: string) => {
+        this.openAnnotationModal(uuid).catch((err) => {
+          logger.error('PDF highlight click handler failed', err);
+        });
+      });
+      this.rendererRegistry.register(this.pdfRenderer);
+      logger.debug('MarkVault: PDF renderer registered');
+    } catch (err) {
+      logger.error('MarkVault: failed to initialize PDF renderer', err);
+    }
+
     // ── 设置加载（最先执行，后续功能依赖设置） ──────────
     try {
       await this.loadSettings();
     } catch (err) {
-      console.error('MarkVault: failed to load settings, using defaults', err);
+      logger.error('MarkVault: failed to load settings, using defaults', err);
       this.settings = DEFAULT_SETTINGS;
     }
 
@@ -216,10 +249,10 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       this._storeReady = true;
       const migratedCount = await migrateFromIndexedDB();
       if (migratedCount > 0) {
-        console.log(`MarkVault: migrated ${migratedCount} annotations from IndexedDB`);
+        logger.debug(`MarkVault: migrated ${migratedCount} annotations from IndexedDB`);
       }
     } catch (err) {
-      console.error('MarkVault: failed to initialize AnnotationStore', err);
+      logger.error('MarkVault: failed to initialize AnnotationStore', err);
       this._storeReady = false;
       new Notice('MarkVault: failed to initialize annotation database. Some features are disabled.', 8000);
     }
@@ -235,7 +268,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       // 🔧 P1-17 修复：注入编辑模式标注点击回调
       setAnnotationClickHandler((uuid: string) => {
         this.openAnnotationModal(uuid).catch((err) => {
-          console.error('MarkVault: openAnnotationModal from editor click failed', err);
+          logger.error('MarkVault: openAnnotationModal from editor click failed', err);
         });
       });
 
@@ -253,7 +286,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         }),
       );
     } catch (err) {
-      console.error('MarkVault: failed to register CM6 extensions', err);
+      logger.error('MarkVault: failed to register CM6 extensions', err);
       // CM6 注册失败不应该阻止整个插件加载
       // 只是编辑模式下不会有高亮渲染
     }
@@ -271,7 +304,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         },
       );
     } catch (err) {
-      console.error('MarkVault: failed to register sidebar view', err);
+      logger.error('MarkVault: failed to register sidebar view', err);
     }
 
     // 注册关系图谱视图
@@ -285,7 +318,18 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         },
       );
     } catch (err) {
-      console.error('MarkVault: failed to register graph view', err);
+      logger.error('MarkVault: failed to register graph view', err);
+    }
+
+    // 注册 MindFlow 思维导图视图
+    try {
+      this.registerView(
+        MINDFLOW_VIEW_TYPE,
+        (leaf) => new MindFlowView(leaf),
+      );
+      logger.debug('MarkVault: MindFlow view registered');
+    } catch (err) {
+      logger.error('MarkVault: failed to register MindFlow view', err);
     }
 
     // 添加侧边栏图标
@@ -294,7 +338,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         this.activateSidebar();
       });
     } catch (err) {
-      console.error('MarkVault: failed to add ribbon icon', err);
+      logger.error('MarkVault: failed to add ribbon icon', err);
     }
 
     // 添加关系图谱图标
@@ -303,15 +347,62 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         this.activateGraphView();
       });
     } catch (err) {
-      console.error('MarkVault: failed to add graph ribbon icon', err);
+      logger.error('MarkVault: failed to add graph ribbon icon', err);
+    }
+
+    // 添加 MindFlow 图标
+    try {
+      this.addRibbonIcon('network', 'MindFlow MindMap', () => {
+        this.activateMindFlowView();
+      });
+    } catch (err) {
+      logger.error('MarkVault: failed to add MindFlow ribbon icon', err);
     }
 
     // 注册命令（最关键 — 必须成功）
     try {
       registerCommands(this);
-      console.log('MarkVault: commands registered');
+      logger.debug('MarkVault: commands registered');
     } catch (err) {
-      console.error('MarkVault: failed to register commands', err);
+      logger.error('MarkVault: failed to register commands', err);
+    }
+
+    // 注册 MindFlow 命令
+    try {
+      this.addCommand({
+        id: 'mindflow-create',
+        name: 'MindFlow: Create new mindmap',
+        callback: async () => {
+          await this.createMindFlowFile();
+        },
+      });
+
+      this.addCommand({
+        id: 'mindflow-open',
+        name: 'MindFlow: Open mindmap for current file',
+        callback: async () => {
+          await this.activateMindFlowView();
+        },
+      });
+
+      logger.debug('MarkVault: MindFlow commands registered');
+    } catch (err) {
+      logger.error('MarkVault: failed to register MindFlow commands', err);
+    }
+
+    // 注册 PDF 标注命令
+    try {
+      this.addCommand({
+        id: 'pdf-create-highlight',
+        name: 'PDF: Create highlight from selection',
+        callback: async () => {
+          await this.createPDFHighlightFromSelection();
+        },
+      });
+
+      logger.debug('MarkVault: PDF commands registered');
+    } catch (err) {
+      logger.error('MarkVault: failed to register PDF commands', err);
     }
 
     // 注册右键菜单
@@ -319,7 +410,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       try {
         registerContextMenu(this);
       } catch (err) {
-        console.error('MarkVault: failed to register context menu', err);
+        logger.error('MarkVault: failed to register context menu', err);
       }
     }
 
@@ -327,7 +418,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     try {
       this.addSettingTab(new MarkVaultSettingTab(this.app, this));
     } catch (err) {
-      console.error('MarkVault: failed to register settings tab', err);
+      logger.error('MarkVault: failed to register settings tab', err);
     }
 
     // 文件打开时同步标注
@@ -337,13 +428,21 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
           if (file instanceof TFile && file.extension === 'md') {
             this.activeFilePath = file.path;
             await this.onFileOpen(file);
+          } else if (file instanceof TFile && file.extension === 'pdf') {
+            // PDF 文件打开: 挂载渲染器并加载标注
+            this.activeFilePath = file.path;
+            await this.handlePDFOpen(file);
           } else {
+            // 离开 PDF 视图时卸载渲染器
+            if (this._currentPdfFilePath) {
+              this.unmountPDFRenderer();
+            }
             this.activeFilePath = null;
           }
         }),
       );
     } catch (err) {
-      console.error('MarkVault: failed to register file-open handler', err);
+      logger.error('MarkVault: failed to register file-open handler', err);
     }
 
     // 🆕 文件删除时清理关联标注
@@ -354,7 +453,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         }),
       );
     } catch (err) {
-      console.error('MarkVault: failed to register delete handler', err);
+      logger.error('MarkVault: failed to register delete handler', err);
     }
 
     // 🆕 文件重命名时同步更新标注路径
@@ -365,7 +464,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         }),
       );
     } catch (err) {
-      console.error('MarkVault: failed to register rename handler', err);
+      logger.error('MarkVault: failed to register rename handler', err);
     }
 
     // 🆕 当前文件/视图变化时刷新缓存（用于切换标签页、阅读/编辑模式切换）
@@ -377,7 +476,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         }),
       );
     } catch (err) {
-      console.error('MarkVault: failed to register active-leaf-change handler', err);
+      logger.error('MarkVault: failed to register active-leaf-change handler', err);
     }
 
     // 阅读模式渲染：PostProcessor + 工具条 + 点击委托 — 委托给 ReadingModeProcessor
@@ -387,11 +486,11 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     // 🆕 尝试从磁盘加载搜索引擎索引（避免启动时全量重建）
     await this._loadSearchIndex();
 
-    console.log('MarkVault: plugin loaded successfully');
+    logger.info('plugin loaded successfully');
   }
 
   async onunload() {
-    console.log('MarkVault: unloading plugin');
+    logger.info('unloading plugin');
     // 🔧 BUG-8 修复：立即清除 CM6 EditorView 引用，防止异步 dispatch 到已销毁的 view
     // 🔧 P0-1 修复：使用 clearActiveEditorViews() 彻底清空 Set
     clearActiveEditorViews();
@@ -413,7 +512,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       this.activeFilePath = null;
       this._searchEngine = null;
     } catch (err) {
-      console.error('MarkVault: failed to shutdown AnnotationStore', err);
+      logger.error('MarkVault: failed to shutdown AnnotationStore', err);
     }
   }
 
@@ -435,10 +534,10 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       if (snapshot?.version !== 1) return; // 版本不匹配
 
       this.getSearchEngine().importIndex(snapshot);
-      console.log(`MarkVault: loaded search index (${snapshot.indexedCount} annotations)`);
+      logger.debug(`MarkVault: loaded search index (${snapshot.indexedCount} annotations)`);
     } catch (err) {
       // 加载失败非致命——走正常的 _ensureIndex 延迟重建
-      console.warn('MarkVault: failed to load search index, will rebuild on first search', err);
+      logger.warn('MarkVault: failed to load search index, will rebuild on first search', err);
     }
   }
 
@@ -449,9 +548,9 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       const snapshot = this._searchEngine.exportIndex();
       const indexPath = '.obsidian/plugins/markvault-js/search-index.json';
       await this.app.vault.adapter.write(indexPath, JSON.stringify(snapshot));
-      console.log('MarkVault: saved search index');
+      logger.debug('MarkVault: saved search index');
     } catch (err) {
-      console.error('MarkVault: failed to save search index', err);
+      logger.error('MarkVault: failed to save search index', err);
     }
   }
 
@@ -498,7 +597,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         this.app.workspace.revealLeaf(rightLeaf);
       }
     } catch (err) {
-      console.error('MarkVault: failed to activate sidebar', err);
+      logger.error('MarkVault: failed to activate sidebar', err);
     }
   }
 
@@ -508,7 +607,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         await this.sidebar.refresh();
       }
     } catch (err) {
-      console.error('MarkVault: failed to refresh sidebar', err);
+      logger.error('MarkVault: failed to refresh sidebar', err);
     }
     // P2-7: 标注变更后同时刷新关系图谱
     this.refreshGraphView();
@@ -534,7 +633,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         this.app.workspace.revealLeaf(leaf);
       }
     } catch (err) {
-      console.error('MarkVault: failed to activate graph view', err);
+      logger.error('MarkVault: failed to activate graph view', err);
     }
   }
 
@@ -545,7 +644,67 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
         this.graphView.refresh();
       }
     } catch (err) {
-      console.error('MarkVault: failed to refresh graph view', err);
+      logger.error('MarkVault: failed to refresh graph view', err);
+    }
+  }
+
+  // ─── MindFlow 思维导图 ────────────────────────
+
+  /** 激活 MindFlow 视图（加载当前活动文件） */
+  async activateMindFlowView() {
+    try {
+      const existing = this.app.workspace.getLeavesOfType(MINDFLOW_VIEW_TYPE);
+      if (existing.length > 0) {
+        this.app.workspace.revealLeaf(existing[0]);
+        // 重新加载当前文件
+        const view = existing[0].view;
+        if (view instanceof MindFlowView) {
+          const activeFile = this.app.workspace.getActiveFile();
+          if (activeFile && activeFile.extension === 'md') {
+            await view.loadFile(activeFile);
+          }
+        }
+        return;
+      }
+
+      const leaf = this.app.workspace.getLeaf(false);
+      if (leaf) {
+        await leaf.setViewState({
+          type: MINDFLOW_VIEW_TYPE,
+          active: true,
+        });
+        this.app.workspace.revealLeaf(leaf);
+      }
+    } catch (err) {
+      logger.error('MarkVault: failed to activate MindFlow view', err);
+      new Notice('Failed to open MindFlow view');
+    }
+  }
+
+  /** 创建新的 MindFlow 导图文件 */
+  async createMindFlowFile() {
+    try {
+      // 生成文件名
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const fileName = `MindMap-${timestamp}.md`;
+
+      // 默认导图内容
+      const defaultContent = `# New MindMap\n\n## Topic 1\n\n- Idea A\n- Idea B\n\n## Topic 2\n`;
+
+      // 创建文件
+      const file = await this.app.vault.create(fileName, defaultContent);
+      logger.debug('MindFlow: created file', file.path);
+
+      // 在编辑器中打开文件
+      await this.app.workspace.openLinkText(file.path, '', false);
+
+      // 激活 MindFlow 视图
+      await this.activateMindFlowView();
+
+      new Notice(`MindFlow: created ${fileName}`);
+    } catch (err) {
+      logger.error('MarkVault: failed to create MindFlow file', err);
+      new Notice('Failed to create mindmap file');
     }
   }
 
@@ -553,6 +712,133 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
 
   async onFileOpen(file: TFile) {
     return this.syncEngine.onFileOpen(file);
+  }
+
+  // ─── PDF 标注扩展 ────────────────────────────────────
+
+  /**
+   * PDF 文件打开时: 等待 DOM 渲染完成后挂载渲染器并加载已有标注。
+   * 用轮询检测替代硬编码延迟，确保 PDF.js DOM 就绪后再挂载。
+   */
+  async handlePDFOpen(file: TFile): Promise<void> {
+    // 如果切换到不同的 PDF，先卸载旧的
+    if (this._currentPdfFilePath && this._currentPdfFilePath !== file.path) {
+      this.unmountPDFRenderer();
+    }
+
+    this._currentPdfFilePath = file.path;
+
+    // 轮询检测 PDF.js DOM 就绪（最多等待 3 秒）
+    const pdfView = await this.waitForPDFViewReady(3000);
+    if (!pdfView) {
+      logger.debug('MarkVault: PDF view not ready after 3s, will retry on next event');
+      return;
+    }
+
+    // 加载该 PDF 文件的所有标注
+    const annotations = await getAnnotationsForFile(file.path);
+    logger.debug(`MarkVault: loaded ${annotations.length} PDF annotations for ${file.path}`);
+
+    // 挂载渲染器
+    if (this.pdfRenderer) {
+      try {
+        this.pdfRenderer.mount(pdfView.containerEl, annotations);
+        logger.debug('MarkVault: PDF renderer mounted');
+      } catch (err) {
+        logger.error('MarkVault: failed to mount PDF renderer', err);
+      }
+    }
+
+    // 刷新侧边栏以显示 PDF 标注
+    await this.refreshSidebar();
+  }
+
+  /**
+   * 轮询检测 PDF 视图 DOM 就绪。
+   * PDF.js 异步渲染页面元素，硬编码延迟不可靠。
+   */
+  private async waitForPDFViewReady(timeoutMs: number): Promise<PDFViewLike | null> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const pdfView = getActivePDFView(this.app);
+      if (pdfView) {
+        // 检查是否有至少一个页面元素已渲染
+        const hasPage = pdfView.containerEl.querySelector('[data-page-number], .page');
+        if (hasPage) {
+          return pdfView;
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return getActivePDFView(this.app); // 最后尝试一次
+  }
+
+  /** 卸载 PDF 渲染器 */
+  unmountPDFRenderer(): void {
+    if (this.pdfRenderer) {
+      try {
+        this.pdfRenderer.unmount();
+        logger.debug('MarkVault: PDF renderer unmounted');
+      } catch (err) {
+        logger.error('MarkVault: failed to unmount PDF renderer', err);
+      }
+    }
+    this._currentPdfFilePath = null;
+  }
+
+  /**
+   * 从当前 PDF 选区创建高亮标注。
+   * 用户在 PDF 中选中文本后执行此命令。
+   */
+  async createPDFHighlightFromSelection(): Promise<void> {
+    if (!this._storeReady) {
+      new Notice('MarkVault: annotation database not initialized', 5000);
+      return;
+    }
+
+    const pdfView = getActivePDFView(this.app);
+    if (!pdfView) {
+      new Notice('MarkVault: no active PDF view', 3000);
+      return;
+    }
+
+    const filePath = this._currentPdfFilePath;
+    if (!filePath) {
+      new Notice('MarkVault: no PDF file is open', 3000);
+      return;
+    }
+
+    // 从选区提取 PDF 标注信息
+    const selection = getPDFSelection(pdfView);
+    if (!selection) {
+      new Notice('MarkVault: no text selected in PDF. Select text first.', 3000);
+      return;
+    }
+
+    // 创建标注
+    const annotation = await createPDFAnnotation({
+      filePath,
+      selection,
+      type: 'highlight',
+      color: 'yellow',
+    });
+
+    if (!annotation) {
+      new Notice('MarkVault: failed to create PDF annotation', 3000);
+      return;
+    }
+
+    // 更新渲染器
+    if (this.pdfRenderer) {
+      const allAnns = await getAnnotationsForFile(filePath);
+      this.pdfRenderer.update(allAnns);
+    }
+
+    // 刷新侧边栏
+    await this.refreshSidebar();
+
+    new Notice(`MarkVault: PDF highlight created on page ${selection.page + 1}`, 2000);
+    logger.debug(`MarkVault: PDF highlight created: ${annotation.uuid}`);
   }
 
   /**
@@ -586,7 +872,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       return;
     }
 
-    console.log('MarkVault: rebuilding database...');
+    logger.info('rebuilding database...');
     let total = 0;
     let skipped = 0;
 
@@ -600,15 +886,15 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
           total += result.added;
         } catch (err) {
           skipped++;
-          console.warn(`MarkVault: rebuild skipped ${file.path}`, err);
+          logger.warn(`MarkVault: rebuild skipped ${file.path}`, err);
         }
       }
 
-      console.log(`MarkVault: rebuilt database, ${total} annotations added, ${skipped} files skipped`);
+      logger.debug(`MarkVault: rebuilt database, ${total} annotations added, ${skipped} files skipped`);
       new Notice(`MarkVault: rebuilt database — ${total} added, ${skipped} skipped`, 4000);
       await this.refreshSidebar();
     } catch (err) {
-      console.error('MarkVault: rebuild database error', err);
+      logger.error('MarkVault: rebuild database error', err);
       new Notice('MarkVault: failed to rebuild database', 5000);
     }
   }
@@ -631,7 +917,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error('MarkVault: export error', err);
+      logger.error('MarkVault: export error', err);
     }
   }
 
@@ -645,7 +931,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     try {
       const annotation = await annotationStore.getAnnotationByUuid(uuid);
       if (!annotation) {
-        console.warn('MarkVault: annotation not found for uuid', uuid);
+        logger.warn('MarkVault: annotation not found for uuid', uuid);
         return;
       }
 
@@ -686,7 +972,7 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
 
       modal.open();
     } catch (err) {
-      console.error('MarkVault: failed to open annotation modal', err);
+      logger.error('MarkVault: failed to open annotation modal', err);
     }
   }
 

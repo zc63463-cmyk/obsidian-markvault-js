@@ -47,7 +47,7 @@ export interface FormatUpdates {
  */
 export interface AnnotationFormat {
   /** 格式唯一标识 */
-  readonly id: 'mark' | 'native' | 'block' | 'span' | 'region';
+  readonly id: 'mark' | 'native' | 'block' | 'span' | 'region' | 'pdf';
 
   /**
    * 从 Markdown 内容解析所有该格式的标注

@@ -9,6 +9,7 @@
  */
 
 import { MarkdownView, Notice, type App } from 'obsidian';
+import { logger } from '../utils/logger';
 import type { AnnotationType, Annotation } from '../types/annotation';
 import { annotationStore } from '../db/annotation-store';
 import { generateId } from '../utils/id';
@@ -135,7 +136,7 @@ export class AnnotationCreator {
           markFileSynced: (fp) => this.host.markFileSynced(fp),
           refreshSidebar: () => this.host.refreshSidebar(),
         });
-        console.log(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
+        logger.debug(`MarkVault: created reading-mode block annotation ${uuid} in ${filePath}`);
       } else {
         const sourceSelected = content.substring(startOffset, endOffset);
         const scan = scanMarkdownContexts(sourceSelected);
@@ -185,7 +186,7 @@ export class AnnotationCreator {
             markFileSynced: (fp) => this.host.markFileSynced(fp),
             refreshSidebar: () => this.host.refreshSidebar(),
           });
-          console.log(`MarkVault: created reading-mode region annotation ${uuid} in ${filePath}`);
+          logger.debug(`MarkVault: created reading-mode region annotation ${uuid} in ${filePath}`);
         } else {
         // ── 自然语法行内标注：隐身锚点 + 原生 HTML 包裹 ──
         // 🔧 P1-8 修复：startLine 从 startOffset 正确计算而非硬编码 0
@@ -222,7 +223,7 @@ export class AnnotationCreator {
           refreshSidebar: () => this.host.refreshSidebar(),
         });
 
-        console.log(`MarkVault: created reading-mode native annotation ${uuid} in ${filePath}`);
+        logger.debug(`MarkVault: created reading-mode native annotation ${uuid} in ${filePath}`);
       }
       }
     } catch (err) {

@@ -1,4 +1,5 @@
 import { App, Modal, TextAreaComponent, TextComponent, Setting, TFile, MarkdownRenderer, Component } from 'obsidian';
+import { logger } from '../../utils/logger';
 import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
 import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS, MOTIVATION_OPTIONS, normalizeUserFieldKey, inferMotivation } from '../../types/annotation';
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
@@ -629,6 +630,14 @@ export class AnnotationModal extends Modal {
       row.createSpan({ text: sourceLabel, cls: 'markvault-modal-relation-source' });
     }
 
+    // P2-1: 关系 note 一等公民 — 渲染关系说明
+    if (rel.note && rel.note.trim()) {
+      row.createSpan({
+        text: `「${rel.note.trim()}」`,
+        cls: 'markvault-modal-relation-note',
+      });
+    }
+
     if (isInvalidated) {
       // 已失效 — 显示失效时间和恢复按钮
       const invalidDate = rel.invalidAt ? new Date(rel.invalidAt).toLocaleDateString() : '?';
@@ -730,7 +739,7 @@ export class AnnotationModal extends Modal {
       }
     }
 
-    console.log(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
+    logger.debug(`MarkVault modal: saving annotation ${this.annotation.uuid}`, updates);
 
     // 🔧 P0 修复：捕获原始值用于 MD 失败时回滚
     const originalNote = this.annotation.note;
@@ -753,7 +762,7 @@ export class AnnotationModal extends Modal {
     const file = this.app.vault.getAbstractFileByPath(this.annotation.filePath);
     if (file instanceof TFile) {
       const content = await this.app.vault.read(file);
-      console.log(`MarkVault modal: read file ${file.path}, length=${content.length}`);
+      logger.debug(`MarkVault modal: read file ${file.path}, length=${content.length}`);
 
       let newContent = content;
 
@@ -810,7 +819,7 @@ export class AnnotationModal extends Modal {
           // 🔧 B-2 修复：使用 vault.process 原子读写，try-finally 保证 modifyGuard 释放
           // vault.process 保证：回调抛错 → MD 不变；回调成功 → MD 已更新
           await this.app.vault.process(file, () => newContent);
-          console.log(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
+          logger.debug(`MarkVault modal: updated markdown for ${this.annotation.uuid}`);
         } catch (processErr) {
           console.error(`MarkVault modal: MD update failed for ${this.annotation.uuid}`, processErr);
           throw processErr;
@@ -847,7 +856,7 @@ export class AnnotationModal extends Modal {
           // MD 字段确实变了但 MD 没变，可能是锚点格式不匹配
           console.warn(`MarkVault modal: markdown content unchanged for ${this.annotation.uuid} (kind=${kind})`);
         } else {
-          console.log(`MarkVault modal: store-only update for ${this.annotation.uuid} (kind=${kind})`);
+          logger.debug(`MarkVault modal: store-only update for ${this.annotation.uuid} (kind=${kind})`);
         }
       }
     }
@@ -903,7 +912,7 @@ export class AnnotationModal extends Modal {
           const result = removeMarkTag(content, this.annotation.uuid);
           return result ? result.content : content;
         });
-        console.log(`MarkVault modal: removed annotation ${this.annotation.uuid} from markdown`);
+        logger.debug(`MarkVault modal: removed annotation ${this.annotation.uuid} from markdown`);
       } catch (processErr) {
         // 🔧 P0 修复：MD 写入失败，回滚 DB（重新添加标注）
         console.error(`MarkVault modal: MD removal failed, rolling back DB for ${this.annotation.uuid}`, processErr);

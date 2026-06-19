@@ -10,8 +10,10 @@
  */
 
 import { TFile, MarkdownView, Notice } from 'obsidian';
+import { logger } from '../utils/logger';
 import MarkVaultPlugin from '../main';
 import { annotationStore } from '../db/annotation-store';
+import { getAnnotationByUuid } from '../db/annotation-repo';
 import { syncFromMarkdown, getPlainTextForOffsetRecovery, extractContextFromContent } from '../core/markdown-sync';
 import {
   computeBlockSignature,
@@ -391,14 +393,15 @@ export class AnnotationSyncEngine {
       if (failedDetails.length > 0) {
         for (const detail of failedDetails) {
           try {
-            const ann = await annotationStore.getAnnotation(detail.uuid);
+            const ann = await getAnnotationByUuid(detail.uuid);
             if (ann) {
               await annotationStore.updateAnnotation(detail.uuid, {
                 flags: { ...ann.flags, needsCorrection: true },
               });
             }
-          } catch {
-            // 标注可能已被删除，忽略
+          } catch (err) {
+            // 标注可能已被删除 — 记录日志但不应阻塞其他标注的恢复
+            logger.warn(`failed to mark needsCorrection for ${detail.uuid}`, err);
           }
         }
         new Notice(`⚠️ ${failedDetails.length} 个标注恢复失败，已标记为需修正`, 5000);
@@ -422,7 +425,7 @@ export class AnnotationSyncEngine {
   handleFileDelete = async (file: any): Promise<void> => {
     if (!(file instanceof TFile) || file.extension !== 'md') return;
 
-    console.log(`MarkVault: file deleted — cleaning up annotations for "${file.path}"`);
+    logger.debug(`MarkVault: file deleted — cleaning up annotations for "${file.path}"`);
     try {
       // 如果当前活跃文件是被删除文件，清空引用
       if (this.plugin.activeFilePath === file.path) {
@@ -447,7 +450,7 @@ export class AnnotationSyncEngine {
       if (deletedCount > 0) {
         new Notice(`Cleaned up ${deletedCount} annotations for deleted file`, 4000);
       }
-      console.log(`MarkVault: annotations cleaned up for deleted file "${file.path}" (${deletedCount})`);
+      logger.debug(`MarkVault: annotations cleaned up for deleted file "${file.path}" (${deletedCount})`);
     } catch (err) {
       console.error('MarkVault: failed to clean up annotations for deleted file', file.path, err);
       new Notice('Failed to clean up annotations for deleted file', 5000);
@@ -460,7 +463,7 @@ export class AnnotationSyncEngine {
   handleFileRename = async (file: any, oldPath: string): Promise<void> => {
     if (!(file instanceof TFile) || file.extension !== 'md') return;
 
-    console.log(`MarkVault: file renamed "${oldPath}" → "${file.path}"`);
+    logger.debug(`MarkVault: file renamed "${oldPath}" → "${file.path}"`);
     try {
       // 关闭旧文件上打开的 Modal，避免保存时路径错误
       this.plugin.activeState.closeActiveModalsForFile(oldPath);
@@ -494,7 +497,7 @@ export class AnnotationSyncEngine {
 
       await this.plugin.refreshSidebar();
       new Notice(`Annotations migrated for renamed file`, 4000);
-      console.log(`MarkVault: annotations migrated for renamed file`);
+      logger.debug(`MarkVault: annotations migrated for renamed file`);
     } catch (err) {
       console.error('MarkVault: failed to migrate annotations for renamed file', oldPath, '→', file.path, err);
     }

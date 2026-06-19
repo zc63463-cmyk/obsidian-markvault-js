@@ -65,16 +65,30 @@ export class AllNotesView {
     // 搜索过滤
     const filtered = this.host.applySearchFilter(allAnnotations);
 
+    // S3 审查修复: All Notes 视图也加节点数上限保护
+    const ALL_NOTES_LIMIT = 1000;
+    let displayAnnotations = filtered;
+    let truncatedNote = '';
+    if (filtered.length > ALL_NOTES_LIMIT) {
+      displayAnnotations = filtered.slice(0, ALL_NOTES_LIMIT);
+      truncatedNote = `（显示前 ${ALL_NOTES_LIMIT} 条，共 ${filtered.length} 条，请使用搜索/筛选缩小范围）`;
+    }
+
     switch (this.host.getAllNotesSubView()) {
       case 'timeline':
-        this.renderTimelineView(listContainer, filtered);
+        this.renderTimelineView(listContainer, displayAnnotations);
         break;
       case 'by-file':
-        this.renderByFileView(listContainer, filtered);
+        this.renderByFileView(listContainer, displayAnnotations);
         break;
       case 'by-color':
-        this.renderByColorView(listContainer, filtered);
+        this.renderByColorView(listContainer, displayAnnotations);
         break;
+    }
+
+    if (truncatedNote) {
+      const noticeEl = listContainer.createDiv({ cls: 'markvault-truncate-notice', text: truncatedNote });
+      noticeEl.style.cssText = 'padding: 8px 12px; color: var(--text-muted); font-size: 12px; text-align: center;';
     }
   }
 

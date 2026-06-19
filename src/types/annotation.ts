@@ -12,6 +12,98 @@ export const PRESET_COLORS = [
 
 export type PresetColorId = (typeof PRESET_COLORS)[number]['id'];
 
+// ═══════════════════════════════════════════════════════
+// v6.0: Selector 多态类型层 — 标注对象定位抽象
+// ═══════════════════════════════════════════════════════
+//
+// Selector 是标注的"锚点描述"——告诉系统"这段标注定位在哪里"。
+// 不同文档类型需要不同的定位方式：
+//   - Markdown 文本: 字符偏移 (startOffset/endOffset) + 行号 + 上下文
+//   - PDF 文档: 页码 + 矩形区域 (page + rects)
+//   - MindMap 导图: 节点 ID (nodeId)
+//
+// 认知层（tags/fields/relations/flags/motivation）完全复用，
+// 扩展标注对象 = 加一个新 Selector 类型，零改动认知层。
+
+/** 文档类型 — 标注宿主的类型，决定使用哪种 Selector */
+export type DocType = 'markdown' | 'pdf' | 'mindmap';
+
+/** Selector 基接口 — 所有定位器实现此接口 */
+export interface BaseSelector {
+  /** Selector 类型标识 */
+  type: string;
+}
+
+/** Markdown 文本定位器 — 基于字符偏移 + 行号 + 上下文 */
+export interface TextSelector extends BaseSelector {
+  type: 'text';
+  startOffset: number;
+  endOffset: number;
+  startLine: number;
+  endLine?: number;
+  contextBefore: string;
+  contextAfter: string;
+  /** 文本片段范围（Span 标注用） */
+  spanRanges?: SpanRange[];
+  /** 目标内容指纹（锚点漂移恢复） */
+  targetHash?: string;
+}
+
+/** PDF 文档定位器 — 基于页码 + 矩形区域 */
+export interface PDFSelector extends BaseSelector {
+  type: 'pdf';
+  page: number;
+  /** 高亮区域矩形（PDF 绝对坐标系，左下为原点，W3C 兼容导出用） */
+  rects: PDFRect[];
+  /**
+   * 百分比坐标矩形（渲染用，0-100 相对于页面宽高）。
+   *
+   * 优势：SVG rect 用百分比属性后，缩放时只需更新 overlay 容器尺寸，
+   * rect 自动按比例缩放，不需要逐个重算坐标（O(pages) vs O(n×m)）。
+   * 由 viewer-bridge 在选区提取时计算，与 rects 一一对应。
+   */
+  percentRects?: PercentRect[];
+  /** 文本内容指纹（可选，用于漂移恢复） */
+  textHash?: string;
+}
+
+/** PDF 矩形区域（绝对坐标，PDF 坐标系左下为原点） */
+export interface PDFRect {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * 百分比矩形 — 相对于页面宽高的比例 (0-100)。
+ *
+ * 用于 SVG 渲染：rect 的 x/y/width/height 设为百分比值，
+ * 缩放时自动跟随容器尺寸变化，零计算开销。
+ */
+export interface PercentRect {
+  /** 左上角 x 百分比 (0-100) */
+  x: number;
+  /** 左上角 y 百分比 (0-100) */
+  y: number;
+  /** 宽度百分比 (0-100) */
+  width: number;
+  /** 高度百分比 (0-100) */
+  height: number;
+}
+
+/** MindMap 导图定位器 — 基于节点 ID */
+export interface MindmapSelector extends BaseSelector {
+  type: 'mindmap';
+  /** 导图节点 ID */
+  nodeId: string;
+  /** 节点在导图中的路径（如 "root/数学/线性代数"），用于显示 */
+  nodePath?: string;
+}
+
+/** 所有 Selector 类型的联合 */
+export type AnnotationSelector = TextSelector | PDFSelector | MindmapSelector;
+
 /** 标注数据模型 — 分片 JSON 主存储 */
 export interface Annotation {
   // ─── 数据协议层（v4.1: P0 元数据架构升级） ────────────
@@ -66,12 +158,60 @@ export interface Annotation {
 
   // v5.3: 图谱显示别名（用户自定义短名称，如"欧拉公式"、"费马定理"）
   alias?: string;                        // 图谱节点显示名称，为空则不显示文字标签
+
+  // v6.0: 多文档类型支持
+  /** 文档类型 — 标注宿主类型，决定渲染路径和 Selector。缺省 'markdown'（向后兼容） */
+  docType?: DocType;
+  /** 结构化定位器 — 多态 Selector。缺省时从 startOffset 等扁平字段推断 TextSelector */
+  selector?: AnnotationSelector;
+  /** 导图节点 ID（docType='mindmap' 时使用，冗余于 selector.nodeId 方便索引） */
+  nodeId?: string;
+  /** 引用的导图信息（docType='mindmap' 且标注是在导图中引用了其他标注时） */
+  annotationRef?: string;
 }
 
 /** Span 标注的文本片段范围 */
 export interface SpanRange {
   from: number;   // 文本片段起始偏移（文档绝对偏移）
   to: number;     // 文本片段结束偏移
+}
+
+// ═══════════════════════════════════════════════════════
+// v6.0: Selector 辅助函数
+// ═══════════════════════════════════════════════════════
+
+/**
+ * 获取标注的文档类型。缺省返回 'markdown'（向后兼容旧数据）。
+ */
+export function getDocType(ann: Pick<Annotation, 'docType'>): DocType {
+  return ann.docType ?? 'markdown';
+}
+
+/**
+ * 从标注的扁平字段推断 TextSelector。
+ * 旧数据没有 selector 字段，此函数将 startOffset/endOffset 等包装为 TextSelector。
+ */
+export function inferTextSelector(ann: Annotation): TextSelector {
+  return {
+    type: 'text',
+    startOffset: ann.startOffset,
+    endOffset: ann.endOffset,
+    startLine: ann.startLine,
+    endLine: ann.endLine,
+    contextBefore: ann.contextBefore,
+    contextAfter: ann.contextAfter,
+    spanRanges: ann.spanRanges,
+    targetHash: ann.targetHash,
+  };
+}
+
+/**
+ * 获取标注的有效 Selector。如果 selector 字段存在则直接返回，
+ * 否则从扁平字段推断 TextSelector（向后兼容）。
+ */
+export function getSelector(ann: Annotation): AnnotationSelector {
+  if (ann.selector) return ann.selector;
+  return inferTextSelector(ann);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -299,6 +439,26 @@ export class RelationSchema {
       this._allTypes.push(cfg.id);
       if (cfg.isActive) {
         this._activeTypes.push(cfg.id);
+      }
+    }
+
+    // P2-3: reverseId 闭环校验 — 每个类型的 reverseId 必须指向已注册类型
+    for (const cfg of configs) {
+      if (seenIds.has(cfg.id) && !seenIds.has(cfg.reverseId)) {
+        console.warn(
+          `MarkVault: relation type "${cfg.id}" has reverseId "${cfg.reverseId}" ` +
+          `which is not a registered type — reverse lookups will fail for this type`
+        );
+      }
+      // 闭环校验: A.reverseId = B 且 B.reverseId 应 = A（非对称）或 = B 自身（对称）
+      const reverseCfg = configs.find(c => c.id === cfg.reverseId);
+      if (reverseCfg && !cfg.isSymmetric) {
+        if (reverseCfg.reverseId !== cfg.id) {
+          console.warn(
+            `MarkVault: relation type "${cfg.id}" ↔ "${cfg.reverseId}" is not bidirectional ` +
+            `("${cfg.reverseId}".reverseId = "${reverseCfg.reverseId}", expected "${cfg.id}")`
+          );
+        }
       }
     }
   }

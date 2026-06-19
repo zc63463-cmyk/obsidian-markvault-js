@@ -59,5 +59,10 @@ export function stripExtraFields(annotation: Annotation): Annotation {
   if (annotation.alias !== undefined) {
     clean.alias = annotation.alias;
   }
+  // v6.0: 多文档类型支持字段
+  if (annotation.docType !== undefined) clean.docType = annotation.docType;
+  if (annotation.selector !== undefined) clean.selector = annotation.selector;
+  if (annotation.nodeId !== undefined) clean.nodeId = annotation.nodeId;
+  if (annotation.annotationRef !== undefined) clean.annotationRef = annotation.annotationRef;
   return clean;
 }

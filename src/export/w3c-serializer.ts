@@ -182,6 +182,20 @@ export function serializeAnnotation(
     w3c['markvault:flags'] = serializeFlags(annotation.flags);
   }
 
+  // ── v6.0: 多文档类型支持 ──
+  if (annotation.docType) {
+    w3c['markvault:docType'] = annotation.docType;
+  }
+  if (annotation.selector) {
+    w3c['markvault:selector'] = annotation.selector;
+  }
+  if (annotation.nodeId) {
+    w3c['markvault:nodeId'] = annotation.nodeId;
+  }
+  if (annotation.annotationRef) {
+    w3c['markvault:annotationRef'] = annotation.annotationRef;
+  }
+
   return w3c;
 }
 
@@ -357,6 +371,11 @@ export function deserializeAnnotation(
     flags: w3c['markvault:flags']
       ? deserializeFlags(w3c['markvault:flags'])
       : undefined,
+    // v6.0: 多文档类型支持
+    docType: w3c['markvault:docType'] as Annotation['docType'],
+    selector: w3c['markvault:selector'] as Annotation['selector'],
+    nodeId: w3c['markvault:nodeId'] as string | undefined,
+    annotationRef: w3c['markvault:annotationRef'] as string | undefined,
   };
 
   // 清理 undefined 字段

@@ -141,9 +141,11 @@ export function findNativeWrapper(
   anchorEnd: number,
   type: AnnotationType,
 ): { wrapperStart: number; contentStart: number; contentEnd: number; wrapperEnd: number; text: string } | null {
-  // 允许锚点和包裹之间有少量空白/换行
+  // 允许锚点和包裹之间有少量空白（不跨行）
+  // 🔧 P0 修复：跳过换行符会导致 Decoration.replace 跨行，
+  // CM6 抛出 "Decorations that replace line breaks may not be specified via plugins"
   let pos = anchorEnd;
-  while (pos < doc.length && /\s/.test(doc[pos])) pos++;
+  while (pos < doc.length && doc[pos] !== '\n' && /[ \t]/.test(doc[pos])) pos++;
 
   // 优先识别新版 HTML 包裹（带 class/data-uuid）
   const tag = type === 'bold' ? 'b' : type === 'underline' ? 'u' : 'mark';

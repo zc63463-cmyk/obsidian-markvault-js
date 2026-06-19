@@ -1,4 +1,4 @@
-import { PluginSettingTab, App, Setting } from 'obsidian';
+import { PluginSettingTab, App, Setting, Notice } from 'obsidian';
 import type { MarkVaultPluginInterface } from '../../utils/plugin-interface';
 import { PRESET_COLORS, DEFAULT_SETTINGS, DEFAULT_RELATION_TYPE_CONFIGS, RelationSchema } from '../../types/annotation';
 import type { PresetColorId, AnnotationType, FieldTemplate, RelationTypeConfig, AnnotationTemplate } from '../../types/annotation';
@@ -247,7 +247,20 @@ export class MarkVaultSettingTab extends PluginSettingTab {
       text: 'Restore Default Types',
     });
     restoreRelTypesBtn.addEventListener('click', async () => {
-      this.plugin.settings.customRelationTypes = JSON.parse(JSON.stringify(DEFAULT_RELATION_TYPE_CONFIGS));
+      const confirmed = await ConfirmModal.open(this.app, {
+        title: 'Restore default relation types',
+        message: 'This will reset built-in types to defaults but preserve your custom types.\nContinue?',
+        okText: 'Restore',
+        dangerous: true,
+      });
+      if (!confirmed) return;
+
+      // P2-2 修复: 保留用户自定义类型，只重置内置类型
+      const customTypes = this.plugin.settings.customRelationTypes.filter(t => !t.isBuiltIn);
+      this.plugin.settings.customRelationTypes = [
+        ...JSON.parse(JSON.stringify(DEFAULT_RELATION_TYPE_CONFIGS)),
+        ...customTypes,
+      ];
       await this.plugin.saveSettings();
       this._rebuildSchemaSync();
       this.display();
@@ -447,13 +460,19 @@ export class MarkVaultSettingTab extends PluginSettingTab {
         // 检查唯一性
         if (this.plugin.settings.customRelationTypes.some(t => t.id === newId)) {
           idInput.value = cfg.id;
+          new Notice(`Relation type ID "${newId}" already exists`);
           return;
         }
+        const oldId = cfg.id;
         // 更新所有引用此 ID 的 reverseId
         for (const t of this.plugin.settings.customRelationTypes) {
-          if (t.reverseId === cfg.id) t.reverseId = newId;
+          if (t.reverseId === oldId) t.reverseId = newId;
         }
         cfg.id = newId;
+
+        // P2-2 修复: 迁移已存数据中的 relation.type
+        await this._migrateRelationTypeId(oldId, newId);
+
         await this.plugin.saveSettings();
         this._rebuildSchema();
       });
@@ -484,16 +503,27 @@ export class MarkVaultSettingTab extends PluginSettingTab {
       });
       reverseInput.addEventListener('change', async () => {
         const newReverseId = reverseInput.value.trim();
-        if (!newReverseId) { reverseInput.value = cfg.reverseId; return; }
+        if (!newReverseId || newReverseId === cfg.reverseId) { reverseInput.value = cfg.reverseId; return; }
+
+        // P2-2 修复: reverseId 闭环同步 — 双向关系的两端互为 reverseId
         cfg.reverseId = newReverseId;
-        // 如果该 reverseId 也作为独立类型存在，同步其 reverseId
-        for (const t of this.plugin.settings.customRelationTypes) {
-          if (t.id === newReverseId && t.reverseId === cfg.id) {
-            // 已配对，无需修改
+
+        // 查找 reverseId 对应的类型，同步其 reverseId 指回本类型
+        const reverseType = this.plugin.settings.customRelationTypes.find(t => t.id === newReverseId);
+        if (reverseType && reverseType.id !== cfg.id) {
+          if (reverseType.reverseId !== cfg.id) {
+            reverseType.reverseId = cfg.id;
           }
         }
+
+        // 对称关系: reverseId = 自身
+        if (cfg.isSymmetric && newReverseId !== cfg.id) {
+          cfg.isSymmetric = false;  // reverseId 不等于自身，不再是对称
+        }
+
         await this.plugin.saveSettings();
         this._rebuildSchema();
+        this.display();  // 刷新 UI 显示同步后的状态
       });
     }
 
@@ -574,6 +604,36 @@ export class MarkVaultSettingTab extends PluginSettingTab {
   private _rebuildSchemaSync() {
     this.plugin.relationSchema = new RelationSchema(this.plugin.settings.customRelationTypes);
     annotationStore.setRelationSchema(this.plugin.relationSchema);
+  }
+
+  /**
+   * P2-2: 迁移已存数据中的 relation.type 字段。
+   * 当用户重命名自定义关系类型 ID 时，遍历所有标注的 relations 数组，
+   * 将旧 type 替换为新 type。
+   */
+  private async _migrateRelationTypeId(oldId: string, newId: string): Promise<void> {
+    let migratedCount = 0;
+    const allAnnotations = annotationStore.getAllAnnotations();
+    for (const ann of allAnnotations) {
+      if (!ann.relations || ann.relations.length === 0) continue;
+      let changed = false;
+      for (const rel of ann.relations) {
+        // P2 审查修复: 移除重复的条件判断 — 一个 if 足够
+        // 原代码有两个连续的 `if (rel.type === oldId)` 完全相同，第二个永远不会执行
+        if (rel.type === oldId) {
+          rel.type = newId;
+          changed = true;
+        }
+      }
+      if (changed) {
+        migratedCount++;
+        // 标记 dirty 确保持久化
+        (annotationStore as any).persistLayer._markDirty(ann.filePath);
+      }
+    }
+    if (migratedCount > 0) {
+      new Notice(`Migrated ${migratedCount} annotations from "${oldId}" to "${newId}"`, 3000);
+    }
   }
 
   /**

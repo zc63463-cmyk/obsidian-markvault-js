@@ -50,6 +50,11 @@ export interface W3CAnnotation {
   // 行号信息（W3C TextPositionSelector 无行号概念，需扩展保留）
   'markvault:startLine'?: number;
   'markvault:endLine'?: number;
+  // v6.0: 多文档类型支持
+  'markvault:docType'?: string;
+  'markvault:selector'?: unknown;
+  'markvault:nodeId'?: string;
+  'markvault:annotationRef'?: string;
 }
 
 /** W3C TextualBody — 标注的内容主体 */

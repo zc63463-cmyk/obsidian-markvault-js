@@ -1,99 +1,61 @@
-# BUG-8 修复 + Relation Graph 深度审查
+# MindFlow Phase 2 — 节点内 Markdown 渲染 实现完成
 
-## BUG-8 修复: RangeError: Field is not present in this state
+> 日期: 2026-06-18 | 状态: ✅ 完成
 
-**根因**: Obsidian 关闭/切换标签页时 `beforeUnload→saveHistory→field()` 拆解 CM6 state，但 `view.destroyed` 尚未设为 true，此时 `requestRegionLayerRedraw()` dispatch effect 到已部分销毁的 view 触发 RangeError。
+## 完成内容
 
-**修复**:
-1. `highlight-applier.ts` — `requestRegionLayerRedraw()` 增加 `state.field` 有效性检查 + catch 中清除过期引用
-2. `main.ts` — `onunload()` 首行 `setActiveEditorView(null)` 切断引用
+实现了 Phase 2 节点内 Markdown 渲染，节点内容通过 Obsidian `MarkdownRenderer.render()` 渲染，支持 LaTeX 公式、加粗、代码、内部链接等完整 Markdown 语法。
 
-**构建 + 部署**: ✅
+## 新增文件
 
----
+| 文件 | 说明 |
+|------|------|
+| `src/mindflow/render/render-cache.ts` | 渲染缓存（LRU，MAX 500条，nodeId+text 哈希 key） |
 
-## Relation Graph 深度审查 (v5.4~v5.11)
+## 修改文件
 
-### 审查文件
-- `src/ui/graph/RelationGraphView.ts` (~1189 行)
-- `src/ui/graph/graph-data-builder.ts` (~461 行)
-- `src/ui/graph/graph-types.ts` (~27 行)
-- `styles.css` 图谱部分 (~240 行)
-- `tests/graph-data-builder.test.ts` (~357 行)
+| 文件 | 改动 |
+|------|------|
+| `mind-node.ts` | +`renderedHeight?` / `renderedWidth?` 字段 |
+| `tree-layout.ts` | `getNodeHeight` → 优先 renderedHeight 否则估算；+`estimateNodeHeight` / `relayoutWithMeasured` / `needsRelayout` / `subtreeNeedsRelayout` |
+| `node-renderer.ts` | `renderNode` 只创建骨架 + content 容器；+`renderNodeContent`(async, MarkdownRenderer.render) / `renderNodesContent`(分批) / `enterEditMode` / `exitEditMode` |
+| `mindflow-view.ts` | `layoutAndRender` → async 两遍布局管线；多处方法改 async；缓存管理 |
+| `styles.css` | 节点内 MD 元素样式 + 渐入动画 + 编辑态 monospace + 位置 transition |
 
-### 🔴 发现的问题
+## 核心管线：两遍布局
 
-#### BUG-9: `rebuildAdjacencyMap` 在 force-graph 替换 source/target 后使用 string cast 失效
+```
+Step 1: 占位布局（同步）
+  → estimateNodeHeight() 估算高度
+  → layoutTree() 立即定位
+  → 用户看到导图骨架
 
-**文件**: `RelationGraphView.ts:868-870`
-```typescript
-const sourceId = link.source as string;
-const targetId = link.target as string;
+Step 2: 异步渲染内容
+  → MarkdownRenderer.render(app, text, el, path, component)
+  → 分批: requestAnimationFrame 每帧 10 个
+  → MathJax 排版 LaTeX 公式
+
+Step 3: 刷新 MathJax
+  → finishRenderMath()
+
+Step 4: 重布局（仅当高度变化 > 8px）
+  → relayoutWithMeasured() 用实际高度
+  → CSS transition 平滑过渡
 ```
 
-**问题**: `force-graph` 在 `graphData()` 注入数据后，会将 link 的 `source`/`target` 从 string 替换为 GraphNode 对象引用。在 `refresh()` 中调用 `this.fg.graphData(graphData)` 后，graphData.links 中的 source/target 已被 force-graph 内部替换为对象。
+## 验证结果
 
-`rebuildAdjacencyMap()` 直接 `as string` 强转，得到的是 `[object Object]`（GraphNode.toString()），而非 UUID 字符串。**这导致邻接表完全失效**，hover 高亮和搜索高亮无法正确匹配节点。
+| 检查项 | 结果 |
+|--------|------|
+| `tsc -noEmit -skipLibCheck` | ✅ exit 0 |
+| `npm test` (MindFlow 部分) | ✅ 57/57 通过 |
+| `esbuild production` | ✅ exit 0 |
 
-**影响范围**: 
-- `handleNodeHover()` → 邻居高亮不工作
-- `applySearchHighlight()` → 搜索高亮不工作
+## 测试新增（12 个）
 
-**修复方案**: 在 `rebuildAdjacencyMap` 中安全提取 ID：
-```typescript
-const sourceId = typeof link.source === 'string' ? link.source : (link.source as any).id;
-const targetId = typeof link.target === 'string' ? link.target : (link.target as any).id;
-```
-
-注意：`bfsReachable()` (graph-data-builder.ts:325-326) 中已有同样的防御性处理，可参考。
-
-#### BUG-10: `refresh()` 中 zoomToFit 在每次 refresh 时都触发
-
-**文件**: `RelationGraphView.ts:800-804`
-```typescript
-if (graphData.nodes.length > 0) {
-  setTimeout(() => {
-    this.fg?.zoomToFit(400, 50);
-  }, 500);
-}
-```
-
-**问题**: 每次 `refresh()` 调用（包括切换 filter chip、搜索输入等）都会重置视口到 fit-all，用户手动缩放/平移的操作被频繁覆盖。这非常影响用户体验 — 每次点击一个 chip 就被弹回全局视图。
-
-**建议**: 只在首次加载和显式点击 Fit 按钮时 zoomToFit，filter 变化时保持当前视口。
-
-#### ⚠️ 性能: `renderToolbar()` 每次 filter 变化都完全重建 DOM
-
-**文件**: `RelationGraphView.ts:228, 248`
-```typescript
-chip.addEventListener('click', () => {
-  this.toggleFilterArray('relationTypes', rt);
-  this.refresh();
-  this.renderToolbar(); // ← 完全重建 4 行 toolbar
-});
-```
-
-**问题**: 点击一个 chip → refresh (重建图谱数据) + renderToolbar (重建 30+ 个 chip 的 DOM)。renderToolbar 调用 `this.toolbarEl.empty()` 销毁所有子节点再重建。对于频繁操作（连续切换多个 filter），这会产生不必要的 DOM 抖动。
-
-**影响**: 功能正常，但 16 active + 11 passive = 27 个 chip 的 DOM 重建在高频操作下可能有感知延迟。
-
-**建议**: 只更新受影响 chip 的 active/dim class，而非全量重建。
-
-### 🟢 代码质量评价
-
-| 维度 | 评分 | 说明 |
-|------|:--:|------|
-| 类型安全 | A | GraphNode/GraphLink/GraphFilter 接口清晰，类型断言最小化 |
-| 算法正确性 | B+ | BFS/curvature/dedup 逻辑正确，但 adjacencyMap 有 BUG-9 |
-| 性能优化 | B | uuidMap O(1) 查询、degreeMap 预计算好，但 renderToolbar 全量重建 |
-| 主题适配 | A | 暗亮主题完整覆盖 |
-| 代码组织 | A- | graph-types.ts 独立避免循环依赖，但 RelationGraphView+NodeDetailModal 1189 行略大 |
-| 测试覆盖 | B+ | 17 个测试覆盖核心路径，但缺少 adjacencyMap/renderToolbar 测试 |
-
-### 📋 修复优先级
-
-| # | 问题 | 优先级 | 工作量 |
-|---|------|:--:|:--:|
-| BUG-9 | adjacencyMap source/target 强转失效 | 🔴 P0 | 5 min |
-| BUG-10 | refresh 每次都 zoomToFit | 🟡 P1 | 10 min |
-| — | renderToolbar 全量重建优化 | 🟢 P2 | 30 min |
+- estimateNodeHeight: 纯文本/多行/块级公式/代码块 (4)
+- getNodeHeight: 缓存优先/估算回退 (2)
+- relayoutWithMeasured: 用实际高度重布局 (1)
+- needsRelayout: 差异检测 (1)
+- RenderCache: 读写/缓存失效/clear (3)
+- subtreeNeedsRelayout: 递归检测 (1)

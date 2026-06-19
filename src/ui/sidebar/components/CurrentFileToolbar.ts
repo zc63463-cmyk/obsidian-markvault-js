@@ -1,4 +1,5 @@
 import { App, Notice, TFile } from 'obsidian';
+import { logger } from '../../../utils/logger';
 import type { Annotation } from '../../../types/annotation';
 import { getAnnotationsForFile, deleteAnnotation, addAnnotation } from '../../../db/annotation-repo';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
@@ -129,7 +130,7 @@ export class CurrentFileToolbar {
         await deleteAnnotation(ann.uuid);
         dbDeleted++;
       }
-      console.log(`MarkVault: clear all — ${dbDeleted} DB annotations deleted`);
+      logger.debug(`MarkVault: clear all — ${dbDeleted} DB annotations deleted`);
 
       // ── ② 清理 MD ──
       const file = this.host.app.vault.getAbstractFileByPath(filePath);
@@ -145,12 +146,12 @@ export class CurrentFileToolbar {
 
         plugin.modifyGuard.acquire(filePath);
         try {
-          console.log('MarkVault: clear all — calling vault.process');
+          logger.debug('MarkVault: clear all — calling vault.process');
           const written = await this.host.app.vault.process(file, stripAnchors);
           if (written.length === file.stat.size) {
             console.warn('MarkVault: clear all — markdown content unchanged after strip');
           } else {
-            console.log(`MarkVault: clear all — removed ${file.stat.size - written.length} bytes`);
+            logger.debug(`MarkVault: clear all — removed ${file.stat.size - written.length} bytes`);
           }
         } catch (processErr) {
           // 首次 process 失败，短暂等待后重试一次（处理文件瞬态锁定）
@@ -162,7 +163,7 @@ export class CurrentFileToolbar {
         }
         // vault.process 完成后再次延长冷却期，覆盖元数据重解析耗时
         plugin.markFileSynced(filePath);
-        console.log(`MarkVault: clear all — MD cleaned`);
+        logger.debug(`MarkVault: clear all — MD cleaned`);
       } else {
         console.warn('MarkVault: clear all — source file not found, DB annotations deleted only');
       }

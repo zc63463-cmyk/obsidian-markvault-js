@@ -175,20 +175,24 @@ export function buildGraphData(
     }
 
     // 🔧 P1-2: 区分两种 hasRelations 语义
-    // hasAnyRelations: 包含失效关系，用于孤立节点过滤（有失效关系的节点不是孤立的）
+    // hasAnyRelations: 包含失效关系，用于 showInvalidated=true 时的孤立节点过滤
+    // hasActiveRelations: 仅有效关系，用于 showInvalidated=false 时的孤立节点过滤和边构建
     const hasAnyRelations = !!(ann.relations && ann.relations.length > 0);
-    // hasActiveRelations: 仅有效关系，用于关系类型过滤和边构建
     const hasActiveRelations = ann.relations
       ? ann.relations.some(r => !r.invalidAt)
       : false;
 
-    // 过滤：孤立节点
-    if (!filter.showIsolated && !hasAnyRelations) {
+    // S3 关系审查修复: 根据 showInvalidated 选择正确的孤立判定
+    // showInvalidated=true: 有任何关系(含失效)的节点不算孤立
+    // showInvalidated=false: 只有有效关系的节点不算孤立，仅有失效关系的节点会被过滤(避免视觉孤立)
+    const hasRelevantRelations = filter.showInvalidated ? hasAnyRelations : hasActiveRelations;
+    if (!filter.showIsolated && !hasRelevantRelations) {
       continue;
     }
 
     // 过滤：关系类型（节点至少有一条符合过滤条件的有效关系）
-    if (filter.relationTypes.length > 0 && hasActiveRelations) {
+    // S3 关系审查修复: 移除 hasActiveRelations 条件 — 上面已保证 hasActiveRelations=true
+    if (filter.relationTypes.length > 0) {
       const hasMatchingRel = ann.relations!.some(
         r => !r.invalidAt && filter.relationTypes.includes(r.type)
       );

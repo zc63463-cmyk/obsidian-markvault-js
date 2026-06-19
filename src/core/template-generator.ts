@@ -130,7 +130,7 @@ export function generateCognitiveTemplates(): AnnotationTemplate[] {
       motivation: 'commenting',
       icon: '🎯',
       hotkey: 'Mod+Shift+m',
-      flags: { mastery: 'reviewing', reviewPriority: 'high' },
+      flags: { mastery: 'familiar', reviewPriority: 'high' },
     },
     {
       id: 'needs-correction',

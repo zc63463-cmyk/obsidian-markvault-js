@@ -1,18 +1,22 @@
 import type {
   Annotation,
+  DocType,
 } from '../types/annotation';
+import { getDocType } from '../types/annotation';
 
 /**
  * IndexLayer — 内存索引层
  *
- * 持有 12 个倒排索引 Map/Set，提供：
+ * 持有 15 个倒排索引 Map/Set，提供：
  * - addToIndex / removeFromIndex — 核心索引变更
  * - rebuildIncomingIndexFor — 入边索引重建
  * - 简单查询辅助方法（byUuid / byFile / count / all / fieldKeys 等）
  * - clearAll — 清空所有索引
+ *
+ * v6.0 新增索引：byDocType / byNodeId / byAnnotationRef
  */
 export class IndexLayer {
-  // ─── 12 个索引 Map ────────────────────────────────────
+  // ─── 15 个索引 Map ────────────────────────────────────
   /** uuid → Annotation，O(1) 精确查找 */
   private _byUuid: Map<string, Annotation> = new Map();
 
@@ -52,6 +56,16 @@ export class IndexLayer {
   /** motivation → Set<uuid>，按标注意图索引 */
   private _byMotivation: Map<string, Set<string>> = new Map();
 
+  // ─── v6.0: 多文档类型扩展索引 ──────────────────────────
+  /** docType → Set<uuid>，按文档类型索引（markdown/pdf/mindmap） */
+  private _byDocType: Map<DocType, Set<string>> = new Map();
+
+  /** nodeId → Set<uuid>，按导图节点 ID 索引（MindFlow 标注） */
+  private _byNodeId: Map<string, Set<string>> = new Map();
+
+  /** annotationRef (uuid) → Set<mindmapFilePath:nodeId>，反向索引：标注被哪些导图引用 */
+  private _byAnnotationRef: Map<string, Set<string>> = new Map();
+
   // ─── 公共只读访问器 ───────────────────────────────────
   get byUuid() { return this._byUuid; }
   get byFile() { return this._byFile; }
@@ -66,6 +80,9 @@ export class IndexLayer {
   get byMastery() { return this._byMastery; }
   get byReviewPriority() { return this._byReviewPriority; }
   get byMotivation() { return this._byMotivation; }
+  get byDocType() { return this._byDocType; }
+  get byNodeId() { return this._byNodeId; }
+  get byAnnotationRef() { return this._byAnnotationRef; }
 
   // ─── 简单查询 ─────────────────────────────────────────
 
@@ -79,7 +96,7 @@ export class IndexLayer {
     return this._byUuid.size;
   }
 
-  /** 获取指定文件的所有标注，按 startOffset 排序 */
+  /** 获取指定文件的所有标注，按 startOffset 排序（markdown）/ createdAt 排序（非 markdown） */
   getAnnotationsForFile(filePath: string): Annotation[] {
     const uuidSet = this._byFile.get(filePath);
     if (!uuidSet) return [];
@@ -90,7 +107,12 @@ export class IndexLayer {
       if (ann) annotations.push(ann);
     }
 
-    return annotations.sort((a, b) => a.startOffset - b.startOffset);
+    // v6.0: markdown 标注按偏移排序，PDF/mindmap 标注按创建时间排序
+    const allMarkdown = annotations.every(a => getDocType(a) === 'markdown');
+    if (allMarkdown) {
+      return annotations.sort((a, b) => a.startOffset - b.startOffset);
+    }
+    return annotations.sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /** 获取所有已加载的标注 */
@@ -117,6 +139,35 @@ export class IndexLayer {
   /** 获取所有已加载标注中出现过的分组列表 */
   getGroupNames(): string[] {
     return Array.from(this._byGroup.keys()).sort();
+  }
+
+  // ─── v6.0: 多文档类型查询 ─────────────────────────────
+
+  /** 按文档类型获取标注 UUID 集合 */
+  getAnnotationsByDocType(docType: DocType): Set<string> {
+    return this._byDocType.get(docType) ?? new Set();
+  }
+
+  /** 按导图节点 ID 获取标注 UUID 集合 */
+  getAnnotationsByNodeId(nodeId: string): Set<string> {
+    return this._byNodeId.get(nodeId) ?? new Set();
+  }
+
+  /** 查询标注被哪些导图引用（反向索引） */
+  getMindmapRefs(annotationUuid: string): Array<{ filePath: string; nodeId: string }> {
+    const refSet = this._byAnnotationRef.get(annotationUuid);
+    if (!refSet) return [];
+    const result: Array<{ filePath: string; nodeId: string }> = [];
+    for (const entry of refSet) {
+      const sepIdx = entry.lastIndexOf('\x00');
+      if (sepIdx >= 0) {
+        result.push({
+          filePath: entry.slice(0, sepIdx),
+          nodeId: entry.slice(sepIdx + 1),
+        });
+      }
+    }
+    return result;
   }
 
   // ─── 核心索引变更 ─────────────────────────────────────
@@ -246,6 +297,36 @@ export class IndexLayer {
         this._byMotivation.set(annotation.motivation, motivationSet);
       }
       motivationSet.add(uuid);
+    }
+
+    // v6.0: _byDocType — 按文档类型索引
+    const docType = getDocType(annotation);
+    let docTypeSet = this._byDocType.get(docType);
+    if (!docTypeSet) {
+      docTypeSet = new Set();
+      this._byDocType.set(docType, docTypeSet);
+    }
+    docTypeSet.add(uuid);
+
+    // v6.0: _byNodeId — MindFlow 导图节点索引
+    if (annotation.nodeId) {
+      let nodeSet = this._byNodeId.get(annotation.nodeId);
+      if (!nodeSet) {
+        nodeSet = new Set();
+        this._byNodeId.set(annotation.nodeId, nodeSet);
+      }
+      nodeSet.add(uuid);
+    }
+
+    // v6.0: _byAnnotationRef — 反向索引：标注被哪些导图引用
+    // key 格式: filePath \x00 nodeId（用 null byte 做分隔符，避免文件名含冒号导致解析错误）
+    if (annotation.annotationRef) {
+      let refSet = this._byAnnotationRef.get(annotation.annotationRef);
+      if (!refSet) {
+        refSet = new Set();
+        this._byAnnotationRef.set(annotation.annotationRef, refSet);
+      }
+      refSet.add(`${annotation.filePath}\x00${annotation.nodeId ?? ''}`);
     }
 
     // 增量重建本标注被其他标注指向的反向入边索引
@@ -379,6 +460,38 @@ export class IndexLayer {
         }
       }
     }
+
+    // v6.0: _byDocType
+    const docType = getDocType(ann);
+    const docTypeSet = this._byDocType.get(docType);
+    if (docTypeSet) {
+      docTypeSet.delete(uuid);
+      if (docTypeSet.size === 0) {
+        this._byDocType.delete(docType);
+      }
+    }
+
+    // v6.0: _byNodeId
+    if (ann.nodeId) {
+      const nodeSet = this._byNodeId.get(ann.nodeId);
+      if (nodeSet) {
+        nodeSet.delete(uuid);
+        if (nodeSet.size === 0) {
+          this._byNodeId.delete(ann.nodeId);
+        }
+      }
+    }
+
+    // v6.0: _byAnnotationRef
+    if (ann.annotationRef) {
+      const refSet = this._byAnnotationRef.get(ann.annotationRef);
+      if (refSet) {
+        refSet.delete(`${ann.filePath}\x00${ann.nodeId ?? ''}`);
+        if (refSet.size === 0) {
+          this._byAnnotationRef.delete(ann.annotationRef);
+        }
+      }
+    }
   }
 
   /**
@@ -420,5 +533,8 @@ export class IndexLayer {
     this._byMastery.clear();
     this._byReviewPriority.clear();
     this._byMotivation.clear();
+    this._byDocType.clear();
+    this._byNodeId.clear();
+    this._byAnnotationRef.clear();
   }
 }

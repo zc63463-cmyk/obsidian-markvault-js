@@ -6,6 +6,7 @@
  */
 
 import type { Annotation } from '../types/annotation';
+import { logger } from '../utils/logger';
 import { annotationStore } from './annotation-store';
 
 /**
@@ -37,7 +38,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
       });
     } catch {
       // 数据库不存在或版本不匹配，无需迁移
-      console.log('MarkVault migration: IndexedDB not found or incompatible, skipping migration');
+      logger.debug('MarkVault migration: IndexedDB not found or incompatible, skipping migration');
       return 0;
     }
 
@@ -49,7 +50,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
       return 0;
     }
 
-    console.log(`MarkVault migration: found ${count} annotations in IndexedDB, starting migration...`);
+    logger.info(`MarkVault migration: found ${count} annotations in IndexedDB, starting migration...`);
 
     allAnnotations = await table.toArray();
 
@@ -100,7 +101,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
     try {
       await table.clear();
       dexieDb.delete();
-      console.log('MarkVault migration: IndexedDB deleted after successful migration');
+      logger.info('MarkVault migration: IndexedDB deleted after successful migration');
     } catch (err) {
       console.warn('MarkVault migration: could not delete IndexedDB, will retry next launch', err);
     }
@@ -115,7 +116,7 @@ export async function migrateFromIndexedDB(): Promise<number> {
       err.message.includes("Cannot find package 'dexie'")
     );
     if (isModuleError) {
-      console.log('MarkVault migration: Dexie not available, skipping IndexedDB migration (expected for Phase 2)');
+      logger.debug('MarkVault migration: Dexie not available, skipping IndexedDB migration (expected for Phase 2)');
     } else {
       console.error('MarkVault migration: failed to migrate from IndexedDB', err);
     }

@@ -13,7 +13,8 @@
  * - 响应式：ResizeObserver 跟随窗口缩放
  */
 
-import { ItemView, WorkspaceLeaf, TFile, Modal, App, Menu, MarkdownView } from 'obsidian';
+import { ItemView, WorkspaceLeaf, TFile, Modal, App, Menu, MarkdownView, Notice } from 'obsidian';
+import { logger } from '../../utils/logger';
 import ForceGraph from 'force-graph';
 import type { NodeObject, LinkObject } from 'force-graph';
 import { annotationStore } from '../../db/annotation-store';
@@ -782,11 +783,17 @@ export class RelationGraphView extends ItemView {
     this.detectTheme();
 
     const schema = this.plugin?.getRelationSchema() ?? new RelationSchema([]);
-    const graphData = buildGraphData(
+    let graphData = buildGraphData(
       annotationStore.getAllAnnotations(),
       schema,
       this.filter,
     );
+
+    // S3-3: 节点上限保护 — 超过 MAX_NODES 时只保留 Top N 高关联度节点
+    const MAX_NODES = 500;
+    if (graphData.nodes.length > MAX_NODES) {
+      graphData = this.truncateGraph(graphData, MAX_NODES);
+    }
 
     this.fg.graphData(graphData);
 
@@ -820,6 +827,71 @@ export class RelationGraphView extends ItemView {
         this.fg?.zoomToFit(400, 50);
       }, 500);
     }
+  }
+
+  /**
+   * S3-3: 截断图谱到指定节点数，保留关联度最高的节点。
+   *
+   * 策略：按节点的度（degree = 入度 + 出度）降序排序，取 Top N。
+   * 然后只保留 Top N 节点之间的边。
+   */
+  private truncateGraph(
+    graphData: { nodes: GraphNode[]; links: GraphLink[] },
+    maxNodes: number,
+  ): { nodes: GraphNode[]; links: GraphLink[] } {
+    // S3 审查修复: graph-data-builder 的 GraphLink.source/target 是 string 类型
+    // 但 force-graph 在 graphData() 调用后会替换为对象引用
+    // truncateGraph 在 graphData() 之前调用, 所以 source/target 仍是 string, 安全
+
+    // 计算每个节点的度
+    const degreeMap = new Map<string, number>();
+    for (const node of graphData.nodes) {
+      degreeMap.set(node.id, 0);
+    }
+    for (const link of graphData.links) {
+      const src = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id;
+      const tgt = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id;
+      degreeMap.set(src, (degreeMap.get(src) ?? 0) + 1);
+      degreeMap.set(tgt, (degreeMap.get(tgt) ?? 0) + 1);
+    }
+
+    // 按度降序排序，取 Top N
+    const topNodeIds = new Set(
+      graphData.nodes
+        .map(n => ({ id: n.id, degree: degreeMap.get(n.id) ?? 0 }))
+        .sort((a, b) => b.degree - a.degree)
+        .slice(0, maxNodes)
+        .map(n => n.id),
+    );
+
+    // 过滤节点和边
+    const truncatedNodes = graphData.nodes.filter(n => topNodeIds.has(n.id));
+    const truncatedLinks = graphData.links.filter(l => {
+      const src = typeof l.source === 'string' ? l.source : (l.source as GraphNode).id;
+      const tgt = typeof l.target === 'string' ? l.target : (l.target as GraphNode).id;
+      return topNodeIds.has(src) && topNodeIds.has(tgt);
+    });
+
+    // S3 审查修复: 过滤掉截断后变成孤立的节点（度=0 的节点在图谱中无意义）
+    const remainingDegree = new Map<string, number>();
+    for (const n of truncatedNodes) remainingDegree.set(n.id, 0);
+    for (const l of truncatedLinks) {
+      const src = typeof l.source === 'string' ? l.source : (l.source as GraphNode).id;
+      const tgt = typeof l.target === 'string' ? l.target : (l.target as GraphNode).id;
+      remainingDegree.set(src, (remainingDegree.get(src) ?? 0) + 1);
+      remainingDegree.set(tgt, (remainingDegree.get(tgt) ?? 0) + 1);
+    }
+    const finalNodes = truncatedNodes.filter(n => (remainingDegree.get(n.id) ?? 0) > 0);
+
+    // 显示截断警告（仅当实际截断了节点时）
+    if (finalNodes.length < graphData.nodes.length) {
+      new Notice(
+        `⚠️ 图谱过大（${graphData.nodes.length} 节点），已截断为 ${finalNodes.length} 高关联度节点。请使用筛选缩小范围。`,
+        5000,
+      );
+    }
+
+    return { nodes: finalNodes, links: truncatedLinks };
   }
 
   /**
@@ -1140,7 +1212,7 @@ class NodeDetailModal extends Modal {
 
       if (newContent !== content) {
         await this.app.vault.modify(file, newContent);
-        console.log(`MarkVault: synced alias to markdown for ${ann.uuid}`);
+        logger.debug(`MarkVault: synced alias to markdown for ${ann.uuid}`);
       }
     } catch (err) {
       // Markdown 同步失败不影响 DB 已保存的 alias（下次 sync 时 DB-first 策略会保留）
@@ -1176,6 +1248,18 @@ class NodeDetailModal extends Modal {
       : '(unknown)';
     const textEl = row.createSpan({ cls: 'markvault-node-modal-rel-target' });
     textEl.textContent = displayText.replace(/\n/g, ' ');
+
+    // P2-1: 关系 note 一等公民 — 渲染关系说明
+    if (rel.note && rel.note.trim()) {
+      const noteEl = row.createSpan({ cls: 'markvault-node-modal-rel-note' });
+      noteEl.textContent = `「${rel.note.trim()}」`;
+    }
+
+    // 失效关系标记
+    if (rel.invalidAt) {
+      row.createSpan({ cls: 'markvault-node-modal-rel-invalid', text: ' (invalid)' });
+      row.addClass('markvault-rel-invalid-row');
+    }
 
     // 点击跳转目标节点
     row.addEventListener('click', () => {

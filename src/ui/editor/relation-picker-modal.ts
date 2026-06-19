@@ -12,7 +12,7 @@
  *       - 结果行显示：标注原文 + 文件名 + 行号 + 类型徽章 + 掌握度
  */
 
-import { Modal, App, Menu } from 'obsidian';
+import { Modal, App, Menu, TextComponent } from 'obsidian';
 import type { AnnotationRelation, RelationType, AnnotationFilter, AnnotationType, AnnotationMotivation, MasteryLevel } from '../../types/annotation';
 import type { RelationSchema } from '../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS, SEMANTIC_GROUPS } from '../../types/annotation';
@@ -44,6 +44,7 @@ export class RelationPickerModal extends Modal {
   private selectedType: RelationType | null = null;
   private searchInput: HTMLInputElement | null = null;
   private linkBtn: HTMLButtonElement | null = null;
+  private noteInputComp: TextComponent | null = null;  // P2-1: note 一等公民
 
   // v5.2: 筛选状态
   // 注意：不能用 `scope` 作为属性名，Obsidian Modal 基类已有 scope: Scope 属性
@@ -318,6 +319,19 @@ export class RelationPickerModal extends Modal {
       }
     }
 
+    // ── P2-1: 关系说明 note 输入框（一等公民） ──
+    const noteSection = contentEl.createDiv({ cls: 'markvault-relation-picker-note-section' });
+    noteSection.createSpan({ cls: 'markvault-relation-picker-note-label', text: 'Note (optional):' });
+    this.noteInputComp = new TextComponent(noteSection);
+    this.noteInputComp.inputEl.addClass('markvault-relation-picker-note-input');
+    this.noteInputComp.setPlaceholder('Describe this relationship...');
+    this.noteInputComp.inputEl.addEventListener('keydown', (ev: KeyboardEvent) => {
+      // Enter 键提交（如果已选标注+类型）
+      if (ev.key === 'Enter' && this.selectedUuid && this.selectedType) {
+        this._submitPick();
+      }
+    });
+
     // ── 结果列表容器 ──
     const resultsContainer = contentEl.createDiv({ cls: 'markvault-relation-picker-results' });
     resultsContainer.id = 'markvault-relation-results';
@@ -339,12 +353,7 @@ export class RelationPickerModal extends Modal {
     this.linkBtn = linkBtn;
     linkBtn.disabled = true;  // 初始禁用：未选标注 + 未选类型
     linkBtn.addEventListener('click', () => {
-      if (!this.selectedUuid || !this.selectedType) return;
-      this.onPick({
-        targetUuid: this.selectedUuid,
-        type: this.selectedType,
-      });
-      this.close();
+      this._submitPick();
     });
 
     // 初始加载
@@ -567,5 +576,17 @@ export class RelationPickerModal extends Modal {
     if (this.linkBtn) {
       this.linkBtn.disabled = !this.selectedUuid || !this.selectedType;
     }
+  }
+
+  /** P2-1: 提交选择 — 包含 note 字段 */
+  private _submitPick() {
+    if (!this.selectedUuid || !this.selectedType) return;
+    const note = this.noteInputComp?.getValue()?.trim() || undefined;
+    this.onPick({
+      targetUuid: this.selectedUuid,
+      type: this.selectedType,
+      note: note || undefined,
+    });
+    this.close();
   }
 }

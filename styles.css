@@ -3198,3 +3198,651 @@
   width: 100%;
   box-sizing: border-box;
 }
+
+/* ═══════════════════════════════════════════════════════ */
+/* ─── MindFlow 思维导图视图 ────────────────────────────── */
+/* ═══════════════════════════════════════════════════════ */
+
+.mindflow-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 工具栏 */
+.mf-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 8px;
+  background: var(--background-primary, #fff);
+  border-bottom: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+  flex-shrink: 0;
+}
+
+.mf-toolbar__btn {
+  padding: 4px 12px;
+  font-size: 13px;
+  border: 1px solid var(--background-modifier-border, rgba(0,0,0,0.15));
+  border-radius: 6px;
+  background: var(--background-primary, #fff);
+  color: var(--text-normal, #333);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.mf-toolbar__btn:hover {
+  background: var(--background-modifier-hover, rgba(0,0,0,0.05));
+  border-color: var(--interactive-accent, #483699);
+}
+
+.mf-toolbar__file {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+/* 视口 */
+.mf-viewport {
+  cursor: grab;
+}
+.mf-viewport:active {
+  cursor: grabbing;
+}
+
+/* 画布 */
+.mf-canvas {
+  will-change: transform;
+}
+
+/* 节点层 */
+.mf-node-layer {
+  pointer-events: none;
+}
+
+/* ── 节点 ── */
+.mf-node {
+  position: absolute;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: box-shadow 0.15s, border-color 0.15s, left 0.2s ease-out, top 0.2s ease-out,
+              min-height 0.2s ease-out;
+  box-sizing: border-box;
+  user-select: none;
+  overflow: visible;
+  min-width: 140px; /* 兜底: 容纳 8-9 中文字 */
+  /* 实际宽度由 JS renderNodeContent 渲染后测量并设置 */
+}
+
+/* MD-Seed 节点 */
+.mf-node--md-seed {
+  background: var(--background-primary, #fff);
+  border: 2px solid var(--background-modifier-border, #ccc);
+  color: var(--text-normal, #333);
+}
+
+/* Free 节点 */
+.mf-node--free {
+  background: var(--background-primary-alt, #f8f8f8);
+  border: 2px solid var(--interactive-accent, #483699);
+  color: var(--text-normal, #333);
+}
+
+/* Annotation 节点（Phase 3+） */
+.mf-node--annotation {
+  background: var(--background-primary, #fff);
+  border: 2px dashed var(--text-accent, #7C3AED);
+  color: var(--text-normal, #333);
+}
+
+/* 节点悬停 */
+.mf-node:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  border-color: var(--interactive-accent, #483699);
+}
+
+/* 搜索匹配高亮 */
+.mf-node--search-match {
+  box-shadow: 0 0 0 3px var(--interactive-accent, #483699), 0 0 18px rgba(72, 54, 153, 0.45);
+  z-index: 50 !important;
+  position: relative;
+  animation: mf-search-pulse 2s ease-in-out infinite;
+}
+
+@keyframes mf-search-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--interactive-accent, #483699), 0 0 18px rgba(72, 54, 153, 0.45); }
+  50%      { box-shadow: 0 0 0 5px var(--interactive-accent, #483699), 0 0 28px rgba(72, 54, 153, 0.65); }
+}
+
+/* 聚焦模式淡化节点 */
+.mf-node--search-dim {
+  opacity: 0.2;
+  filter: grayscale(60%);
+  transition: opacity 0.3s, filter 0.3s;
+}
+
+/* 搜索 Modal 输入框 */
+.mf-annotation-search .mf-search__input:focus {
+  outline: none;
+  border-color: var(--interactive-accent, #483699);
+  box-shadow: 0 0 0 2px rgba(72, 54, 153, 0.15);
+}
+
+/* 搜索列表项 */
+.mf-annotation-search .mf-search__item {
+  transition: background 0.1s;
+}
+
+/* 节点文本 */
+.mf-node__text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Free 节点角标 */
+.mf-node__badge {
+  position: absolute;
+  top: -6px;
+  font-size: 10px;
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+}
+
+.mf-node__badge--free {
+  right: -6px;
+  background: var(--interactive-accent, #483699);
+}
+
+.mf-node__badge--annotation {
+  left: -6px;
+  background: var(--text-accent, #7C3AED);
+}
+
+/* Note 角标 */
+.mf-node__badge--note {
+  left: -6px;
+  top: 14px;
+  background: var(--text-warning, #D97706);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* Detail 角标 */
+.mf-node__badge--detail {
+  left: -6px;
+  top: 28px;
+  background: var(--text-accent, #483699);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* 折叠指示器 */
+.mf-node__collapse {
+  position: absolute;
+  right: -20px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 50%;
+  background: var(--background-modifier-border, #ccc);
+  color: var(--text-on-accent, #fff);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.mf-node__collapse:hover {
+  background: var(--interactive-accent, #483699);
+}
+
+/* 折叠状态 */
+.mf-node--collapsed {
+  opacity: 0.8;
+}
+
+/* SVG 连线层 */
+.mf-connectors {
+  z-index: 0;
+}
+
+.mf-node-layer {
+  z-index: 1;
+}
+
+/* ── Phase 1.5 增强 ── */
+
+/* 工具栏分隔线 */
+.mf-toolbar__sep {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  background: var(--background-modifier-border, rgba(0,0,0,0.1));
+  margin: 0 4px;
+}
+
+/* 主按钮强调 */
+.mf-toolbar__btn--primary {
+  background: var(--interactive-accent, #483699);
+  color: var(--text-on-accent, #fff);
+  border-color: var(--interactive-accent, #483699);
+}
+.mf-toolbar__btn--primary:hover {
+  opacity: 0.9;
+  background: var(--interactive-accent, #483699);
+}
+
+/* 节点选中态 */
+.mf-node--selected {
+  box-shadow: 0 0 0 3px rgba(72, 54, 153, 0.25), 0 2px 12px rgba(0,0,0,0.15);
+  border-color: var(--interactive-accent, #483699) !important;
+}
+
+/* 多选态 (Shift+click) */
+.mf-node--multi-selected {
+  box-shadow: 0 0 0 2px rgba(72, 54, 153, 0.15);
+  border-color: rgba(72, 54, 153, 0.4) !important;
+}
+
+/* contentEditable 编辑态 */
+.mf-node__text[contenteditable="true"] {
+  outline: 2px solid var(--interactive-accent, #483699);
+  outline-offset: 2px;
+  border-radius: 3px;
+  background: var(--background-primary, #fff);
+  cursor: text;
+  user-select: text;
+}
+
+/* 画布平滑过渡（Pan/Zoom 动画） */
+.mf-canvas {
+  transition: transform 0.15s ease-out;
+}
+
+/* 工具栏按钮提示文字大小 */
+.mf-toolbar__btn {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* ── Phase 2: 节点内 Markdown 渲染 ── */
+
+/* 节点内容容器 */
+.mf-node__content {
+  /* P1-6: flex:1 + min-width:0 让内容占满但不影响 JS 宽度测量 */
+  flex: 1;
+  min-width: 0;
+  overflow: visible;
+  /* 中文按字正常换行，英文长单词才 break；用 overflow-wrap 而非 word-break */
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+/* 节点内段落 */
+.mf-node__content p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* 节点内加粗/斜体 */
+.mf-node__content strong {
+  font-weight: 700;
+}
+
+/* 节点内行内代码 */
+.mf-node__content code {
+  background: var(--background-modifier-border, rgba(0,0,0,0.08));
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.88em;
+  font-family: var(--font-monospace, 'Cascadia Code', monospace);
+}
+
+/* 节点内代码块 */
+.mf-node__content pre {
+  background: var(--background-secondary, #f5f5f5);
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin: 4px 0;
+  overflow-x: auto;
+  max-width: 380px;
+}
+
+.mf-node__content pre code {
+  background: none;
+  padding: 0;
+}
+
+/* 节点内数学公式（块级） */
+.mf-node__content .math-block {
+  overflow-x: auto;
+  max-width: 380px;
+  margin: 4px 0;
+  padding: 2px 0;
+}
+
+/* 节点内列表 */
+.mf-node__content ul,
+.mf-node__content ol {
+  margin: 2px 0;
+  padding-left: 18px;
+}
+
+.mf-node__content li {
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* 节点内内部链接 */
+.mf-node__content a.internal-link {
+  color: var(--text-accent, #483699);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 节点渲染中态（占位） */
+.mf-node--rendering {
+  opacity: 0.5;
+}
+
+/* 节点渲染完成态（渐入动画） */
+.mf-node--rendered {
+  animation: mf-fade-in 0.2s ease-out;
+}
+
+@keyframes mf-fade-in {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+
+/* 编辑态：等宽字体显示源码 */
+.mf-node--editing .mf-node__content {
+  outline: 2px solid var(--interactive-accent, #483699);
+  outline-offset: 2px;
+  background: var(--background-primary, #fff);
+  cursor: text;
+  user-select: text;
+  font-family: var(--font-monospace, 'Cascadia Code', monospace);
+  white-space: pre-wrap;
+}
+
+/* 节点位置过渡已合并到 .mf-node 主规则 */
+
+/* P1: 拖拽中的幽灵节点 */
+.mf-node--dragging {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+  cursor: grabbing !important;
+}
+
+/* P1: 拖拽放置目标高亮 */
+.mf-node--drop-target {
+  box-shadow: 0 0 0 3px rgba(29, 158, 117, 0.4), 0 2px 12px rgba(0,0,0,0.15) !important;
+  border-color: #1D9E75 !important;
+  background: rgba(29, 158, 117, 0.05) !important;
+}
+
+/* ── MindFlow: 标注详情 Modal ── */
+
+.mf-annotation-detail {
+  max-width: 600px;
+}
+
+.mf-annotation-detail__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+}
+
+.mf-annotation-detail__title {
+  font-size: 18px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.mf-annotation-detail__badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(124, 58, 237, 0.1);
+  color: #7C3AED;
+}
+
+.mf-annotation-detail__section {
+  margin-bottom: 14px;
+}
+
+.mf-annotation-detail__section--meta {
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border, rgba(0,0,0,0.08));
+}
+
+.mf-annotation-detail__label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted, #888);
+  margin-bottom: 4px;
+}
+
+.mf-annotation-detail__content {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-normal, #333);
+}
+
+.mf-annotation-detail__content p {
+  margin: 0 0 6px 0;
+}
+
+.mf-annotation-detail__content p:last-child {
+  margin-bottom: 0;
+}
+
+.mf-annotation-detail__content--quoted {
+  padding: 10px 14px;
+  background: var(--background-primary-alt, #f8f8f8);
+  border-left: 3px solid var(--interactive-accent, #483699);
+  border-radius: 0 6px 6px 0;
+}
+
+.mf-annotation-detail__content--inline {
+  display: inline;
+}
+
+.mf-annotation-detail__content--context {
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  font-style: italic;
+}
+
+.mf-annotation-detail__context-highlight {
+  background: rgba(255, 213, 79, 0.3);
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+.mf-annotation-detail__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mf-annotation-detail__tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(72, 54, 153, 0.08);
+  color: var(--interactive-accent, #483699);
+}
+
+.mf-annotation-detail__tag--group {
+  background: rgba(0, 150, 136, 0.08);
+  color: #00695C;
+}
+
+.mf-annotation-detail__fields {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.mf-annotation-detail__fields td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border, rgba(0,0,0,0.06));
+}
+
+.mf-annotation-detail__field-key {
+  font-weight: 600;
+  color: var(--text-muted, #666);
+  width: 40%;
+}
+
+.mf-annotation-detail__field-value {
+  color: var(--text-normal, #333);
+}
+
+.mf-annotation-detail__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mf-annotation-detail__flag {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: var(--background-modifier-hover, rgba(0,0,0,0.05));
+  color: var(--text-normal, #333);
+}
+
+.mf-annotation-detail__flag--warning {
+  background: rgba(255, 152, 0, 0.12);
+  color: #E65100;
+  font-weight: 600;
+}
+
+.mf-annotation-detail__relations {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mf-annotation-detail__relation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--background-modifier-hover, rgba(0,0,0,0.03));
+}
+
+.mf-annotation-detail__relation-type {
+  font-weight: 600;
+  color: var(--interactive-accent, #483699);
+}
+
+.mf-annotation-detail__relation-target {
+  color: var(--text-muted, #888);
+  font-family: var(--font-monospace, monospace);
+  font-size: 11px;
+}
+
+.mf-annotation-detail__meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+
+.mf-annotation-detail__meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mf-annotation-detail__meta-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint, #aaa);
+}
+
+.mf-annotation-detail__meta-value {
+  font-size: 12px;
+  color: var(--text-muted, #666);
+  word-break: break-all;
+}
+
+.mf-annotation-detail__footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+}
+
+/* ─── PDF 标注扩展 ─── */
+
+/* SVG overlay 容器 — 叠加在 PDF.js 页面上方 */
+.markvault-pdf-overlay {
+  pointer-events: auto;
+  mix-blend-mode: multiply;
+}
+
+/* 高亮矩形 */
+.markvault-pdf-highlight {
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+  rx: 2;
+}
+
+/* 高亮悬停效果 */
+.markvault-pdf-highlight:hover {
+  opacity: 0.55 !important;
+}
+
+/* 高亮活跃闪烁（scrollToAnnotation 时） */
+.markvault-pdf-highlight-active {
+  animation: markvault-pdf-flash 1.5s ease-in-out;
+}
+
+@keyframes markvault-pdf-flash {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
+}
+
+/* 暗色主题适配 */
+.theme-dark .markvault-pdf-highlight {
+  filter: brightness(1.2);
+}

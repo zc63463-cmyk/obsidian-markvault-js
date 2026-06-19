@@ -1,4 +1,4 @@
-import { App, Modal } from 'obsidian';
+import { App, Modal, TextComponent } from 'obsidian';
 
 /**
  * 可复用的确认对话框 — 替代 window.confirm()
@@ -168,7 +168,7 @@ export class PromptModal extends Modal {
     this.inputComp.setValue(cfg.defaultValue || '');
     this.inputComp.setPlaceholder(cfg.placeholder || '');
     if (cfg.onEnter) {
-      this.inputComp.inputEl.addEventListener('keydown', (ev) => {
+      this.inputComp.inputEl.addEventListener('keydown', (ev: KeyboardEvent) => {
         if (ev.key === 'Enter') {
           this.result = this.inputComp!.getValue();
           this.close();

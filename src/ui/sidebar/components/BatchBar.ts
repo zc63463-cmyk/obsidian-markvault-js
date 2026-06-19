@@ -29,7 +29,7 @@ export interface BatchBarHost {
   app: App;
   getPluginInstance(): MarkVaultPluginInterface | null;
   selectedUuids: Set<string>;
-  getActiveTab(): 'current' | 'all' | 'stats';
+  getActiveTab(): 'current' | 'all' | 'stats' | 'orphans';
   getCurrentFilePath(): string | null;
   getFilter(): AnnotationFilter;
   renderContent(): Promise<void>;

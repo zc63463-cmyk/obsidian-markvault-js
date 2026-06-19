@@ -1,4 +1,5 @@
 import { type MarkdownPostProcessorContext } from 'obsidian';
+import { logger } from '../utils/logger';
 import type { AnnotationType, Annotation } from '../types/annotation';
 import { DEFAULT_SETTINGS } from '../types/annotation';
 import { annotationStore } from '../db/annotation-store';
@@ -169,7 +170,7 @@ export class ReadingModeProcessor {
           const result = await applyIncrementalOffsetFix(filePath, batch, annotations);
 
           if (result.updated > 0 || result.deleted > 0) {
-            console.log(`MarkVault: offset fix — updated: ${result.updated}, deleted: ${result.deleted}`);
+            logger.debug(`MarkVault: offset fix — updated: ${result.updated}, deleted: ${result.deleted}`);
 
             // 偏移修正后刷新 span 缓存，确保 CM6 装饰使用最新偏移
             await this.plugin.updateSpanCache(filePath);

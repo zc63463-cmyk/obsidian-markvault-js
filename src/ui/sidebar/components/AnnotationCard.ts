@@ -1,5 +1,5 @@
 import { App, Component, Menu, TFile, MarkdownRenderer, MarkdownView } from 'obsidian';
-import type { Annotation, AnnotationRelation } from '../../../types/annotation';
+import type { Annotation, AnnotationRelation, PDFSelector } from '../../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS } from '../../../types/annotation';
 import type { MarkVaultPluginInterface } from '../../../utils/plugin-interface';
 import { updateSpanAnchor, updateBlockAnchor, updateMarkTag } from '../../../core/annotation-parser';
@@ -70,9 +70,16 @@ export class AnnotationCard {
 
     if (showFilePath) {
       const fileLabel = header.createDiv({ cls: 'markvault-card-file' });
-      const fileName = annotation.filePath.split('/').pop()?.replace('.md', '') || annotation.filePath;
-      fileLabel.textContent = `📄 ${fileName}`;
+      const fileName = annotation.filePath.split('/').pop()?.replace(/\.(md|pdf)$/, '') || annotation.filePath;
+      const isPdf = annotation.docType === 'pdf' || annotation.filePath.endsWith('.pdf');
+      fileLabel.textContent = isPdf ? `📕 ${fileName}` : `📄 ${fileName}`;
       fileLabel.title = annotation.filePath;
+    } else if (annotation.docType === 'pdf') {
+      // PDF 标注显示页码而非行号
+      const selector = annotation.selector as PDFSelector | undefined;
+      const page = selector?.page ?? 0;
+      const pageLabel = header.createDiv({ cls: 'markvault-card-line' });
+      pageLabel.textContent = `Page ${page + 1}`;
     } else {
       const lineLabel = header.createDiv({ cls: 'markvault-card-line' });
       lineLabel.textContent = `Line ${annotation.startLine + 1}`;
@@ -94,19 +101,20 @@ export class AnnotationCard {
 
     // 标注原文
     const textEl = card.createDiv({ cls: 'markvault-card-text' });
+    const displayText = annotation.text || (annotation.docType === 'pdf' ? '_(empty — click edit to add text)_' : annotation.text);
     const component = this.host.getMarkdownComponent();
     if (component) {
       MarkdownRenderer.renderMarkdown(
-        annotation.text,
+        displayText,
         textEl,
         annotation.filePath,
         component,
       ).catch((err: unknown) => {
         console.error('MarkVault: failed to render annotation text', err);
-        textEl.textContent = annotation.text;
+        textEl.textContent = displayText;
       });
     } else {
-      textEl.textContent = annotation.text;
+      textEl.textContent = displayText;
     }
 
     // 批注内容

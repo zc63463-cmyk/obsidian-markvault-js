@@ -348,8 +348,17 @@ export async function applyIncrementalOffsetFix(
           }
         }
         // 注意：offset fix 是系统操作，不更新 updatedAt
-        await annotationStore.updateAnnotation(u.uuid, updates);
-        updatedCount++;
+        try {
+          await annotationStore.updateAnnotation(u.uuid, updates);
+          updatedCount++;
+        } catch (updateErr: any) {
+          // 标注可能在偏移修正期间被删除（如 MindFlow saveFreeNodes 触发的 resync）
+          if (updateErr?.message?.includes('not found')) {
+            // 静默跳过，不视为错误
+          } else {
+            throw updateErr;
+          }
+        }
       }
     }
   } catch (err) {

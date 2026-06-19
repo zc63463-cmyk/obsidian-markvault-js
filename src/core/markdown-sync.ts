@@ -1,13 +1,11 @@
 import { annotationStore } from '../db/annotation-store';
+import { logger } from '../utils/logger';
 import type { Annotation } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown, buildMarkTag, removeMarkTag, updateMarkTag, removeBlockAnchor, updateBlockAnchor, removeSpanAnchor, updateSpanAnchor } from './annotation-parser';
 import { buildNativeAnnotation } from './native-annotation';
 import { stripNativeAnnotations } from './native-annotation';
 import { batchRecoverOffsets } from './offset-recovery';
 import { batchUpdateOffsets, getAnnotationsForFile, addAnnotation } from '../db/annotation-repo';
-
-/** 设为 true 启用 sync 详细日志（默认关闭以减少日常噪音） */
-const VERBOSE_SYNC = false;
 
 /**
  * Markdown ↔ AnnotationStore 双写同步引擎
@@ -38,14 +36,14 @@ export async function syncFromMarkdown(
   filePath: string,
 ): Promise<{ added: number; removed: number; updated: number; upgraded: number }> {
   const markdownAnnotations = parseAllAnnotationsFromMarkdown(content, filePath);
-  if (VERBOSE_SYNC) console.log(`MarkVault sync: parsed ${markdownAnnotations.length} annotations (incl. block anchors) from markdown for ${filePath}`);
+  logger.debug(`MarkVault sync: parsed ${markdownAnnotations.length} annotations (incl. block anchors) from markdown for ${filePath}`);
   const dbAnnotations = await getAnnotationsForFile(filePath);
-  if (VERBOSE_SYNC) console.log(`MarkVault sync: found ${dbAnnotations.length} annotations in DB for ${filePath}`);
+  logger.debug(`MarkVault sync: found ${dbAnnotations.length} annotations in DB for ${filePath}`);
 
   const mdUuids = new Set(markdownAnnotations.map(a => a.uuid));
   const dbUuids = new Set(dbAnnotations.map(a => a.uuid));
 
-  if (VERBOSE_SYNC) console.log(`MarkVault sync: mdUuids=${mdUuids.size}, dbUuids=${dbUuids.size}`);
+  logger.debug(`MarkVault sync: mdUuids=${mdUuids.size}, dbUuids=${dbUuids.size}`);
 
   let added = 0;
   let removed = 0;
@@ -82,7 +80,7 @@ export async function syncFromMarkdown(
   // 这修复了 vault.read() 竞态条件导致的数据丢失问题
   const dbOnlyAnnotations = dbAnnotations.filter(a => !mdUuids.has(a.uuid));
   if (dbOnlyAnnotations.length > 0) {
-    console.log(`MarkVault sync: ${dbOnlyAnnotations.length} annotations exist in DB but not in MD — keeping (user deletion only)`);
+    logger.debug(`MarkVault sync: ${dbOnlyAnnotations.length} annotations exist in DB but not in MD — keeping (user deletion only)`);
     // 注：如果用户真的手动从MD中删除了 <mark> 标签，
     // 这些 DB 中的"孤儿"标注会在下次打开文件时被标记为"MD中不存在"，
     // 但我们仍然保留它们，因为无法区分"vault.read竞态"和"用户手动删除"
@@ -194,7 +192,7 @@ export async function syncFromMarkdown(
     }
 
     if (Object.keys(updates).length > 0) {
-      console.log(`MarkVault sync: updating annotation ${mdAnn.uuid} with`, updates);
+      logger.debug(`MarkVault sync: updating annotation ${mdAnn.uuid} with`, updates);
       await annotationStore.updateAnnotation(mdAnn.uuid, {
         ...updates,
         updatedAt: Date.now(),

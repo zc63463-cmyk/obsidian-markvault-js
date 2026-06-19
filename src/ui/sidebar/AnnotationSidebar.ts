@@ -1,4 +1,5 @@
 import { ItemView, WorkspaceLeaf, MarkdownView, TFile, Component, Notice } from 'obsidian';
+import { logger } from '../../utils/logger';
 import type { Annotation, AnnotationFilter } from '../../types/annotation';
 import {
   getAnnotationsForFile,
@@ -61,6 +62,9 @@ export class AnnotationSidebar extends ItemView {
   private currentFileToolbar: CurrentFileToolbar;
   private filterBar: FilterBar;
   private batchBar: BatchBar;
+
+  // S3-2: 虚拟滚动 cleanup — 防止 scroll listener 泄漏
+  private _virtualScrollCleanup: (() => void) | null = null;
   private allNotesView: AllNotesView;
   private annotationCard: AnnotationCard;
 
@@ -160,6 +164,11 @@ export class AnnotationSidebar extends ItemView {
   }
 
   async onClose() {
+    // S3 审查修复: 清理虚拟滚动 listener
+    if (this._virtualScrollCleanup) {
+      this._virtualScrollCleanup();
+      this._virtualScrollCleanup = null;
+    }
     if (this.component_) {
       this.component_.unload();
       this.component_ = null;
@@ -399,9 +408,90 @@ export class AnnotationSidebar extends ItemView {
       return;
     }
 
-    for (const annotation of annotations) {
-      this.renderAnnotationCard(container, annotation, false);
+    // S3-2: 虚拟滚动 — 标注数超过阈值时只渲染可视区域
+    const VIRTUAL_THRESHOLD = 50;
+    if (annotations.length > VIRTUAL_THRESHOLD) {
+      this.renderVirtualList(container, annotations, false);
+    } else {
+      for (const annotation of annotations) {
+        this.renderAnnotationCard(container, annotation, false);
+      }
     }
+  }
+
+  /**
+   * S3-2: 虚拟滚动渲染 — 只渲染可视区域内的标注卡片 + 上下缓冲区
+   *
+   * 原理：用固定高度容器 + scroll 事件监听，计算可视区域对应的标注索引范围，
+   * 只渲染该范围内的卡片。上下各保留 BUFFER 个卡片作为缓冲。
+   */
+  private renderVirtualList(container: HTMLElement, annotations: Annotation[], showFilePath: boolean) {
+    const ITEM_HEIGHT = 80;          // 预估每张标注卡片高度
+    const BUFFER = 5;                 // 上下缓冲卡片数
+    const CONTAINER_HEIGHT = 600;     // 列表容器最大高度
+
+    // S3 审查修复: 清理上一次虚拟滚动的 listener
+    if (this._virtualScrollCleanup) {
+      this._virtualScrollCleanup();
+      this._virtualScrollCleanup = null;
+    }
+
+    const scrollContainer = container.createDiv({ cls: 'markvault-virtual-scroll' });
+    scrollContainer.style.maxHeight = `${CONTAINER_HEIGHT}px`;
+    scrollContainer.style.overflowY = 'auto';
+
+    const spacer = scrollContainer.createDiv({ cls: 'markvault-virtual-spacer' });
+    spacer.style.height = `${annotations.length * ITEM_HEIGHT}px`;
+    spacer.style.position = 'relative';
+
+    const visibleContainer = spacer.createDiv({ cls: 'markvault-virtual-visible' });
+    visibleContainer.style.position = 'absolute';
+    visibleContainer.style.top = '0';
+    visibleContainer.style.left = '0';
+    visibleContainer.style.right = '0';
+
+    let lastStart = -1;
+    let lastEnd = -1;
+    let rafId: number | null = null;
+
+    const renderRange = () => {
+      rafId = null;
+      const scrollTop = scrollContainer.scrollTop;
+      const startIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER);
+      const endIdx = Math.min(
+        annotations.length,
+        Math.ceil((scrollTop + CONTAINER_HEIGHT) / ITEM_HEIGHT) + BUFFER,
+      );
+
+      if (startIdx === lastStart && endIdx === lastEnd) return;
+      lastStart = startIdx;
+      lastEnd = endIdx;
+
+      visibleContainer.empty();
+      visibleContainer.style.top = `${startIdx * ITEM_HEIGHT}px`;
+
+      for (let i = startIdx; i < endIdx; i++) {
+        this.renderAnnotationCard(visibleContainer, annotations[i], showFilePath);
+      }
+    };
+
+    renderRange();
+
+    // S3 审查修复: 使用 AbortController 管理 scroll listener, 避免泄漏
+    const abortController = new AbortController();
+    scrollContainer.addEventListener('scroll', () => {
+      if (rafId !== null) return;  // 已有 pending rAF, 跳过
+      rafId = requestAnimationFrame(renderRange);
+    }, { signal: abortController.signal });
+
+    // 注册 cleanup 函数供下次渲染或 onClose 调用
+    this._virtualScrollCleanup = () => {
+      abortController.abort();
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    };
   }
 
   // ─── 搜索过滤 ──────────────────────────────────────────
@@ -465,6 +555,22 @@ export class AnnotationSidebar extends ItemView {
 
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.openFile(file);
+
+    // PDF 标注跳转: 使用 PDFRenderer.scrollToAnnotation
+    if (annotation.docType === 'pdf' || file.extension === 'pdf') {
+      const plugin = this.pluginInstance as any;
+      if (plugin?.pdfRenderer) {
+        // 等待 PDF 视图渲染
+        await new Promise(resolve => setTimeout(resolve, 300));
+        try {
+          plugin.pdfRenderer.scrollToAnnotation(annotation.uuid);
+        } catch (err) {
+          console.error('MarkVault: PDF jump failed', err);
+          new Notice('Could not jump to PDF annotation. Make sure the PDF is open.', 3000);
+        }
+      }
+      return;
+    }
 
     let view = leaf.view;
     if (!(view instanceof MarkdownView)) return;
@@ -684,6 +790,18 @@ export class AnnotationSidebar extends ItemView {
     try {
       await deleteAnnotation(annotation.uuid);
 
+      // PDF 标注: 不修改文件内容，只需更新渲染器
+      if (annotation.docType === 'pdf') {
+        const pdfPlugin = plugin as any;
+        if (pdfPlugin?.pdfRenderer && annotation.filePath === (pdfPlugin as any)._currentPdfFilePath) {
+          const remaining = await getAnnotationsForFile(annotation.filePath);
+          pdfPlugin.pdfRenderer.update(remaining);
+        }
+        new Notice('PDF annotation deleted', 3000);
+        await this.refreshListOnly();
+        return;
+      }
+
       const file = this.app.vault.getAbstractFileByPath(annotation.filePath);
       if (!(file instanceof TFile)) {
         new Notice('Annotation deleted (source file not found)', 3000);
@@ -761,7 +879,7 @@ export class AnnotationSidebar extends ItemView {
     if (newFilePath !== this.currentFilePath) {
       this.currentFilePath = newFilePath;
     }
-    console.log(`MarkVault sidebar: refresh — filePath=${this.currentFilePath}, tab=${this.activeTab}`);
+    logger.debug(`MarkVault sidebar: refresh — filePath=${this.currentFilePath}, tab=${this.activeTab}`);
     await this.refreshListOnly();
   }
 }

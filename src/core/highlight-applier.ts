@@ -30,6 +30,7 @@ import {
   type ViewUpdate,
 } from '@codemirror/view';
 import { PRESET_COLORS, type AnnotationType } from '../types/annotation';
+import { logger } from '../utils/logger';
 import { findNativeWrapper, NATIVE_ANCHOR_REGEX } from './native-annotation';
 import { REGION_ANCHOR_REGEX } from './region-annotation';
 import { parseBlockAnchors, findBlockTargetLine, parseBlockDoubleAnchors } from './annotation-parser';
@@ -140,15 +141,10 @@ class MarkVaultDecorator implements PluginValue {
   }
 
   update(update: ViewUpdate) {
-    // docChanged/viewportChanged: 正常文档/视口变化时重绘
-    // regionCacheUpdatedEffect: 缓存更新后强制重绘（解决异步缓存竞态）
     if (update.docChanged) {
-      // 🔧 P1-21 修复：文档变更时 debounce 100ms，合并快速连续输入
-      if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
-      this._rebuildTimer = setTimeout(() => {
-        this.decorations = this.buildDecorations(update.view);
-        this._rebuildTimer = null;
-      }, 100);
+      // 外部文件修改（如 MindFlow saveFreeNodes）需立即重绘，
+      // 否则旧 decorations 映射到新内容时可能跨越换行符
+      this.decorations = this.buildDecorations(update.view);
       return;
     }
     if (update.viewportChanged) {
@@ -178,7 +174,7 @@ class MarkVaultDecorator implements PluginValue {
       return this.buildDecorationsInner(view);
     } catch (err) {
       // 如果构建失败，返回空 DecorationSet，不能让整个 CM6 崩溃
-      console.error('MarkVault: buildDecorations error', err);
+      logger.error('MarkVault: buildDecorations error', err);
       return Decoration.none;
     }
   }
@@ -388,11 +384,18 @@ class MarkVaultDecorator implements PluginValue {
       const wrapper = findNativeWrapper(doc, anchorEnd, type);
       if (wrapper) {
         // 隐藏锚点（及锚点到 wrapper 之间的空白）
-        decoItems.push({
-          from: anchorStart,
-          to: wrapper.wrapperStart,
-          deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
-        });
+        // 🔧 P0 修复：Decoration.replace 不能跨越换行符
+        const hideLineEnd = doc.indexOf('\n', anchorStart);
+        const hideTo = (hideLineEnd !== -1 && hideLineEnd < wrapper.wrapperStart)
+          ? hideLineEnd
+          : wrapper.wrapperStart;
+        if (anchorStart < hideTo) {
+          decoItems.push({
+            from: anchorStart,
+            to: hideTo,
+            deco: Decoration.replace({ widget: new NativeAnchorWidget(), block: false }),
+          });
+        }
 
         // 隐藏 wrapper 开标签 / 旧版开头符号
         decoItems.push({
@@ -484,11 +487,13 @@ class MarkVaultDecorator implements PluginValue {
       entry: { start: RegionAnchorMatch; end: RegionAnchorMatch };
     }> = [];
     for (const [uuid, entry] of regionByUuid.entries()) {
-      if (!entry.start || !entry.end) continue;
-      const contentStart = entry.start.index + entry.start.length;
-      const contentEnd = entry.end.index;
+      const start = entry.start;
+      const end = entry.end;
+      if (!start || !end) continue;
+      const contentStart = start.index + start.length;
+      const contentEnd = end.index;
       if (contentStart >= contentEnd) continue;
-      regionRanges.push({ uuid, from: contentStart, to: contentEnd, entry });
+      regionRanges.push({ uuid, from: contentStart, to: contentEnd, entry: { start, end } });
     }
 
     // 按起始位置排序
@@ -535,7 +540,7 @@ class MarkVaultDecorator implements PluginValue {
           });
         }
       } catch (err) {
-        console.debug('MarkVault: region block line parse error', err);
+        logger.debug('MarkVault: region block line parse error', err);
       }
     }
 
@@ -633,12 +638,27 @@ class MarkVaultDecorator implements PluginValue {
     for (const item of decoItems) {
       // RangeSetBuilder 要求 from >= 上一个 from，且 from < to（mark类型）或 from == to（line/widget类型）
       if (item.from < lastFrom) continue;
+
+      let { from, to } = item;
+
+      // 🔧 P0 安全网：replace 装饰不能跨越换行符
+      // CM6 规则：Decoration.replace 跨行会抛出
+      // "Decorations that replace line breaks may not be specified via plugins"
+      // replace 的 startSide > 0（exclusive start），mark/line/widget 的 startSide <= 0
+      if (from < to && (item.deco as any).startSide > 0) {
+        const lineEnd = doc.indexOf('\n', from);
+        if (lineEnd !== -1 && lineEnd < to) {
+          to = lineEnd;
+          if (from >= to) continue;
+        }
+      }
+
       try {
-        builder.add(item.from, item.to, item.deco);
-        lastFrom = item.from;
+        builder.add(from, to, item.deco);
+        lastFrom = from;
       } catch (err) {
         // 跳过冲突的装饰
-        console.warn('MarkVault: decoration conflict at', item.from, err);
+        logger.warn('MarkVault: decoration conflict at', from, err);
       }
     }
 

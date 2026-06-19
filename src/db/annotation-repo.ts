@@ -6,6 +6,7 @@
  */
 
 import type { App, TFile } from 'obsidian';
+import { logger } from '../utils/logger';
 import { annotationStore, type AnnotationStore } from './annotation-store';
 import type { Annotation, AnnotationFilter, AnnotationFlag, AnnotationRelation, AnnotationStats, BatchUpdateItem, RelationType } from '../types/annotation';
 import { parseAllAnnotationsFromMarkdown } from '../core/annotation-parser';
@@ -205,7 +206,7 @@ export async function cleanOrphanAnnotations(app: App, store: AnnotationStore = 
     if (!file || (file as any).extension !== 'md') {
       const count = await deleteAnnotationsForFile(filePath);
       cleaned += count;
-      console.log(`MarkVault clean orphans: deleted ${count} annotations for missing file "${filePath}"`);
+      logger.debug(`MarkVault clean orphans: deleted ${count} annotations for missing file "${filePath}"`);
       continue;
     }
 
@@ -218,7 +219,7 @@ export async function cleanOrphanAnnotations(app: App, store: AnnotationStore = 
         if (!mdUuids.has(ann.uuid)) {
           await deleteAnnotation(ann.uuid);
           cleaned++;
-          console.log(`MarkVault clean orphans: deleted orphan annotation ${ann.uuid} from "${filePath}"`);
+          logger.debug(`MarkVault clean orphans: deleted orphan annotation ${ann.uuid} from "${filePath}"`);
         }
       }
     } catch (err) {

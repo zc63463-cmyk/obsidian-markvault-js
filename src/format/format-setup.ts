@@ -10,6 +10,7 @@ import { MarkFormat } from './mark-format';
 import { NativeFormat } from './native-format';
 import { BlockFormat } from './block-format';
 import { RegionFormat } from './region-format';
+import { PdfFormat } from '../pdf/pdf-format';
 
 let _initialized = false;
 
@@ -23,6 +24,8 @@ export function initFormatRegistry(): void {
   formatRegistry.register(new NativeFormat());
   formatRegistry.register(new BlockFormat());
   formatRegistry.register(new RegionFormat());
+  // PDF 标注格式（空壳实现 — PDF 不写 MD，数据只在 Store）
+  formatRegistry.register(new PdfFormat());
 }
 
 /** 重置初始化状态，供 onunload 调用 */

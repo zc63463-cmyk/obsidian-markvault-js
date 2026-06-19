@@ -1,4 +1,5 @@
 import type { DataAdapter, Vault } from 'obsidian';
+import { logger } from '../utils/logger';
 import type {
   Annotation,
   IndexData,
@@ -59,6 +60,10 @@ export class PersistLayer {
   /** meta 写入互斥锁 */
   private _metaWriting: boolean = false;
   private _metaWaiters: Array<() => void> = [];
+
+  // ─── S2-2: 分片写入 per-file 锁 ─────────────────────────
+  /** 每文件写入锁：防止 flushAll 与 flushFile 并发写同一分片 */
+  private _shardWriteLocks: Map<string, Promise<void>> = new Map();
 
   /** 元数据 */
   private _meta: StoreMeta = {
@@ -223,7 +228,7 @@ export class PersistLayer {
       }
     }
     if (loadedCount > 0) {
-      console.log(`MarkVault: preloaded ${loadedCount} annotation files (${this._indexLayer.byUuid.size} total annotations)`);
+      logger.debug(`MarkVault: preloaded ${loadedCount} annotation files (${this._indexLayer.byUuid.size} total annotations)`);
     }
 
     // 数据完整性摘要
@@ -266,7 +271,7 @@ export class PersistLayer {
       }
     }
     if (orphanCleaned > 0) {
-      console.log(`MarkVault: cleaned ${orphanCleaned} orphan index entries`);
+      logger.debug(`MarkVault: cleaned ${orphanCleaned} orphan index entries`);
       await this._writeIndexFile();
     }
 
@@ -282,7 +287,7 @@ export class PersistLayer {
       }
     }
     if (cleanedCount > 0) {
-      console.log(`MarkVault: cleaned ${cleanedCount} corrupted note fields`);
+      logger.debug(`MarkVault: cleaned ${cleanedCount} corrupted note fields`);
       await this.flushAll();
     }
 
@@ -381,11 +386,15 @@ export class PersistLayer {
     }
     this._debounceTimers.clear();
 
+    // S2 审查修复: 快照 dirty 文件列表后立即清空 Set
+    // 这样 flush 期间新增的 markDirty 不会被 clear() 吞掉
+    const dirtySnapshot = Array.from(this._dirtyFiles);
+    this._dirtyFiles.clear();
+
     // 写回所有 dirty 分片
-    for (const filePath of this._dirtyFiles) {
+    for (const filePath of dirtySnapshot) {
       await this._writeFileShard(filePath);
     }
-    this._dirtyFiles.clear();
 
     // 更新 _meta 时间戳
     this._meta.lastSyncAt = Date.now();
@@ -602,7 +611,7 @@ export class PersistLayer {
     // 立即写回索引
     await this._writeIndexFile();
 
-    console.log(`MarkVault: renamed annotations from "${oldPath}" → "${newPath}" (${uuidSet.size} annotations)`);
+    logger.debug(`MarkVault: renamed annotations from "${oldPath}" → "${newPath}" (${uuidSet.size} annotations)`);
   }
 
   // ─── Dirty / Flush 管理 ────────────────────────────────
@@ -638,9 +647,35 @@ export class PersistLayer {
   // ─── 分片 JSON 读写 ───────────────────────────────────
 
   /**
-   * 写入分片 JSON（原子写入 + 备份 + 完整性校验）。
+   * 写入分片 JSON（原子写入 + 备份 + 完整性校验 + per-file 锁）。
+   *
+   * S2-2: 加 per-file 写锁，防止 flushAll 与 flushFile 并发写同一分片竞态。
+   * 锁机制：每个 filePath 一个 Promise 链，后续调用 await 前一个完成。
    */
   private async _writeFileShard(filePath: string): Promise<void> {
+    // 获取 per-file 锁：等待前一个写入完成后再执行
+    const prevLock = this._shardWriteLocks.get(filePath) ?? Promise.resolve();
+    let resolveLock!: () => void;
+    const currentLock = new Promise<void>(resolve => { resolveLock = resolve; });
+    // S2 审查修复: 保存 lockPromise 引用用于后续比较清理
+    const lockPromise = prevLock.then(() => currentLock);
+    this._shardWriteLocks.set(filePath, lockPromise);
+
+    try {
+      await prevLock;
+      await this._writeFileShardInner(filePath);
+    } finally {
+      resolveLock();
+      // 清理已完成的锁：只有当前锁仍是 Map 中的值时才删除
+      // （如果期间有新调用覆盖了 Map，说明有新的写入在排队，不能删）
+      if (this._shardWriteLocks.get(filePath) === lockPromise) {
+        this._shardWriteLocks.delete(filePath);
+      }
+    }
+  }
+
+  /** 分片写入的实际逻辑（无锁，由 _writeFileShard 保证串行） */
+  private async _writeFileShardInner(filePath: string): Promise<void> {
     const uuidSet = this._indexLayer.byFile.get(filePath);
     if (!uuidSet || uuidSet.size === 0) return;
 
@@ -684,11 +719,12 @@ export class PersistLayer {
 
       try {
         await this.adapter.remove(tmpPath);
-      } catch {
-        // ENOENT: safe to ignore
+      } catch (err) {
+        // ENOENT: tmp file already cleaned up, safe to ignore
+        logger.debug('tmp file cleanup (shard write)', err);
       }
     } catch (err) {
-      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      try { await this.adapter.remove(tmpPath); } catch { /* cleanup best-effort on error path */ }
       throw err;
     }
   }
@@ -771,11 +807,12 @@ export class PersistLayer {
       await this.adapter.write(filePath, content);
       try {
         await this.adapter.remove(tmpPath);
-      } catch {
+      } catch (err) {
         // ENOENT: tmp file already removed, safe to ignore
+        logger.debug('tmp file cleanup (index write)', err);
       }
     } catch (err) {
-      try { await this.adapter.remove(tmpPath); } catch { /* ignore */ }
+      try { await this.adapter.remove(tmpPath); } catch { /* cleanup best-effort on error path */ }
       throw err;
     }
   }
@@ -807,14 +844,15 @@ export class PersistLayer {
         await this.adapter.write(indexPath, content);
         try {
           await this.adapter.remove(tmpPath);
-        } catch {
-          // ENOENT
+        } catch (err) {
+          // ENOENT: tmp file already removed
+          logger.debug('tmp file cleanup (index write inner)', err);
         }
       } catch (err) {
         try {
           await this.adapter.remove(tmpPath);
         } catch {
-          // ignore
+          /* cleanup best-effort on error path */
         }
         throw err;
       }
@@ -850,14 +888,15 @@ export class PersistLayer {
         await this.adapter.write(metaPath, content);
         try {
           await this.adapter.remove(tmpPath);
-        } catch {
-          // ENOENT
+        } catch (err) {
+          // ENOENT: tmp file already removed
+          logger.debug('tmp file cleanup (meta write inner)', err);
         }
       } catch (err) {
         try {
           await this.adapter.remove(tmpPath);
         } catch {
-          // ignore
+          /* cleanup best-effort on error path */
         }
         throw err;
       }

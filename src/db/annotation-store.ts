@@ -1,4 +1,5 @@
 import type { Vault } from 'obsidian';
+import { logger } from '../utils/logger';
 import type {
   Annotation,
   AnnotationFilter,
@@ -260,14 +261,6 @@ export class AnnotationStore {
       throw new Error(`Annotation not found: ${uuid}`);
     }
 
-    // 防御 changes.relations 路径
-    if (changes.relations !== undefined && oldAnn.relations) {
-      this.relationEngine.cascadeUpdateRelations(uuid, oldAnn.relations, changes.relations);
-    }
-
-    // 移除旧索引
-    this.indexLayer.removeFromIndex(uuid);
-
     // 🔧 P1-5 修复：过滤 changes 中的 undefined 值，防止展开后覆盖已有字段
     const filteredChanges: Partial<Annotation> = {};
     for (const [k, v] of Object.entries(changes)) {
@@ -283,51 +276,85 @@ export class AnnotationStore {
 
     // 合并变更
     const newAnn: Annotation = stripExtraFields({ ...oldAnn, ...filteredChanges });
-    this.indexLayer.byUuid.set(uuid, newAnn);
 
-    // 处理 filePath 变更
+    // S2 审查修复: cascadeUpdateRelations 延迟到 filePath 迁移之后
+    // 原实现: cascadeUpdateRelations 在迁移之前调用, 迁移失败时伙伴标注的
+    // 反向关系已被修改(byRelationOut/byRelationIn), 但 byUuid 中的标注仍是旧 relations — 状态不一致
+    // 修复: 先完成 filePath 迁移(可能失败), 成功后再 cascade, 失败时零副作用
+
+    // 处理 filePath 变更 — 带回滚保护的事务性迁移
     if (changes.filePath && changes.filePath !== oldAnn.filePath) {
-      const oldFileSet = this.indexLayer.byFile.get(oldAnn.filePath);
-      if (oldFileSet) {
-        oldFileSet.delete(uuid);
-        if (oldFileSet.size === 0) {
-          this.indexLayer.byFile.delete(oldAnn.filePath);
-          this.persistLayer._loadedFiles.delete(oldAnn.filePath);
-          const oldKey = FileEncoder.encodeFilePath(oldAnn.filePath);
-          delete this.persistLayer.indexData.entries[oldKey];
-          this.persistLayer.indexDirty = true;
-          const oldShardPath = FileEncoder.getShardPath(this.persistLayer.baseDir, oldAnn.filePath);
-          try {
-            await this.persistLayer.adapter.remove(oldShardPath);
-          } catch {
-            // 文件可能不存在，忽略
-          }
-        } else {
-          this.persistLayer._updateIndexEntry(oldAnn.filePath);
+      // 快照旧状态用于回滚
+      const oldFileSetSnapshot = this.indexLayer.byFile.get(oldAnn.filePath);
+      const oldLoadedFilesHad = this.persistLayer._loadedFiles.has(oldAnn.filePath);
+      const oldIndexEntry = this.persistLayer.indexData.entries[FileEncoder.encodeFilePath(oldAnn.filePath)];
+
+      // 先写入新文件侧（可能失败 — ensureFileLoaded 抛异常）
+      try {
+        await this.ensureFileLoaded(newAnn.filePath);
+
+        let newFileSet = this.indexLayer.byFile.get(newAnn.filePath);
+        if (!newFileSet) {
+          newFileSet = new Set();
+          this.indexLayer.byFile.set(newAnn.filePath, newFileSet);
         }
+        newFileSet.add(uuid);
+
+        this.persistLayer._updateIndexEntry(newAnn.filePath);
+        this.persistLayer._markDirty(newAnn.filePath);
+
+        // 新文件侧写入成功，现在安全清理旧文件侧
+        if (oldFileSetSnapshot) {
+          oldFileSetSnapshot.delete(uuid);
+          if (oldFileSetSnapshot.size === 0) {
+            this.indexLayer.byFile.delete(oldAnn.filePath);
+            this.persistLayer._loadedFiles.delete(oldAnn.filePath);
+            const oldKey = FileEncoder.encodeFilePath(oldAnn.filePath);
+            delete this.persistLayer.indexData.entries[oldKey];
+            this.persistLayer.indexDirty = true;
+            const oldShardPath = FileEncoder.getShardPath(this.persistLayer.baseDir, oldAnn.filePath);
+            try {
+              await this.persistLayer.adapter.remove(oldShardPath);
+            } catch (err) {
+              logger.warn(`failed to remove old shard for "${oldAnn.filePath}" during filePath migration`, err);
+            }
+          } else {
+            this.persistLayer._updateIndexEntry(oldAnn.filePath);
+          }
+        }
+      } catch (err) {
+        // 回滚：恢复旧文件索引状态
+        logger.error('filePath migration failed, rolling back', err);
+        if (oldFileSetSnapshot && !this.indexLayer.byFile.has(oldAnn.filePath)) {
+          this.indexLayer.byFile.set(oldAnn.filePath, oldFileSetSnapshot);
+        }
+        if (oldLoadedFilesHad && !this.persistLayer._loadedFiles.has(oldAnn.filePath)) {
+          this.persistLayer._loadedFiles.add(oldAnn.filePath);
+        }
+        if (oldIndexEntry && !this.persistLayer.indexData.entries[FileEncoder.encodeFilePath(oldAnn.filePath)]) {
+          this.persistLayer.indexData.entries[FileEncoder.encodeFilePath(oldAnn.filePath)] = oldIndexEntry;
+          this.persistLayer.indexDirty = true;
+        }
+        throw err;
       }
-
-      await this.ensureFileLoaded(newAnn.filePath);
-
-      let newFileSet = this.indexLayer.byFile.get(newAnn.filePath);
-      if (!newFileSet) {
-        newFileSet = new Set();
-        this.indexLayer.byFile.set(newAnn.filePath, newFileSet);
-      }
-      newFileSet.add(uuid);
-
-      this.persistLayer._updateIndexEntry(newAnn.filePath);
-      this.persistLayer._markDirty(newAnn.filePath);
     }
 
-    // 重建索引
+    // 索引更新：先移除旧索引，再写入新数据
+    // S2-1 审查修复: removeFromIndex 在 filePath 迁移成功后执行，
+    // 失败时索引完全未动，无需回滚 13 个倒排索引
+    this.indexLayer.removeFromIndex(uuid);
+    this.indexLayer.byUuid.set(uuid, newAnn);
     this.indexLayer.addToIndex(newAnn);
+
+    // S2 审查修复: cascadeUpdateRelations 在索引更新之前执行
+    // 确保迁移失败时零副作用（伙伴标注 + 关系索引完全未动）
+    if (changes.relations !== undefined && oldAnn.relations) {
+      this.relationEngine.cascadeUpdateRelations(uuid, oldAnn.relations, changes.relations);
+    }
 
     // 标记 dirty
     if (!changes.filePath || changes.filePath === oldAnn.filePath) {
       this.persistLayer._updateIndexEntry(newAnn.filePath);
-      this.persistLayer._markDirty(newAnn.filePath);
-    } else {
       this.persistLayer._markDirty(newAnn.filePath);
     }
   }
@@ -355,8 +382,9 @@ export class AnnotationStore {
       const shardPath = FileEncoder.getShardPath(this.persistLayer.baseDir, filePath);
       try {
         await this.persistLayer.adapter.remove(shardPath);
-      } catch {
-        // 文件可能不存在，忽略
+      } catch (err) {
+        // 文件可能不存在（首次删除场景），安全忽略但记录日志
+        logger.debug(`shard file not found during delete for "${filePath}"`, err);
       }
 
       this.persistLayer._loadedFiles.delete(filePath);
@@ -372,7 +400,7 @@ export class AnnotationStore {
 
       await this.persistLayer._writeIndexFile();
 
-      console.log(`MarkVault: deleted last annotation for file "${filePath}" — shard removed, index updated`);
+      logger.debug(`MarkVault: deleted last annotation for file "${filePath}" — shard removed, index updated`);
     } else {
       this.persistLayer._updateIndexEntry(filePath);
       this.persistLayer._markDirty(filePath);

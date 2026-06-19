@@ -13,6 +13,36 @@ import type { IndexLayer } from './index-layer';
 export type MarkDirtyCallback = (filePath: string) => void;
 
 /**
+ * 构建反向关系对象 — 统一入口，确保所有反向关系字段一致。
+ *
+ * 这是创建反向关系的唯一入口。禁止在构建器之外手动 push 反向关系对象。
+ * 新增字段时只需修改此函数，所有调用点自动继承。
+ *
+ * 字段规则：
+ * - targetUuid = 原关系的 sourceUuid（反向指向源）
+ * - type = schema.getReverse(正向 type)
+ * - source = 'inferred'（反向关系总是推断创建的）
+ * - createdAt / note / invalidAt 从正向关系继承
+ *
+ * 对称关系（reverseType === forwardType）无需特殊处理——构建器只负责构建对象，
+ * 去重由调用方的 alreadyHas 检查处理。自环关系已被入口拦截。
+ */
+function buildReverseRelation(
+  sourceUuid: string,
+  forward: AnnotationRelation,
+  reverseType: string,
+): AnnotationRelation {
+  return {
+    targetUuid: sourceUuid,
+    type: reverseType as RelationType,
+    createdAt: forward.createdAt,
+    source: 'inferred',
+    ...(forward.note ? { note: forward.note } : {}),
+    ...(forward.invalidAt ? { invalidAt: forward.invalidAt } : {}),
+  };
+}
+
+/**
  * RelationEngine — 关系引擎
  *
  * 负责：
@@ -108,7 +138,8 @@ export class RelationEngine {
       if (relation.note) existingInvalidated.note = relation.note;
       if (relation.source) existingInvalidated.source = relation.source;
     } else {
-      // 新建：推入新条目 + 增量索引
+      // 正向关系 push — 这是唯一允许在构建器外直接 push 的场景
+      // （正向关系由用户/API 传入，构建器只负责反向关系）
       ann.relations.push(relation);
       let fwdOutSet = this._indexLayer.byRelationOut.get(sourceUuid);
       if (!fwdOutSet) {
@@ -153,13 +184,8 @@ export class RelationEngine {
       return;
     }
 
-    // 新建反向关系
-    targetAnn.relations.push({
-      targetUuid: sourceUuid,
-      type: reverseType,
-      createdAt: relation.createdAt,
-      source: 'inferred',
-    });
+    // 新建反向关系 — 使用统一构建器
+    targetAnn.relations.push(buildReverseRelation(sourceUuid, relation, reverseType));
     let outSet = this._indexLayer.byRelationOut.get(relation.targetUuid);
     if (!outSet) {
       outSet = new Set();
@@ -380,17 +406,31 @@ export class RelationEngine {
           delete partnerAnn.relations;
         }
 
-        // 增量清理伙伴的出边索引
+        // 增量清理伙伴的出边索引 (partner → ann 的反向关系)
         const partnerOutSet = this._indexLayer.byRelationOut.get(rel.targetUuid);
         if (partnerOutSet) {
           partnerOutSet.delete(`${ann.uuid}:${reverseType}`);
           if (partnerOutSet.size === 0) this._indexLayer.byRelationOut.delete(rel.targetUuid);
         }
-        // 增量清理被删标注的入边索引
+        // 增量清理被删标注的入边索引 (ann ← partner 的反向关系)
         const annInSet = this._indexLayer.byRelationIn.get(ann.uuid);
         if (annInSet) {
           annInSet.delete(`${rel.targetUuid}:${reverseType}`);
           if (annInSet.size === 0) this._indexLayer.byRelationIn.delete(ann.uuid);
+        }
+
+        // P3 修复: 同时清理伙伴的入边索引 (partner ← ann 的正向关系)
+        // 原遗漏: 伙伴 B 的 byRelationIn 中残留 "ann:正向type" 孤儿条目
+        const partnerInSet = this._indexLayer.byRelationIn.get(rel.targetUuid);
+        if (partnerInSet) {
+          partnerInSet.delete(`${ann.uuid}:${rel.type}`);
+          if (partnerInSet.size === 0) this._indexLayer.byRelationIn.delete(rel.targetUuid);
+        }
+        // 同时清理被删标注的出边索引 (ann → partner 的正向关系)
+        const annOutSet = this._indexLayer.byRelationOut.get(ann.uuid);
+        if (annOutSet) {
+          annOutSet.delete(`${rel.targetUuid}:${rel.type}`);
+          if (annOutSet.size === 0) this._indexLayer.byRelationOut.delete(ann.uuid);
         }
 
         this._markDirty(partnerAnn.filePath);
@@ -406,6 +446,13 @@ export class RelationEngine {
     oldRelations: AnnotationRelation[],
     newRelations: AnnotationRelation[]
   ): void {
+    // S3 关系审查修复: 自环防御 — addRelation 有校验，updateAnnotation 路径也需要
+    for (const r of newRelations) {
+      if (r.targetUuid === sourceUuid) {
+        throw new Error(`Self-relation is not allowed: ${sourceUuid}`);
+      }
+    }
+
     const relKey = (r: AnnotationRelation) => `${r.targetUuid}::${r.type}::${r.invalidAt ? 'inv' : 'act'}`;
 
     const oldKeys = new Map<string, AnnotationRelation>();
@@ -443,6 +490,18 @@ export class RelationEngine {
           sourceInSet.delete(`${oldRel.targetUuid}:${reverseType}`);
           if (sourceInSet.size === 0) this._indexLayer.byRelationIn.delete(sourceUuid);
         }
+
+        // P3 修复: 同时清理伙伴入边 + 源出边的正向关系孤儿条目
+        const partnerInSet = this._indexLayer.byRelationIn.get(oldRel.targetUuid);
+        if (partnerInSet) {
+          partnerInSet.delete(`${sourceUuid}:${oldRel.type}`);
+          if (partnerInSet.size === 0) this._indexLayer.byRelationIn.delete(oldRel.targetUuid);
+        }
+        const sourceOutSet = this._indexLayer.byRelationOut.get(sourceUuid);
+        if (sourceOutSet) {
+          sourceOutSet.delete(`${oldRel.targetUuid}:${oldRel.type}`);
+          if (sourceOutSet.size === 0) this._indexLayer.byRelationOut.delete(sourceUuid);
+        }
       }
       this._markDirty(partnerAnn.filePath);
     }
@@ -471,13 +530,8 @@ export class RelationEngine {
         existingReverseInvalidated.createdAt = newRel.createdAt;
       } else {
         if (!partnerAnn.relations) partnerAnn.relations = [];
-        partnerAnn.relations.push({
-          targetUuid: sourceUuid,
-          type: reverseType,
-          createdAt: newRel.createdAt,
-          source: 'inferred' as const,
-          ...(newRel.invalidAt ? { invalidAt: newRel.invalidAt } : {}),
-        });
+        // 使用统一构建器创建反向关系
+        partnerAnn.relations.push(buildReverseRelation(sourceUuid, newRel, reverseType));
 
         let partnerOutSet = this._indexLayer.byRelationOut.get(newRel.targetUuid);
         if (!partnerOutSet) {

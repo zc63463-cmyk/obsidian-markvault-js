@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "npx tsx tests/annotation-store.test.ts && npx tsx tests/native-annotation.test.ts && npx tsx tests/region-annotation.test.ts && npx tsx tests/block-annotation.test.ts && npx tsx tests/metadata-extension.test.ts && npx tsx tests/search.test.ts && npx tsx tests/graph-data-builder.test.ts && npx tsx tests/w3c-serializer.test.ts",
+    "deploy": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && node scripts/deploy.mjs",
+    "test": "npx tsx tests/annotation-store.test.ts && npx tsx tests/block-fingerprint.test.ts && npx tsx tests/block-annotation.test.ts && npx tsx tests/block-format-g1.test.ts && npx tsx tests/debug-block-ranges.test.ts && npx tsx tests/boundary-conditions.test.ts && npx tsx tests/native-annotation.test.ts && npx tsx tests/region-annotation.test.ts && npx tsx tests/inline-target-hash.test.ts && npx tests/markdown-plain.test.ts && npx tsx tests/context-menu.test.ts && npx tsx tests/ui-logic.test.ts && npx tsx tests/metadata-extension.test.ts && npx tsx tests/search.test.ts && npx tsx tests/graph-data-builder.test.ts && npx tsx tests/w3c-serializer.test.ts && npx tsx tests/w3c-import.test.ts && npx tsx tests/s2-data-safety.test.ts && npx tsx tests/pdf-annotation.test.ts && npx tsx tests/mindflow-basic.test.ts",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [
