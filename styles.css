@@ -3313,11 +3313,9 @@
   border-color: var(--interactive-accent, #483699);
 }
 
-/* 搜索匹配高亮 */
+/* 搜索匹配高亮 — 不改变 position/z-index, 仅 box-shadow 动画 */
 .mf-node--search-match {
   box-shadow: 0 0 0 3px var(--interactive-accent, #483699), 0 0 18px rgba(72, 54, 153, 0.45);
-  z-index: 50 !important;
-  position: relative;
   animation: mf-search-pulse 2s ease-in-out infinite;
 }
 
