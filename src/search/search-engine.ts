@@ -905,7 +905,12 @@ export class AnnotationSearchEngine {
     check('filePath', ann.filePath);
     for (const g of (ann.groups || [])) { if (g) check('groups', g); }
     if (ann.fields) {
-      for (const v of Object.values(ann.fields)) { if (v) check('fields', v); }
+      // P3 fix: 同时检查 field keys (去u:前缀) 和 values
+      for (const [k, v] of Object.entries(ann.fields)) {
+        const bareKey = k.startsWith('u:') ? k.slice(2) : k;
+        if (bareKey) check('fields', bareKey);
+        if (v) check('fields', v);
+      }
     }
 
     return hits;

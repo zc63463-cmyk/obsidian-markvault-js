@@ -50,7 +50,7 @@ export class QueryEngine {
       }
     }
 
-    // 按自定义字段过滤
+    // 按自定义字段过滤 (单值)
     if (filter.fieldFilters && Object.keys(filter.fieldFilters).length > 0) {
       for (const [fieldKey, fieldValue] of Object.entries(filter.fieldFilters)) {
         const fieldMap = this._indexLayer.byField.get(fieldKey);
@@ -61,6 +61,32 @@ export class QueryEngine {
           candidateUuids = intersection(candidateUuids, valueSet);
         } else {
           candidateUuids = new Set(valueSet);
+        }
+      }
+    }
+
+    // P3 fix: 按自定义字段过滤 (分面多值, 同 key OR 跨 key AND)
+    if (filter.fieldFiltersMulti && Object.keys(filter.fieldFiltersMulti).length > 0) {
+      for (const [fieldKey, fieldValues] of Object.entries(filter.fieldFiltersMulti)) {
+        const fieldMap = this._indexLayer.byField.get(fieldKey);
+        if (!fieldMap) return [];
+        // 同 key 内 OR：union 所有值的 UUID 集合
+        let keyUuids: Set<string> | null = null;
+        for (const v of fieldValues) {
+          const valueSet = fieldMap.get(v);
+          if (!valueSet) continue;
+          if (keyUuids) {
+            for (const uuid of valueSet) keyUuids.add(uuid);
+          } else {
+            keyUuids = new Set(valueSet);
+          }
+        }
+        if (!keyUuids) return [];
+        // 跨 key AND：intersect
+        if (candidateUuids) {
+          candidateUuids = intersection(candidateUuids, keyUuids);
+        } else {
+          candidateUuids = keyUuids;
         }
       }
     }

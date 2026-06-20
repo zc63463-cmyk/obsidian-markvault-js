@@ -444,10 +444,16 @@ export class AnnotationModal extends Modal {
   private _setupTagAutocomplete(inputEl: HTMLInputElement): void {
     let suggestionEl2: HTMLElement | null = null;
     let selectedIdx = 0;
+    let activeKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
     const close = () => {
       if (suggestionEl2) { suggestionEl2.remove(); suggestionEl2 = null; }
       selectedIdx = 0;
+      // P2 fix: 显式移除旧 handler，防止累积和泄漏
+      if (activeKeyHandler) {
+        inputEl.removeEventListener('keydown', activeKeyHandler);
+        activeKeyHandler = null;
+      }
     };
 
     inputEl.addEventListener('input', () => {
@@ -509,16 +515,17 @@ export class AnnotationModal extends Modal {
           el.style.color = i === selectedIdx ? '#fff' : '';
         });
       };
-      // P1 fix: 移除 { once: true }，允许连续方向键导航
-      // 之前每次 input 事件注册 onKey（once），导致第一次 keydown 后 handler 被移除
-      // 改为持久注册，在 close() 时手动移除
+      // P2 fix: 注册新 handler 前先移除旧 handler，防止累积
+      if (activeKeyHandler) inputEl.removeEventListener('keydown', activeKeyHandler);
       const onKeyHandler = (e: KeyboardEvent) => {
         if (!suggestionEl2 || suggestionEl2.style.display === 'none') {
-          inputEl.removeEventListener('keydown', onKeyHandler);
+          if (activeKeyHandler) inputEl.removeEventListener('keydown', activeKeyHandler);
+          activeKeyHandler = null;
           return;
         }
         onKey(e);
       };
+      activeKeyHandler = onKeyHandler;
       inputEl.addEventListener('keydown', onKeyHandler);
     }, { passive: true });
   }
