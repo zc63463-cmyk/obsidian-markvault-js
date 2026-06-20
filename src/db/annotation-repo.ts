@@ -116,6 +116,16 @@ export function getFieldKeys(): string[] {
   return annotationStore.getFieldKeys();
 }
 
+/** 获取所有已加载标注中出现过的标签名列表 */
+export function getTagNames(): string[] {
+  return annotationStore.getTagNames();
+}
+
+/** 获取标签及其使用频率（按频率降序） */
+export function getTagFrequencies(): Array<{ name: string; count: number }> {
+  return annotationStore.getTagFrequencies();
+}
+
 /** 获取指定字段键的所有已出现值列表 */
 export function getFieldValues(key: string): string[] {
   return annotationStore.getFieldValues(key);

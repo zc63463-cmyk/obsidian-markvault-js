@@ -137,6 +137,21 @@ export class IndexLayer {
   }
 
   /** 获取所有已加载标注中出现过的分组列表 */
+  /** 获取所有已加载标注中出现过的标签名列表 */
+  getTagNames(): string[] {
+    return Array.from(this._byTag.keys()).sort();
+  }
+
+  /** 获取标签及其使用频率（标注数量），按频率降序，频率相同按字母序 */
+  getTagFrequencies(): Array<{ name: string; count: number }> {
+    const result: Array<{ name: string; count: number }> = [];
+    for (const [name, uuidSet] of this._byTag.entries()) {
+      result.push({ name, count: uuidSet.size });
+    }
+    result.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    return result;
+  }
+
   getGroupNames(): string[] {
     return Array.from(this._byGroup.keys()).sort();
   }

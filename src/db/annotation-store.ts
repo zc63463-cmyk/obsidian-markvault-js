@@ -118,6 +118,16 @@ export class AnnotationStore {
     return this.indexLayer.getFieldValues(key);
   }
 
+  /** 获取所有标签名 */
+  getTagNames(): string[] {
+    return this.indexLayer.getTagNames();
+  }
+
+  /** 获取标签及其使用频率 */
+  getTagFrequencies(): Array<{ name: string; count: number }> {
+    return this.indexLayer.getTagFrequencies();
+  }
+
   /** 获取所有分组名 */
   getGroupNames(): string[] {
     return this.indexLayer.getGroupNames();

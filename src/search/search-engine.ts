@@ -11,6 +11,20 @@
  * - filter-engine.ts（统一过滤 + 排序）
  * - AnnotationStore（标注数据源）
  *
+ * # 与纯 Filter 路径的关系
+ *
+ * SearchEngine 是 "快速索引" 路径，filter-engine.ts 的 applyUnifiedFilter
+ * 是 "ground truth" 路径（O(n) 全量扫描）。两者的 tokenization 完全一致
+ * （共享 tokenize），搜索字段集合相同。差异在于：
+ * - engine 通过倒排索引做 token→uuid 召回 → O(k) 而非 O(n)
+ * - engine 通过 BM25/Weighted 做评分排序，filter 仅做过滤
+ * - engine 依赖索引新鲜度（markDirty），可能在标注刚变更时漏检
+ *
+ * **一致性保证**：engine 结果 ⊆ applyUnifiedFilter 结果（子集关系）。
+ * 若发现差异（engine 漏检），说明索引需要标记 dirty 并重建。
+ * 侧边栏 UI 建议：engine.search 返回结果后，用 filter 路径做一次轻量
+ * 校验（count 对比），若差异 > N 则自动 markDirty + 重新索引。
+ *
  * 参考项目：
  * - MiniSearch: BM25 变体评分、自动建议、JSON 序列化
  * - FlexSearch: CJK Charset 内置支持、上下文评分
@@ -380,6 +394,16 @@ export class AnnotationSearchEngine {
 
   // ─── Private: 搜索核心 ─────────────────────────────────
 
+  /**
+   * 基于倒排索引的 token 召回 + 评分（快速路径，非 O(n) 扫描）。
+   *
+   * 与 filter-engine.ts 的纯搜索路径相比：
+   * - 相同：tokenize 分词、bigram/other 分类、搜索字段集合
+   * - 不同：使用倒排索引召回（而非全量 includes 扫描）
+   * - 子集关系：本方法结果 ⊆ applyUnifiedFilter 结果（依赖索引新鲜度）
+   *
+   * 若结果缺失（如刚添加的标注搜索不到），说明索引需要 markDirty + 重建。
+   */
   private _searchByTokens(
     tokens: string[],
     opts: { scoringModel?: 'weighted' | 'bm25'; fuzzy?: number; fuzzyMaxExpansions?: number; prefix?: boolean } = {},

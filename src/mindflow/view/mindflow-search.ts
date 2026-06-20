@@ -3,11 +3,23 @@
  *
  * 功能: 搜索标注文本/标签, 在导图中高亮匹配的 @A 节点,
  *       支持单击跳转、高亮全部、聚焦模式.
+ *
+ * Phase P1-S4: 集成 AnnotationSearchEngine 替代简单的 includes 匹配，
+ * 获得 BM25 评分 / CJK bigram / 模糊搜索 / 前缀搜索能力。
  */
 
 import { App, Modal, Notice } from 'obsidian';
 import type { MindNode } from '../types/mind-node';
 import { getAnnotationStore } from './mindflow-connections';
+import type { AnnotationSearchEngine } from '../../search/search-engine';
+
+/** 通过 Obsidian plugin API 获取 MarkVault 的 SearchEngine */
+function getSearchEngine(app: App): AnnotationSearchEngine | null {
+  const plugin = (app as unknown as {
+    plugins?: { plugins?: Record<string, { getSearchEngine?: () => AnnotationSearchEngine }> };
+  }).plugins?.plugins?.['markvault-js'];
+  return plugin?.getSearchEngine?.() ?? null;
+}
 
 /** 搜索结果项 */
 interface SearchResult {
@@ -44,7 +56,7 @@ function collectAnnNodes(root: MindNode): Map<string, string> {
   return map;
 }
 
-/** 对标注文本做模糊匹配 */
+/** 对标注文本做模糊匹配 (Legacy fallback，优先走 SearchEngine) */
 function matchesSearch(ann: SearchResult, query: string): boolean {
   const q = query.toLowerCase();
   const fields = [ann.text, ann.note ?? '', ann.tags?.join(' ') ?? '', ann.filePath ?? ''];
@@ -203,35 +215,62 @@ export class AnnotationSearchModal extends Modal {
     this.contentEl.empty();
   }
 
-  /** 执行搜索 */
+  /** 执行搜索（优先走 SearchEngine 索引路径，fallback 到 includes 全量扫描） */
   private _doSearch(): void {
     if (!this.ctx.rootNode) return;
 
     const query = this.inputEl.value.trim();
     const annToNode = collectAnnNodes(this.ctx.rootNode);
-    const store = getAnnotationStore(this.ctx.app);
-    const allAnnotations = store?.getAllAnnotations?.() ?? [];
 
-    // 筛选 + 匹配
-    this.results = [];
-    for (const ann of allAnnotations) {
-      const nodeId = annToNode.get(ann.uuid);
-      if (!nodeId) continue; // 不在当前导图
+    // 尝试使用 SearchEngine（需要 MarkVault 插件已加载）
+    const engine = getSearchEngine(this.ctx.app);
 
-      const item: SearchResult = {
-        uuid: ann.uuid,
-        text: ann.text ?? '',
-        note: ann.note,
-        nodeId,
-        tags: ann.tags,
-        filePath: ann.filePath,
-      };
-
-      if (query) {
-        if (!matchesSearch(item, query)) continue;
+    if (engine && query) {
+      // ── 快速路径：SearchEngine 倒排索引 + BM25 评分 ──
+      const suggestions = engine.suggest(query, 100);
+      this.results = [];
+      const seen = new Set<string>();
+      for (const sug of suggestions) {
+        const nodeId = annToNode.get(sug.uuid);
+        if (!nodeId || seen.has(sug.uuid)) continue;
+        seen.add(sug.uuid);
+        // 从 Store 补全 tags/note（Suggestion 只含截断字段）
+        const store = getAnnotationStore(this.ctx.app);
+        const fullAnn = store?.getAnnotationByUuid?.(sug.uuid);
+        this.results.push({
+          uuid: sug.uuid,
+          text: sug.text,
+          note: fullAnn?.note ?? sug.note,
+          nodeId,
+          tags: fullAnn?.tags,
+          filePath: sug.filePath,
+        });
       }
+    } else {
+      // ── Legacy 路径：全量扫描 + includes 匹配 ──
+      const store = getAnnotationStore(this.ctx.app);
+      const allAnnotations = store?.getAllAnnotations?.() ?? [];
 
-      this.results.push(item);
+      this.results = [];
+      for (const ann of allAnnotations) {
+        const nodeId = annToNode.get(ann.uuid);
+        if (!nodeId) continue;
+
+        const item: SearchResult = {
+          uuid: ann.uuid,
+          text: ann.text ?? '',
+          note: ann.note,
+          nodeId,
+          tags: ann.tags,
+          filePath: ann.filePath,
+        };
+
+        if (query) {
+          if (!matchesSearch(item, query)) continue;
+        }
+
+        this.results.push(item);
+      }
     }
 
     // 渲染结果

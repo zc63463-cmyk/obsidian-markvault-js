@@ -1,7 +1,7 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
-import { getFieldKeys, getFieldValues, getGroupNames } from '../../../db/annotation-repo';
+import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
 
 /**
  * FilterBar —— 侧边栏过滤栏
@@ -198,6 +198,18 @@ export class FilterBar {
       menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
+    // Tag 过滤（自定义 Popover：搜索框 + 频率排序列表）
+    const tagBtn = metaRow.createEl('button', {
+      text: this.host.filter.tag && this.host.filter.tag !== 'all'
+        ? this.host.filter.tag
+        : '#',
+      cls: `markvault-filter-btn ${this.host.filter.tag && this.host.filter.tag !== 'all' ? 'active' : ''}`,
+      attr: { title: 'Filter by tag' },
+    });
+    tagBtn.addEventListener('click', () => {
+      this.showTagFilterPopover(tagBtn);
+    });
+
     // Has Relations 过滤
     const relBtn = metaRow.createEl('button', {
       text: this.host.filter.hasRelations ? '🔗' : '🔗',
@@ -283,5 +295,180 @@ export class FilterBar {
     }
 
     menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
+  }
+
+  /** Tag 过滤器 Popover：内置搜索 + 频率排序 */
+  private showTagFilterPopover(anchor: HTMLElement): void {
+    // 关闭旧 popover（如果存在）
+    const existing = document.querySelector('.markvault-tag-filter-popover');
+    if (existing) { existing.remove(); return; }
+
+    const frequencies = getTagFrequencies();
+    const currentTag = this.host.filter.tag;
+    const rect = anchor.getBoundingClientRect();
+
+    // ── Popover 容器 ──
+    const popover = document.body.createDiv({ cls: 'markvault-tag-filter-popover' });
+    popover.style.position = 'fixed';
+    popover.style.left = `${rect.left}px`;
+    popover.style.top = `${rect.bottom + 4}px`;
+    popover.style.width = '220px';
+    popover.style.maxHeight = '320px';
+    popover.style.display = 'flex';
+    popover.style.flexDirection = 'column';
+    popover.style.background = 'var(--background-primary, #fff)';
+    popover.style.border = '1px solid var(--background-modifier-border, #ccc)';
+    popover.style.borderRadius = '8px';
+    popover.style.boxShadow = '0 4px 16px rgba(0,0,0,0.15)';
+    popover.style.zIndex = '9999';
+    popover.style.overflow = 'hidden';
+
+    // ── 搜索框 ──
+    const searchInput = popover.createEl('input', {
+      type: 'text',
+      cls: 'markvault-tag-filter-search',
+      attr: { placeholder: 'Search tags...' },
+    });
+    searchInput.style.width = '100%';
+    searchInput.style.boxSizing = 'border-box';
+    searchInput.style.padding = '10px 12px';
+    searchInput.style.border = 'none';
+    searchInput.style.borderBottom = '1px solid var(--background-modifier-border, #ddd)';
+    searchInput.style.fontSize = '14px';
+    searchInput.style.background = 'var(--background-primary, #fff)';
+    searchInput.style.color = 'var(--text-normal, #333)';
+    searchInput.style.outline = 'none';
+
+    // ── 列表容器（可滚动） ──
+    const listContainer = popover.createDiv({ cls: 'markvault-tag-filter-list' });
+    listContainer.style.flex = '1';
+    listContainer.style.overflowY = 'auto';
+    listContainer.style.padding = '4px';
+
+    // ── 渲染函数 ──
+    const renderList = (query: string) => {
+      listContainer.empty();
+      const q = query.toLowerCase().trim();
+
+      let filtered = frequencies;
+      if (q) {
+        filtered = frequencies.filter(f => f.name.toLowerCase().includes(q));
+        // 搜索模式下优先匹配开头（排序微调）
+        filtered.sort((a, b) => {
+          const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+          const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+          if (aStarts !== bStarts) return aStarts - bStarts;
+          return b.count - a.count || a.name.localeCompare(b.name);
+        });
+      }
+
+      // "All" 选项
+      const allItem = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
+      allItem.style.display = 'flex';
+      allItem.style.justifyContent = 'space-between';
+      allItem.style.alignItems = 'center';
+      allItem.style.padding = '6px 10px';
+      allItem.style.borderRadius = '6px';
+      allItem.style.cursor = 'pointer';
+      allItem.style.fontSize = '13px';
+      if (!currentTag || currentTag === 'all') {
+        allItem.style.background = 'var(--interactive-accent, #483699)';
+        allItem.style.color = '#fff';
+      }
+      allItem.createSpan({ text: 'All tags' });
+      allItem.addEventListener('click', async () => {
+        this.host.filter.tag = 'all';
+        popover.remove();
+        await this.host.refreshListOnly();
+      });
+
+      if (filtered.length === 0) {
+        const noItem = listContainer.createDiv();
+        noItem.style.padding = '20px 10px';
+        noItem.style.textAlign = 'center';
+        noItem.style.color = 'var(--text-muted, #888)';
+        noItem.style.fontSize = '12px';
+        noItem.textContent = 'No matching tags';
+        return;
+      }
+
+      for (const f of filtered) {
+        const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
+        item.style.display = 'flex';
+        item.style.justifyContent = 'space-between';
+        item.style.alignItems = 'center';
+        item.style.padding = '6px 10px';
+        item.style.borderRadius = '6px';
+        item.style.cursor = 'pointer';
+        item.style.fontSize = '13px';
+        item.style.transition = 'background 0.1s';
+
+        if (currentTag === f.name) {
+          item.style.background = 'var(--interactive-accent, #483699)';
+          item.style.color = '#fff';
+        }
+
+        // 标签名（搜索匹配高亮）
+        const nameSpan = item.createSpan({ text: f.name });
+
+        // 使用频率标记
+        const countBadge = item.createSpan({
+          text: `${f.count}`,
+          cls: 'markvault-tag-filter-count',
+        });
+        countBadge.style.fontSize = '11px';
+        countBadge.style.padding = '1px 6px';
+        countBadge.style.borderRadius = '10px';
+        countBadge.style.background = currentTag === f.name
+          ? 'rgba(255,255,255,0.3)'
+          : 'var(--background-modifier-hover, #f0f0f0)';
+
+        item.addEventListener('mouseenter', () => {
+          if (currentTag !== f.name) {
+            item.style.background = 'var(--background-modifier-hover, rgba(0,0,0,0.05))';
+          }
+        });
+        item.addEventListener('mouseleave', () => {
+          if (currentTag !== f.name) {
+            item.style.background = '';
+          }
+        });
+        item.addEventListener('click', async () => {
+          this.host.filter.tag = f.name;
+          popover.remove();
+          await this.host.refreshListOnly();
+        });
+      }
+    };
+
+    // 初始渲染
+    renderList('');
+
+    // 搜索输入事件
+    searchInput.addEventListener('input', () => {
+      renderList(searchInput.value);
+    });
+
+    // 键盘：Escape 关闭
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        popover.remove();
+      }
+    });
+
+    // 点击外部关闭
+    const onClickOutside = (e: MouseEvent) => {
+      if (!popover.contains(e.target as Node) && e.target !== anchor) {
+        popover.remove();
+        document.removeEventListener('click', onClickOutside, true);
+      }
+    };
+    // 延迟注册防止立即触发
+    setTimeout(() => {
+      document.addEventListener('click', onClickOutside, true);
+    }, 0);
+
+    // 自动聚焦搜索框
+    setTimeout(() => searchInput.focus(), 50);
   }
 }

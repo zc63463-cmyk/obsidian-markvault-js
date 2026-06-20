@@ -5,6 +5,30 @@
  * 之间的代码重复，成为所有过滤操作的唯一实现。
  *
  * Phase 4.5 (搜索重构): 新增模块，覆盖全部 12 个过滤维度 + 3 种排序。
+ *
+ * # 双搜索路径一致性边界
+ *
+ * 项目中存在两条搜索路径，它们的差异与共存关系如下：
+ *
+ * | 维度 | 纯 Filter 路径 (本模块) | SearchEngine 路径 |
+ * |------|------------------------|-------------------|
+ * | 入口 | applyUnifiedFilter(anns, filter, query) | engine.search(query, filter) |
+ * | 召回方式 | O(n) 全量扫描 includes(token) | O(1) 倒排索引 token→uuid |
+ * | 分词 | tokenize() — 与 engine 完全一致 | tokenize() — 与 filter 完全一致 |
+ * | 搜索字段 | text/note/tags/filePath/groups/fields/motivation | 同左（FIELD_WEIGHTS 加权） |
+ * | bigram 语义 | bigram OR + other OR | bigram ALL + other OR + BM25 排序 |
+ * | 性能 | 标注数 < 1000 时够用 | 大标注量下显著更快 |
+ * | 新鲜度 | 实时（直接读 Store 引用） | 依赖 markDirty() 触发索引重建 |
+ * | 评分 | 无（仅过滤） | BM25 / Weighted 评分 |
+ *
+ * **子集关系保证**：SearchEngine 的结果是纯 Filter 路径的子集（理论保证）。
+ * 如果 SearchEngine 结果 ⊕ 纯 Filter 结果有差异，说明索引需要重建（markDirty）。
+ *
+ * **调用方选择指南**：
+ * - 侧边栏过滤/排序 → applyUnifiedFilter（已有 Store 候选集，纯后过滤）
+ * - RelationPicker 目标搜索 → engine.suggest()（需要 BM25 排序 + 模糊/前缀）
+ * - 全量标注搜索 + Facets → engine.search()（需要评分 + 分布统计）
+ * - 无 searchQuery 的纯属性过滤 → 两条路径等价（走 Store 索引更快）
  */
 
 import type { Annotation, AnnotationFilter } from '../types/annotation';
@@ -28,6 +52,7 @@ export function hasActiveFilters(filter: AnnotationFilter): boolean {
   if (filter.hasRelations === true) return true;
   if (filter.needsCorrection === true) return true;
   if (filter.motivation && filter.motivation !== 'all') return true;
+  if (filter.tag && filter.tag !== 'all') return true;
   return false;
 }
 
@@ -103,6 +128,12 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.groups?.includes(groupVal) ?? false);
   }
 
+  // v5.x: tag 过滤
+  if (filter.tag && filter.tag !== 'all') {
+    const tagVal = filter.tag as string;
+    results = results.filter(a => a.tags.includes(tagVal));
+  }
+
   // v4.2: hasRelations 只计算有效关系（invalidAt == null）
   if (filter.hasRelations === true) {
     results = results.filter(a => a.relations?.some(r => !r.invalidAt) ?? false);
@@ -119,7 +150,9 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.motivation === filter.motivation);
   }
 
-  // —— 搜索（tokenizer 分词匹配，与 SearchEngine 行为一致） ——
+  // —— 搜索（纯 filter 路径：O(n) 全量扫描，tokenize 分词 + includes 匹配） ——
+  // 这是搜索的 "ground truth" 路径。SearchEngine 的倒排索引结果应为此路径的子集。
+  // 如果两者不一致（engine 结果 ⊄ filter 结果），说明索引需要重建。
   if (searchQuery && searchQuery.trim()) {
     const queryTokens = tokenize(searchQuery);
     if (queryTokens.length > 0) {

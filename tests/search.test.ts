@@ -237,6 +237,13 @@ async function testFilterEngine() {
     if (r.length !== 1 || r[0].uuid !== 'a4') throw new Error('group wrong');
   });
 
+  await test('Tag filter', () => {
+    const r = applyUnifiedFilter(anns, { tag: 'db' });
+    if (r.length !== 2) throw new Error(`tag filter: expected 2, got ${r.length}`);
+    const uuids = r.map(a => a.uuid).sort();
+    if (uuids[0] !== 'a4' || uuids[1] !== 'a5') throw new Error('tag filter: wrong uuids');
+  });
+
   await test('needsCorrection filter', () => {
     const r = applyUnifiedFilter(anns, { needsCorrection: true });
     if (r.length !== 0) throw new Error('needsCorrection should be 0');
@@ -312,6 +319,10 @@ async function testFilterEngine() {
 
   await test('hasActiveFilters: fieldFilters', () => {
     if (!hasActiveFilters({ fieldFilters: { category: '定义' } })) throw new Error('fieldFilters should be active');
+  });
+
+  await test('hasActiveFilters: tag', () => {
+    if (!hasActiveFilters({ tag: 'db' })) throw new Error('tag should be active');
   });
 
   await test('hasRelations: false', () => {
@@ -611,6 +622,13 @@ async function testSearchEngine() {
     const anns = createTestSet();
     const r = applyUnifiedFilter(anns, { group: 'all' });
     if (r.length !== 5) throw new Error(`group=all should not filter, got ${r.length}`);
+  });
+
+  await test('tag filter with "all" value', () => {
+    // tag='all' 不应被视为活跃过滤器
+    const anns = createTestSet();
+    const r = applyUnifiedFilter(anns, { tag: 'all' });
+    if (r.length !== 5) throw new Error(`tag=all should not filter, got ${r.length}`);
   });
 
   await test('Tokenizer: pure hyphens', () => {

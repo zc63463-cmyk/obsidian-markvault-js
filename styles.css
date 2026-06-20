@@ -3844,3 +3844,30 @@
 .theme-dark .markvault-pdf-highlight {
   filter: brightness(1.2);
 }
+
+/* ─── Tag 筛选 Popover ─── */
+
+.markvault-tag-filter-popover {
+  animation: markvault-tag-popover-in 0.12s ease-out;
+}
+
+@keyframes markvault-tag-popover-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.markvault-tag-filter-search::placeholder {
+  color: var(--text-muted, #999);
+  font-size: 13px;
+}
+
+.markvault-tag-filter-item:hover .markvault-tag-filter-count {
+  background: var(--interactive-accent, #483699);
+  color: #fff;
+}
+
+/* 搜索高亮（可选增强：加粗匹配文字） */
+.markvault-tag-filter-search-highlight {
+  font-weight: 600;
+  color: var(--text-accent, #483699);
+}
