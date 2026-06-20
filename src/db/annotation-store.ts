@@ -500,6 +500,65 @@ export class AnnotationStore {
     this.persistLayer._markDirty(ann.filePath);
   }
 
+  // v6.1: 标签治理操作
+
+  /** 重命名标签：把 oldName 全部替换为 newName */
+  async renameTag(oldName: string, newName: string): Promise<number> {
+    this._assertInitialized();
+    if (oldName === newName) return 0;
+
+    const uuidSet = this.indexLayer.byTag.get(oldName);
+    if (!uuidSet || uuidSet.size === 0) return 0;
+
+    let count = 0;
+    const affectedFiles = new Set<string>();
+    for (const uuid of [...uuidSet]) {
+      const ann = this.indexLayer.byUuid.get(uuid);
+      if (!ann) continue;
+      const idx = ann.tags.indexOf(oldName);
+      if (idx < 0) continue;
+      this.indexLayer.removeFromIndex(uuid);
+      ann.updatedAt = Date.now();
+      ann.tags[idx] = newName;
+      if (ann.tags.filter(t => t === newName).length > 1) ann.tags.splice(idx, 1);
+      this.indexLayer.addToIndex(ann);
+      affectedFiles.add(ann.filePath);
+      count++;
+    }
+    for (const fp of affectedFiles) this.persistLayer._markDirty(fp);
+    return count;
+  }
+
+  /** 合并标签：把 sourceTags 全部合并到 targetTag */
+  async mergeTags(targetTag: string, sourceTags: string[]): Promise<number> {
+    let count = 0;
+    for (const src of sourceTags) count += await this.renameTag(src, targetTag);
+    return count;
+  }
+
+  /** 删除标签：从所有标注中移除 */
+  async deleteTag(tag: string): Promise<number> {
+    this._assertInitialized();
+    const uuidSet = this.indexLayer.byTag.get(tag);
+    if (!uuidSet || uuidSet.size === 0) return 0;
+    let count = 0;
+    const affectedFiles = new Set<string>();
+    for (const uuid of [...uuidSet]) {
+      const ann = this.indexLayer.byUuid.get(uuid);
+      if (!ann) continue;
+      const idx = ann.tags.indexOf(tag);
+      if (idx < 0) continue;
+      this.indexLayer.removeFromIndex(uuid);
+      ann.updatedAt = Date.now();
+      ann.tags.splice(idx, 1);
+      this.indexLayer.addToIndex(ann);
+      affectedFiles.add(ann.filePath);
+      count++;
+    }
+    for (const fp of affectedFiles) this.persistLayer._markDirty(fp);
+    return count;
+  }
+
   /** 更新标注的学习状态标记 */
   async updateFlags(uuid: string, flagChanges: Partial<AnnotationFlag>): Promise<void> {
     this._assertInitialized();

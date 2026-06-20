@@ -24,11 +24,13 @@ import { FilterBar } from './components/FilterBar';
 import { BatchBar } from './components/BatchBar';
 import { AllNotesView, type AllNotesSubView } from './views/AllNotesView';
 import { AnnotationCard } from './components/AnnotationCard';
+import { TagManager } from './views/TagManager';
+import { annotationStore } from '../../db/annotation-store';
 
 export const MARKVAULT_SIDEBAR_VIEW_TYPE = 'markvault-sidebar';
 
 /** 侧边栏 Tab 类型 */
-type SidebarTab = 'current' | 'all' | 'stats' | 'orphans';
+type SidebarTab = 'current' | 'all' | 'stats' | 'orphans' | 'tags';
 
 export class AnnotationSidebar extends ItemView {
   private filter: AnnotationFilter = {
@@ -71,6 +73,7 @@ export class AnnotationSidebar extends ItemView {
   private _virtualScrollCleanup: (() => void) | null = null;
   private allNotesView: AllNotesView;
   private annotationCard: AnnotationCard;
+  private tagManager: TagManager;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -134,6 +137,11 @@ export class AnnotationSidebar extends ItemView {
       onJump: (ann) => this.jumpToAnnotation(ann),
       onDelete: (ann) => this.deleteAnnotationWithConfirm(ann),
       refreshListOnly: () => this.refreshListOnly(),
+    });
+    this.tagManager = new TagManager({
+      app: this.app,
+      store: annotationStore,
+      refresh: async () => { this.activeTab = 'tags'; await this.renderContent(); },
     });
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', () => {
@@ -235,6 +243,9 @@ export class AnnotationSidebar extends ItemView {
       case 'orphans':
         await this.renderOrphansView(contentArea);
         break;
+      case 'tags':
+        this.tagManager.render(contentArea);
+        break;
     }
   }
 
@@ -248,6 +259,7 @@ export class AnnotationSidebar extends ItemView {
       { id: 'all', icon: '📚', label: 'All Notes' },
       { id: 'stats', icon: '📊', label: 'Stats' },
       { id: 'orphans', icon: '🔍', label: 'Orphans' },
+      { id: 'tags', icon: '🏷️', label: 'Tags' },
     ];
 
     for (const tab of tabs) {
