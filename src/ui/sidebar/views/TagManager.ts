@@ -46,7 +46,7 @@ export class TagManager {
     const refreshBtn = actions.createEl('button', { text: '🔄' });
     refreshBtn.style.cssText = 'font-size:14px;padding:2px 6px;cursor:pointer;border:1px solid var(--background-modifier-border,#ccc);border-radius:4px;background:transparent;line-height:1';
     Object.assign(refreshBtn, { title: 'Refresh' });
-    refreshBtn.addEventListener('click', () => { this.render(container); });
+    refreshBtn.addEventListener('click', () => { this.render(container); new Notice('Tags refreshed'); });
 
     const listEl = container.createDiv({ cls: 'markvault-tagmanager-list' });
     listEl.style.cssText = 'max-height:calc(100vh - 220px);overflow-y:auto';
