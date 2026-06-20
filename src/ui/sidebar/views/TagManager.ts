@@ -196,13 +196,13 @@ export class TagManager {
       if (e.key === 'Enter' && addInput.value.trim()) {
         const tagName = addInput.value.trim();
         addInput.value = '';
-        const all = await getAllAnnotations();
-        if (all.length === 0) { new Notice('No annotations. Create one first.'); return; }
-        const target = all.find(a => !a.tags.includes(tagName)) ?? all[0];
-        if (!target.groups) target.groups = [];
-        if (!target.groups.includes(groupName)) target.groups.push(groupName);
-        if (!target.tags.includes(tagName)) target.tags.push(tagName);
-        new Notice(`Added "${tagName}" to ${groupName}`);
+        // P0 fix: 走 Store API 持久化
+        const ok = await this.host.store.addTagToGroup(tagName, groupName);
+        if (ok) {
+          new Notice(`Added "${tagName}" to ${groupName}`);
+        } else {
+          new Notice(`Tag "${tagName}" not found or already in ${groupName}`);
+        }
         if (this._container) this.render(this._container);
       }
     });
@@ -271,14 +271,11 @@ export class TagManager {
       const input = contentEl.querySelector('input') as HTMLInputElement;
       if (!input?.value.trim() || input.value.trim() === oldName) return;
       const newName = input.value.trim();
-      let count = 0;
-      const all2 = await getAllAnnotations();
-      for (const ann of all2) {
-        if (ann.groups?.includes(oldName)) {
-          ann.groups = (ann.groups ?? []).map((g: string) => g === oldName ? newName : g);
-          count++;
-        }
-      }
+      // P0 fix: 走 Store API
+      const count = await this.host.store.renameGroup(oldName, newName);
+      // 同步更新 knownGroups
+      addKnownGroup(newName);
+      this.host.onGroupsChanged?.();
       new Notice(`Renamed group "${oldName}" → "${newName}" (${count} annotations)`);
       modal.close();
       await this.host.refresh();
@@ -300,15 +297,9 @@ export class TagManager {
     const delBtn = footer.createEl('button', { text: 'Delete Group' });
     delBtn.style.cssText = 'background:#e74c3c;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
     delBtn.addEventListener('click', async () => {
-      let count2 = 0;
-      const all3 = await getAllAnnotations();
-      for (const ann of all3) {
-        if (ann.groups?.includes(group)) {
-          ann.groups = (ann.groups ?? []).filter((g: string) => g !== group);
-          count2++;
-        }
-      }
-      new Notice(`Removed group "${group}" from ${count2} annotations`);
+      // P0 fix: 走 Store API
+      const count = await this.host.store.deleteGroup(group);
+      new Notice(`Removed group "${group}" from ${count} annotations`);
       modal.close();
       await this.host.refresh();
     });

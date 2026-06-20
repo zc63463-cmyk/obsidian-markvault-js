@@ -616,6 +616,79 @@ export class AnnotationStore {
     this.persistLayer._markDirty(ann.filePath);
   }
 
+  // v6.1 P0: Group 治理操作（走正规 Store API 路径）
+
+  /** 重命名 Group：全局替换所有标注中的 oldName → newName */
+  async renameGroup(oldName: string, newName: string): Promise<number> {
+    this._assertInitialized();
+    if (oldName === newName) return 0;
+    const uuidSet = this.indexLayer.byGroup.get(oldName);
+    if (!uuidSet || uuidSet.size === 0) return 0;
+
+    let count = 0;
+    const affectedFiles = new Set<string>();
+    for (const uuid of [...uuidSet]) {
+      const ann = this.indexLayer.byUuid.get(uuid);
+      if (!ann?.groups) continue;
+      const idx = ann.groups.indexOf(oldName);
+      if (idx < 0) continue;
+      this.indexLayer.removeFromIndex(uuid);
+      ann.updatedAt = Date.now();
+      ann.groups[idx] = newName;
+      if (ann.groups.filter(g => g === newName).length > 1) ann.groups.splice(idx, 1);
+      this.indexLayer.addToIndex(ann);
+      affectedFiles.add(ann.filePath);
+      count++;
+    }
+    for (const fp of affectedFiles) this.persistLayer._markDirty(fp);
+    return count;
+  }
+
+  /** 删除 Group：从所有标注中移除 */
+  async deleteGroup(group: string): Promise<number> {
+    this._assertInitialized();
+    const uuidSet = this.indexLayer.byGroup.get(group);
+    if (!uuidSet || uuidSet.size === 0) return 0;
+
+    let count = 0;
+    const affectedFiles = new Set<string>();
+    for (const uuid of [...uuidSet]) {
+      const ann = this.indexLayer.byUuid.get(uuid);
+      if (!ann?.groups) continue;
+      const idx = ann.groups.indexOf(group);
+      if (idx < 0) continue;
+      this.indexLayer.removeFromIndex(uuid);
+      ann.updatedAt = Date.now();
+      ann.groups.splice(idx, 1);
+      if (ann.groups.length === 0) delete ann.groups;
+      this.indexLayer.addToIndex(ann);
+      affectedFiles.add(ann.filePath);
+      count++;
+    }
+    for (const fp of affectedFiles) this.persistLayer._markDirty(fp);
+    return count;
+  }
+
+  /** 将 tag 关联到 group：找到第一个含此 tag 但无此 group 的标注，添加 group */
+  async addTagToGroup(tag: string, group: string): Promise<boolean> {
+    this._assertInitialized();
+    const tagUuids = this.indexLayer.byTag.get(tag);
+    if (!tagUuids || tagUuids.size === 0) return false;
+
+    // 优先找已有此 tag 但无此 group 的标注
+    let target: string | null = null;
+    for (const uuid of tagUuids) {
+      const ann = this.indexLayer.byUuid.get(uuid);
+      if (ann && !(ann.groups?.includes(group))) { target = uuid; break; }
+    }
+    if (!target) {
+      // 所有含此 tag 的标注都已有此 group — 无需操作
+      return false;
+    }
+    await this.addGroupToAnnotation(target, group);
+    return true;
+  }
+
   // ═══════════════════════════════════════════════════════
   // 私有工具方法
   // ═══════════════════════════════════════════════════════

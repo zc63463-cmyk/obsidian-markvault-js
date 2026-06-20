@@ -18,9 +18,13 @@ interface TagTreeNode {
  */
 export interface FilterBarHost {
   filter: AnnotationFilter;
-  fieldFilterEntries: Array<{ key: string; value: string }>;
-  selectedTags: string[];
-  fieldMultiValues: Record<string, string[]>; // v6.1: 分面多值
+  // P0 fix: 用 getter 函数避免引用脱节
+  getFieldFilterEntries(): Array<{ key: string; value: string }>;
+  getSelectedTags(): string[];
+  getFieldMultiValues(): Record<string, string[]>;
+  setSelectedTags(tags: string[]): void;
+  setFieldMultiValues(values: Record<string, string[]>): void;
+  setFieldFilterEntries(entries: Array<{ key: string; value: string }>): void;
   refreshListOnly(): Promise<void>;
 }
 
@@ -125,10 +129,10 @@ export class FilterBar {
     fieldRow.createSpan({ cls: 'markvault-filter-group-label', text: '🏷️' });
 
     // 字段过滤条件标签（横排显示）
-    if (this.host.fieldFilterEntries.length > 0) {
+    if (this.host.getFieldFilterEntries().length > 0) {
       const tagsWrap = fieldRow.createDiv({ cls: 'markvault-field-filter-tags' });
-      for (let i = 0; i < this.host.fieldFilterEntries.length; i++) {
-        const entry = this.host.fieldFilterEntries[i];
+      for (let i = 0; i < this.host.getFieldFilterEntries().length; i++) {
+        const entry = this.host.getFieldFilterEntries()[i];
         const filterTag = tagsWrap.createDiv({ cls: 'markvault-field-filter-tag' });
         filterTag.createSpan({ cls: 'markvault-field-filter-key', text: entry.key });
         filterTag.createSpan({ cls: 'markvault-field-filter-eq', text: '=' });
@@ -139,7 +143,7 @@ export class FilterBar {
         });
         removeBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          this.host.fieldFilterEntries.splice(i, 1);
+          this.host.getFieldFilterEntries().splice(i, 1);
           await this.host.refreshListOnly();
         });
       }
@@ -147,7 +151,7 @@ export class FilterBar {
 
     // 添加字段过滤按钮（分面 Popover）
     const addFieldFilterBtn = fieldRow.createEl('button', {
-      text: this.host.fieldFilterEntries.length > 0 ? '+' : '+ Field',
+      text: this.host.getFieldFilterEntries().length > 0 ? '+' : '+ Field',
       cls: 'markvault-add-field-filter-btn',
       attr: { title: 'Add field filter (faceted)' },
     });
@@ -176,7 +180,7 @@ export class FilterBar {
     if (existing) { existing.remove(); return; }
 
     const keys = await getFieldKeys();
-    const fv = this.host.fieldMultiValues ?? {};
+    const fv = this.host.getFieldMultiValues() ?? {};
 
     const popover = document.body.createDiv({ cls: 'markvault-faceted-field-popover' });
     const r = anchor.getBoundingClientRect();
@@ -233,11 +237,11 @@ export class FilterBar {
     const applyBtn = footer.createEl('button', { text: 'Apply' });
     applyBtn.style.cssText = 'padding:4px 12px;border:none;border-radius:4px;cursor:pointer;color:#fff;background:var(--interactive-accent,#483699);font-size:12px';
     applyBtn.addEventListener('click', async () => {
-      this.host.fieldMultiValues = fv;
+      this.host.setFieldMultiValues(fv);
       // 同步到旧 fieldFilterEntries
-      this.host.fieldFilterEntries.length = 0;
+      this.host.setFieldFilterEntries([]);
       for (const [k, vs] of Object.entries(fv)) {
-        for (const v of vs) this.host.fieldFilterEntries.push({ key: k, value: v });
+        for (const v of vs) this.host.getFieldFilterEntries().push({ key: k, value: v });
       }
       popover.remove();
       await this.host.refreshListOnly();
@@ -247,8 +251,8 @@ export class FilterBar {
     Object.assign(clearBtn.style, { padding: '4px 12px', border: '1px solid var(--background-modifier-border,#ccc)',
       borderRadius: '4px', cursor: 'pointer', background: 'var(--background-secondary,#f5f5f5)', fontSize: '12px' });
     clearBtn.addEventListener('click', async () => {
-      this.host.fieldMultiValues = {};
-      this.host.fieldFilterEntries.length = 0;
+      this.host.setFieldMultiValues({});
+      this.host.setFieldFilterEntries([]);
       popover.remove();
       await this.host.refreshListOnly();
     });
@@ -288,7 +292,7 @@ export class FilterBar {
     for (const val of values) {
       menu.addItem((item) => {
         item.setTitle(val).onClick(async () => {
-          this.host.fieldFilterEntries.push({ key, value: val });
+          this.host.getFieldFilterEntries().push({ key, value: val });
           await this.host.refreshListOnly();
         });
       });
@@ -358,7 +362,7 @@ export class FilterBar {
     const f = this.host.filter;
     if (f.mastery && f.mastery !== 'all') count++;
     if (f.group && f.group !== 'all') count++;
-    if (this.host.selectedTags.length > 0) count++;
+    if (this.host.getSelectedTags().length > 0) count++;
     if (f.hasRelations === true) count++;
     if (f.needsCorrection === true) count++;
     if (f.motivation && f.motivation !== 'all') count++;
@@ -461,7 +465,7 @@ export class FilterBar {
 
     // ── 通用行渲染 ──
     const createItemRow = (label: string, fullPath: string, count: number, depth: number, isActive: boolean): HTMLElement => {
-      const actuallyActive = isActive || this.host.selectedTags.includes(fullPath);
+      const actuallyActive = isActive || this.host.getSelectedTags().includes(fullPath);
       const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
       item.style.display = 'flex';
       item.style.justifyContent = 'space-between';
@@ -505,11 +509,11 @@ export class FilterBar {
       });
       item.addEventListener('click', async () => {
         // 多选 toggle：如果已在选中列表则移除，否则添加
-        const idx = this.host.selectedTags.indexOf(fullPath);
+        const idx = this.host.getSelectedTags().indexOf(fullPath);
         if (idx >= 0) {
-          this.host.selectedTags.splice(idx, 1);
+          this.host.getSelectedTags().splice(idx, 1);
         } else {
-          this.host.selectedTags.push(fullPath);
+          this.host.getSelectedTags().push(fullPath);
         }
         // 不关闭 popover，允许连续选择；关闭 popover 需点击外部或按 Esc
         await this.host.refreshListOnly();
@@ -572,7 +576,7 @@ export class FilterBar {
       }
       allItem.createSpan({ text: 'All tags' });
       allItem.addEventListener('click', async () => {
-        this.host.selectedTags.length = 0; // 清空多选
+        this.host.getSelectedTags().length = 0; // 清空多选
         popover.remove();
         await this.host.refreshListOnly();
       });
@@ -603,7 +607,7 @@ export class FilterBar {
           recentLabel.textContent = 'Frequent';
           for (const f of top5) {
             const pill = createItemRow(f.name, f.name, f.count, 0, false);
-            pill.style.background = this.host.selectedTags.includes(f.name)
+            pill.style.background = this.host.getSelectedTags().includes(f.name)
               ? 'var(--interactive-accent, #483699)'
               : 'var(--background-modifier-hover, #f5f5f5)';
           }
@@ -785,7 +789,7 @@ export class FilterBar {
     // ═══════════════════════════════════════════════════════
     // 1. Tags 段
     // ═══════════════════════════════════════════════════════
-    const hasTags = this.host.selectedTags.length > 0;
+    const hasTags = this.host.getSelectedTags().length > 0;
     const { body: tagsBody } = createSection(scrollContainer, 'Tags', hasTags);
 
     const tagSearch = tagsBody.createEl('input', {
@@ -814,7 +818,7 @@ export class FilterBar {
 
     // v6.1: 标签行渲染（内联版）
     const createTagRow = (fullPath: string, label: string, count: number, depth: number): HTMLElement => {
-      const isActive = this.host.selectedTags.includes(fullPath);
+      const isActive = this.host.getSelectedTags().includes(fullPath);
       const item = tagList.createDiv();
       Object.assign(item.style, {
         display: 'flex',
@@ -855,11 +859,11 @@ export class FilterBar {
         if (!isActive) item.style.background = '';
       });
       item.addEventListener('click', async () => {
-        const idx = this.host.selectedTags.indexOf(fullPath);
+        const idx = this.host.getSelectedTags().indexOf(fullPath);
         if (idx >= 0) {
-          this.host.selectedTags.splice(idx, 1);
+          this.host.getSelectedTags().splice(idx, 1);
         } else {
-          this.host.selectedTags.push(fullPath);
+          this.host.getSelectedTags().push(fullPath);
         }
         await this.host.refreshListOnly();
         this.refreshUnifiedPopoverSections(popover);
@@ -952,7 +956,7 @@ export class FilterBar {
       allTagsBtn.style.background = '';
     });
     allTagsBtn.addEventListener('click', async () => {
-      this.host.selectedTags.length = 0;
+      this.host.getSelectedTags().length = 0;
       await this.host.refreshListOnly();
       this.refreshUnifiedPopoverSections(popover);
     });
@@ -1130,9 +1134,9 @@ export class FilterBar {
         await this.host.refreshListOnly();
       });
     }
-    for (const t of this.host.selectedTags) {
+    for (const t of this.host.getSelectedTags()) {
       makeChip(`# ${t}`, async () => {
-        this.host.selectedTags = this.host.selectedTags.filter(st => st !== t);
+        this.host.setSelectedTags(this.host.getSelectedTags().filter(st => st !== t));
         await this.host.refreshListOnly();
       });
     }
@@ -1177,7 +1181,7 @@ export class FilterBar {
     clearAllBtn.addEventListener('click', async () => {
       this.host.filter.mastery = 'all';
       this.host.filter.group = 'all';
-      this.host.selectedTags.length = 0;
+      this.host.getSelectedTags().length = 0;
       this.host.filter.hasRelations = undefined;
       this.host.filter.needsCorrection = undefined;
       this.host.filter.motivation = 'all';
@@ -1267,9 +1271,9 @@ export class FilterBar {
         await this.host.refreshListOnly();
       });
     }
-    for (const t of this.host.selectedTags) {
+    for (const t of this.host.getSelectedTags()) {
       makeChip(`# ${t}`, async () => {
-        this.host.selectedTags = this.host.selectedTags.filter(st => st !== t);
+        this.host.setSelectedTags(this.host.getSelectedTags().filter(st => st !== t));
         await this.host.refreshListOnly();
       });
     }

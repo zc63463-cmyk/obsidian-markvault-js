@@ -403,7 +403,15 @@ export class AnnotationSearchEngine {
       alias: ann.alias || '',    // v5.3: 图谱别名纳入搜索索引
       filePath: ann.filePath,
       groups: (ann.groups || []).join(' '),
-      fields: ann.fields ? Object.values(ann.fields).join(' ') : '',
+      fields: ann.fields
+        ? Object.entries(ann.fields)
+            .flatMap(([k, v]) => {
+              // P0 fix: 索引 key (去 u: 前缀) + value，与 filter-engine 一致
+              const bareKey = k.startsWith('u:') ? k.slice(2) : k;
+              return [bareKey, v];
+            })
+            .join(' ')
+        : '',
       motivation: ann.motivation || '',
     };
 
@@ -907,10 +915,23 @@ export class AnnotationSearchEngine {
 
   private _extractSnippets(ann: Annotation, tokens: string[]): Record<string, string> {
     const snippets: Record<string, string> = {};
-    for (const token of tokens) {
-      if (ann.text.toLowerCase().includes(token)) {
-        snippets.text = this._snippetAround(ann.text, token);
-        break;
+    // P0 fix: 多字段 snippet 提取，与 _findBestSnippet 一致
+    const candidates: Array<{ field: string; text: string }> = [
+      { field: 'text', text: ann.text },
+      { field: 'note', text: ann.note || '' },
+      { field: 'tags', text: ann.tags.join(' ') },
+      { field: 'alias', text: ann.alias || '' },
+      { field: 'groups', text: (ann.groups || []).join(' ') },
+      { field: 'fields', text: ann.fields ? Object.values(ann.fields).join(' ') : '' },
+    ];
+    for (const { field, text } of candidates) {
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      for (const token of tokens) {
+        if (lower.includes(token)) {
+          snippets[field] = this._snippetAround(text, token);
+          break;
+        }
       }
     }
     return snippets;
@@ -960,6 +981,7 @@ export class AnnotationSearchEngine {
       { label: '📝 ', text: ann.note || '' },
       { label: '#', text: ann.tags.join(' ') },
       { label: '', text: ann.alias || '' },
+      { label: '📂 ', text: (ann.groups || []).join(' ') },
       { label: '', text: ann.fields ? Object.values(ann.fields).join(' ') : '' },
     ];
     for (const { label, text } of fieldTexts) {

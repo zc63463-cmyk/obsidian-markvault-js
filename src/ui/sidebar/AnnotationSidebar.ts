@@ -99,9 +99,12 @@ export class AnnotationSidebar extends ItemView {
     });
     this.filterBar = new FilterBar({
       filter: this.filter,
-      fieldFilterEntries: this.fieldFilterEntries,
-      selectedTags: this.selectedTags,
-      fieldMultiValues: this.fieldMultiValues,
+      getFieldFilterEntries: () => this.fieldFilterEntries,
+      getSelectedTags: () => this.selectedTags,
+      getFieldMultiValues: () => this.fieldMultiValues,
+      setSelectedTags: (tags) => { this.selectedTags = tags; },
+      setFieldMultiValues: (values) => { this.fieldMultiValues = values; },
+      setFieldFilterEntries: (entries) => { this.fieldFilterEntries = entries; },
       refreshListOnly: () => this.refreshListOnly(),
     });
     this.batchBar = new BatchBar({
@@ -228,6 +231,9 @@ export class AnnotationSidebar extends ItemView {
     this.selectedUuids.clear();
     this.batchMode = false;
     this.fieldFilterEntries = [];
+    // P0 fix: 统一重置所有过滤状态
+    this.fieldMultiValues = {};
+    this.selectedTags = [];
 
     // ── Tab 栏 ──
     this.renderTabBar();
