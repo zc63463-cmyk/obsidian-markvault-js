@@ -433,6 +433,15 @@ export function openAnnotationPicker(ctx: ConnectionsContext): void {
   const parent = findNode(ctx.rootNode, parentId);
   if (!parent) return;
 
+  // v6.1: 使用 SearchEngine 替代直接 getAllAnnotations
+  const engine = (ctx.app as unknown as {
+    plugins?: { plugins?: Record<string, { getSearchEngine?: () => any }> };
+  }).plugins?.plugins?.['markvault-js']?.getSearchEngine?.();
+  if (!engine) {
+    new Notice('Annotation search not available');
+    return;
+  }
+
   const store = getAnnotationStore(ctx.app);
   if (!store) {
     new Notice('Annotation store not available');
@@ -447,7 +456,7 @@ export function openAnnotationPicker(ctx: ConnectionsContext): void {
 
   const modal = new AnnotationPickerModal(
     ctx.app,
-    allAnnotations,
+    engine,
     async (annotationUuid: string, summary: string) => {
       ctx.undoRedoSnapshot('insertAnnotation');
 

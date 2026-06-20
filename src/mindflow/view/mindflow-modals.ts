@@ -22,8 +22,15 @@ import {
   ButtonComponent,
   SearchComponent,
   Component,
+  Menu,
+  Notice,
 } from 'obsidian';
 import type { StructureType } from '../types/mind-node';
+import type { AnnotationSearchEngine } from '../../search/search-engine';
+import type { AnnotationFilter } from '../../types/annotation';
+import { MASTERY_LABELS } from '../../types/annotation';
+import { getGroupNames, getTagFrequencies } from '../../db/annotation-repo';
+import { debounce } from '../../utils/debounce';
 
 // ═══════════════════════════════════════════════════════
 // 接口
@@ -114,111 +121,198 @@ export abstract class PreviewableEditModal extends Modal {
 }
 
 // ═══════════════════════════════════════════════════════
-// 标注选择器 Modal
+// 标注选择器 Modal (v6.1: SearchEngine + 多维度筛选)
 // ═══════════════════════════════════════════════════════
 
 export class AnnotationPickerModal extends Modal {
-  private annotations: AnnotationSummary[];
+  private engine: AnnotationSearchEngine;
   private onSelect: (uuid: string, summary: string) => void;
   private searchComp!: SearchComponent;
   private listEl!: HTMLElement;
+  private countEl!: HTMLElement;
+
+  private filter: AnnotationFilter = { type: 'all', color: 'all', sortBy: 'position' };
+  private selectedTags: string[] = [];
+  private searchQuery: string = '';
+
+  private results: Array<{ uuid: string; text: string; note?: string; filePath?: string; tags?: string[] }> = [];
+  private selectedUuid: string | null = null;
 
   constructor(
     app: App,
-    annotations: AnnotationSummary[],
+    engine: AnnotationSearchEngine,
     onSelect: (uuid: string, summary: string) => void,
   ) {
     super(app);
-    this.annotations = annotations;
+    this.engine = engine;
     this.onSelect = onSelect;
   }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl('h2', { text: 'Link annotation' });
+    contentEl.style.minWidth = '420px';
+    contentEl.style.maxWidth = '520px';
+    contentEl.style.maxHeight = '80vh';
+    contentEl.style.overflow = 'hidden';
+    contentEl.style.display = 'flex';
+    contentEl.style.flexDirection = 'column';
+    contentEl.createEl('h2', { text: 'Link annotation' }).style.marginBottom = '8px';
 
-    new Setting(contentEl)
-      .setName('Search')
-      .addSearch((search) => {
-        this.searchComp = search;
-        search.setPlaceholder('Search annotations...');
-        search.onChange((query) => this.renderList(query));
+    // ── 搜索输入 ──
+    const searchRow = contentEl.createDiv();
+    new Setting(searchRow).addSearch((search) => {
+      this.searchComp = search;
+      search.setPlaceholder('Search by text, tag, or UUID...');
+      search.onChange((q) => {
+        this.searchQuery = q;
+        debounce(() => this._doSearch(), 200)();
       });
+    });
 
+    // ── 筛选栏 ──
+    const filterRow = contentEl.createDiv();
+    filterRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:4px 0';
+
+    // Type
+    const typeBtn = this._addFilterBtn(filterRow, 'Type', () => {
+      const menu = new Menu();
+      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.type = 'all'; typeBtn.textContent = 'Type'; this._doSearch(); }));
+      for (const t of ['highlight' as const, 'bold' as const, 'underline' as const]) {
+        menu.addItem(i => i.setTitle(t).onClick(() => { this.filter.type = t; typeBtn.textContent = t; this._doSearch(); }));
+      }
+      menu.showAtMouseEvent({ clientX: typeBtn.getBoundingClientRect().left, clientY: typeBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Mastery
+    const masteryBtn = this._addFilterBtn(filterRow, 'Mastery', () => {
+      const menu = new Menu();
+      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.mastery = 'all'; masteryBtn.textContent = 'Mastery'; this._doSearch(); }));
+      for (const [v, label] of Object.entries(MASTERY_LABELS)) {
+        menu.addItem(i => i.setTitle(label).onClick(() => { this.filter.mastery = v as any; masteryBtn.textContent = label; this._doSearch(); }));
+      }
+      menu.showAtMouseEvent({ clientX: masteryBtn.getBoundingClientRect().left, clientY: masteryBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Tags
+    const tagsBtn = this._addFilterBtn(filterRow, '# Tags', () => {
+      const freqs = getTagFrequencies();
+      const menu = new Menu();
+      menu.addItem(i => i.setTitle('- Clear All -').onClick(() => { this.selectedTags = []; tagsBtn.textContent = '# Tags'; this._doSearch(); }));
+      menu.addSeparator();
+      for (const f of freqs.slice(0, 25)) {
+        const sel = this.selectedTags.includes(f.name);
+        menu.addItem(i => i.setTitle(f.name).setChecked(sel).onClick(() => {
+          if (sel) this.selectedTags = this.selectedTags.filter(t => t !== f.name);
+          else this.selectedTags.push(f.name);
+          tagsBtn.textContent = this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags';
+          this._doSearch();
+        }));
+      }
+      menu.showAtMouseEvent({ clientX: tagsBtn.getBoundingClientRect().left, clientY: tagsBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // Group
+    const groupBtn = this._addFilterBtn(filterRow, 'Group', () => {
+      const groups = getGroupNames();
+      const menu = new Menu();
+      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.group = 'all'; groupBtn.textContent = 'Group'; this._doSearch(); }));
+      for (const g of groups.slice(0, 20)) {
+        menu.addItem(i => i.setTitle(g).onClick(() => { this.filter.group = g; groupBtn.textContent = g; this._doSearch(); }));
+      }
+      menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // ── 结果计数 ──
+    this.countEl = contentEl.createDiv();
+    this.countEl.style.cssText = 'font-size:11px;color:var(--text-muted,#888);margin:4px 0';
+
+    // ── 结果列表 ──
     this.listEl = contentEl.createDiv({ cls: 'mf-annotation-picker__list' });
-    this.listEl.style.maxHeight = '400px';
-    this.listEl.style.overflow = 'auto';
-    this.listEl.style.marginTop = '12px';
+    this.listEl.style.cssText = 'flex:1;overflow-y:auto;min-height:200px;max-height:400px';
 
-    this.renderList('');
+    this._doSearch();
+
+    // Enter on search input triggers select
+    setTimeout(() => this.searchComp.inputEl.focus(), 50);
+  }
+
+  private _addFilterBtn(parent: HTMLElement, label: string, onClick: () => void): HTMLElement {
+    const btn = parent.createEl('button', { text: label });
+    btn.style.cssText = 'padding:2px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;background:var(--background-primary,#fff)';
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  private _doSearch() {
+    // Sync filter
+    if (this.selectedTags.length > 0) {
+      this.filter.tags = this.selectedTags;
+    } else {
+      this.filter.tags = undefined;
+    }
+
+    const results = this.engine.search({
+      query: this.searchQuery || undefined,
+      scope: 'all',
+      filter: this.filter,
+      sortByRelevance: !!this.searchQuery,
+      limit: 25,
+    });
+
+    this.results = results.map(r => ({
+      uuid: r.annotation.uuid,
+      text: r.annotation.text,
+      note: r.annotation.note,
+      filePath: r.annotation.filePath,
+      tags: r.annotation.tags,
+    }));
+
+    this._renderList();
+  }
+
+  private _renderList() {
+    this.listEl.empty();
+    this.countEl.textContent = `${this.results.length} results`;
+
+    if (this.results.length === 0) {
+      const empty = this.listEl.createDiv({ text: 'No matching annotations.' });
+      empty.style.cssText = 'padding:20px;text-align:center;color:var(--text-muted,#888)';
+      return;
+    }
+
+    for (const ann of this.results) {
+      const item = this.listEl.createDiv({ cls: 'mf-annotation-picker__item' });
+      item.style.cssText = 'padding:8px 12px;border-radius:6px;cursor:pointer;margin-bottom:4px;border:1px solid var(--background-modifier-border,#ddd);transition:background .1s';
+      if (ann.uuid === this.selectedUuid) { item.style.background = 'var(--interactive-accent,#483699)'; item.style.color = '#fff'; }
+
+      const textEl = item.createDiv();
+      textEl.textContent = ann.text.length > 60 ? ann.text.slice(0, 60) + '...' : ann.text;
+      textEl.style.cssText = 'font-size:13px;font-weight:500';
+
+      if (ann.note) {
+        const noteEl = item.createDiv();
+        noteEl.textContent = ann.note.length > 40 ? ann.note.slice(0, 40) + '...' : ann.note;
+        noteEl.style.cssText = 'font-size:12px;color:var(--text-muted,#999);margin-top:2px';
+      }
+
+      const metaEl = item.createDiv();
+      metaEl.textContent = `${ann.filePath ?? ''}  ${ann.tags?.length ? '#' + ann.tags.join(' #') : ''}`;
+      metaEl.style.cssText = 'font-size:11px;color:var(--text-faint,#bbb);margin-top:2px';
+
+      item.addEventListener('mouseenter', () => { if (ann.uuid !== this.selectedUuid) item.style.background = 'var(--background-modifier-hover,rgba(0,0,0,.05))'; });
+      item.addEventListener('mouseleave', () => { if (ann.uuid !== this.selectedUuid) item.style.background = ''; });
+      item.addEventListener('click', () => {
+        this.selectedUuid = ann.uuid;
+        this._renderList();
+        const summary = ann.note ? `${ann.text.slice(0, 30)} (${ann.note.slice(0, 20)})` : ann.text.slice(0, 40);
+        setTimeout(() => { this.onSelect(ann.uuid, summary); this.close(); }, 80);
+      });
+    }
   }
 
   onClose() {
     this.contentEl.empty();
-  }
-
-  private renderList(query: string): void {
-    this.listEl.empty();
-
-    const q = query.toLowerCase().trim();
-    const filtered = q
-      ? this.annotations.filter(a => {
-          const searchText = `${a.text} ${a.note ?? ''} ${a.tags?.join(' ') ?? ''} ${a.filePath ?? ''}`.toLowerCase();
-          return searchText.includes(q);
-        })
-      : this.annotations;
-
-    if (filtered.length === 0) {
-      this.listEl.createEl('p', { text: 'No matching annotations.' });
-      return;
-    }
-
-    for (const ann of filtered) {
-      const item = this.listEl.createDiv({ cls: 'mf-annotation-picker__item' });
-      item.style.padding = '8px 12px';
-      item.style.borderRadius = '6px';
-      item.style.cursor = 'pointer';
-      item.style.marginBottom = '4px';
-      item.style.border = '1px solid var(--background-modifier-border, #ddd)';
-
-      const text = document.createElement('div');
-      text.textContent = ann.text.length > 60 ? ann.text.slice(0, 60) + '...' : ann.text;
-      text.style.fontSize = '13px';
-      text.style.fontWeight = '500';
-      item.appendChild(text);
-
-      if (ann.note) {
-        const note = document.createElement('div');
-        note.textContent = ann.note.length > 40 ? ann.note.slice(0, 40) + '...' : ann.note;
-        note.style.fontSize = '12px';
-        note.style.color = 'var(--text-muted, #999)';
-        note.style.marginTop = '2px';
-        item.appendChild(note);
-      }
-
-      const meta = document.createElement('div');
-      meta.textContent = `${ann.filePath ?? ''} ${ann.tags?.length ? '#'.concat(ann.tags.join(' #')) : ''}`;
-      meta.style.fontSize = '11px';
-      meta.style.color = 'var(--text-faint, #bbb)';
-      meta.style.marginTop = '2px';
-      item.appendChild(meta);
-
-      item.addEventListener('mouseenter', () => {
-        item.style.background = 'var(--background-modifier-hover, rgba(0,0,0,0.05))';
-      });
-      item.addEventListener('mouseleave', () => {
-        item.style.background = '';
-      });
-
-      item.addEventListener('click', () => {
-        const summary = ann.note
-          ? `${ann.text.slice(0, 30)} (${ann.note.slice(0, 20)})`
-          : ann.text.slice(0, 40);
-        this.onSelect(ann.uuid, summary);
-        this.close();
-      });
-    }
   }
 }
 
