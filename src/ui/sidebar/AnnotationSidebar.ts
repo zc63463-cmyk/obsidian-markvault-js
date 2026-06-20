@@ -54,6 +54,9 @@ export class AnnotationSidebar extends ItemView {
   // Phase 3: 字段过滤状态
   private fieldFilterEntries: Array<{ key: string; value: string }> = [];
 
+  // v6.1: 多选 tag 状态
+  private selectedTags: string[] = [];
+
   // Plugin 实例引用（用于访问 modifyGuard 等保护机制）
   private pluginInstance: import('../../utils/plugin-interface').MarkVaultPluginInterface | null = null;
 
@@ -92,6 +95,7 @@ export class AnnotationSidebar extends ItemView {
     this.filterBar = new FilterBar({
       filter: this.filter,
       fieldFilterEntries: this.fieldFilterEntries,
+      selectedTags: this.selectedTags,
       refreshListOnly: () => this.refreshListOnly(),
     });
     this.batchBar = new BatchBar({
@@ -515,6 +519,13 @@ export class AnnotationSidebar extends ItemView {
       }
     } else {
       this.filter.fieldFilters = undefined;
+    }
+
+    // v6.1: 同步多选 tag 到 filter
+    if (this.selectedTags.length > 0) {
+      this.filter.tags = this.selectedTags;
+    } else {
+      this.filter.tags = undefined;
     }
 
     // 更新过滤栏状态

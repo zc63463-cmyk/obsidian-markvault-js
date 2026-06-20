@@ -291,6 +291,18 @@ async function testFilterEngine() {
     if (r2.length !== 1 || r2[0].uuid !== 'a4') throw new Error('legacy groups still work');
   });
 
+  await test('Multi-tag AND filter', () => {
+    const r = applyUnifiedFilter(annsHierarchy, { tags: ['重要', '数据库'] });
+    if (r.length !== 1) throw new Error(`multi-tag AND: expected 1, got ${r.length}`);
+    if (r[0].uuid !== 'h1') throw new Error('multi-tag wrong uuid');
+  });
+
+  await test('Multi-tag AND with hierarchy prefix', () => {
+    const r = applyUnifiedFilter(annsHierarchy, { tags: ['数据库', '重要'] });
+    if (r.length !== 1) throw new Error(`hierarchy AND wrong, got ${r.length}`);
+    if (r[0].uuid !== 'h1') throw new Error('hierarchy AND wrong uuid');
+  });
+
   await test('needsCorrection filter', () => {
     const r = applyUnifiedFilter(anns, { needsCorrection: true });
     if (r.length !== 0) throw new Error('needsCorrection should be 0');

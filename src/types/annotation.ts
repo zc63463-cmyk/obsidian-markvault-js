@@ -740,7 +740,8 @@ export interface AnnotationFilter {
   hasRelations?: boolean;                  // 是否有关联
   group?: string | 'all';                  // 按分组过滤
   needsCorrection?: boolean;               // 按纠偏标记过滤
-  tag?: string | 'all';                    // 按标签过滤
+  tag?: string | 'all';                    // 按标签过滤（单选）
+  tags?: string[];                         // 按标签过滤（多选 AND）
 
   // v4.1: Motivation 语义过滤
   motivation?: AnnotationMotivation | 'all';  // 按标注意图过滤

@@ -11,6 +11,7 @@ import { getFieldKeys, getFieldValues, getGroupNames, getMergedGroupNames, getTa
 export interface FilterBarHost {
   filter: AnnotationFilter;
   fieldFilterEntries: Array<{ key: string; value: string }>;
+  selectedTags: string[];
   refreshListOnly(): Promise<void>;
 }
 
@@ -198,17 +199,46 @@ export class FilterBar {
       menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
-    // Tag 过滤（自定义 Popover：搜索框 + 频率排序列表）
+    // Tag 过滤（自定义 Popover + 多选 AND）
+    const selected = this.host.selectedTags;
+    const hasMulti = selected.length > 1;
+    const tagBtnText = selected.length === 0
+      ? '#'
+      : selected.length === 1
+        ? selected[0]
+        : `${selected.length} tags`;
     const tagBtn = metaRow.createEl('button', {
-      text: this.host.filter.tag && this.host.filter.tag !== 'all'
-        ? this.host.filter.tag
-        : '#',
-      cls: `markvault-filter-btn ${this.host.filter.tag && this.host.filter.tag !== 'all' ? 'active' : ''}`,
-      attr: { title: 'Filter by tag' },
+      text: tagBtnText,
+      cls: `markvault-filter-btn ${selected.length > 0 ? 'active' : ''}`,
+      attr: { title: hasMulti ? selected.join(', ') : 'Filter by tag' },
     });
     tagBtn.addEventListener('click', () => {
       this.showTagFilterPopover(tagBtn);
     });
+
+    // 多选 tag chips (显示在按钮后面)
+    if (hasMulti) {
+      for (const t of selected) {
+        const chip = metaRow.createEl('span', { cls: 'markvault-tag-filter-chip' });
+        chip.style.display = 'inline-flex';
+        chip.style.alignItems = 'center';
+        chip.style.gap = '2px';
+        chip.style.padding = '1px 6px';
+        chip.style.background = 'var(--interactive-accent, #483699)';
+        chip.style.color = '#fff';
+        chip.style.borderRadius = '10px';
+        chip.style.fontSize = '11px';
+        chip.style.cursor = 'pointer';
+        chip.textContent = t;
+        const x = chip.createSpan({ text: ' ×' });
+        x.style.opacity = '0.7';
+        chip.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          this.host.selectedTags = this.host.selectedTags.filter(st => st !== t);
+          await this.host.refreshListOnly();
+        });
+      }
+    }
 
     // Has Relations 过滤
     const relBtn = metaRow.createEl('button', {
@@ -393,6 +423,7 @@ export class FilterBar {
 
     // ── 通用行渲染 ──
     const createItemRow = (label: string, fullPath: string, count: number, depth: number, isActive: boolean): HTMLElement => {
+      const actuallyActive = isActive || this.host.selectedTags.includes(fullPath);
       const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
       item.style.display = 'flex';
       item.style.justifyContent = 'space-between';
@@ -435,8 +466,14 @@ export class FilterBar {
         if (!isActive) item.style.background = '';
       });
       item.addEventListener('click', async () => {
-        this.host.filter.tag = fullPath;
-        popover.remove();
+        // 多选 toggle：如果已在选中列表则移除，否则添加
+        const idx = this.host.selectedTags.indexOf(fullPath);
+        if (idx >= 0) {
+          this.host.selectedTags.splice(idx, 1);
+        } else {
+          this.host.selectedTags.push(fullPath);
+        }
+        // 不关闭 popover，允许连续选择；关闭 popover 需点击外部或按 Esc
         await this.host.refreshListOnly();
       });
       return item;
@@ -450,7 +487,7 @@ export class FilterBar {
         const hasMatchingChildren = !q || node.children.some(c => c.label.toLowerCase().includes(q));
 
         if (matchSelf || hasMatchingChildren) {
-          createItemRow(node.label, node.fullPath, node.count, depth, currentTag === node.fullPath);
+          createItemRow(node.label, node.fullPath, node.count, depth, false);
           if (node.children.length > 0) {
             renderTree(node.children, depth + 1, query);
           }
@@ -474,7 +511,7 @@ export class FilterBar {
         if (node.label.toLowerCase().includes(q)) {
           // 搜索模式显示完整路径
           const displayLabel = node.fullPath.includes('/') ? node.fullPath : node.label;
-          createItemRow(displayLabel, node.fullPath, node.count, 0, currentTag === node.fullPath);
+          createItemRow(displayLabel, node.fullPath, node.count, 0, false);
         }
       }
     };
@@ -497,7 +534,7 @@ export class FilterBar {
       }
       allItem.createSpan({ text: 'All tags' });
       allItem.addEventListener('click', async () => {
-        this.host.filter.tag = 'all';
+        this.host.selectedTags.length = 0; // 清空多选
         popover.remove();
         await this.host.refreshListOnly();
       });
@@ -515,6 +552,29 @@ export class FilterBar {
       }
 
       const hasHierarchy = rootNodes.some(n => n.children.length > 0);
+
+      // v6.1: 最近使用区（前5个高频标签，仅在无搜索时显示）
+      if (!q) {
+        const top5 = frequencies.slice(0, 5);
+        if (top5.length > 0) {
+          const recentLabel = listContainer.createDiv();
+          recentLabel.style.padding = '4px 10px 2px';
+          recentLabel.style.fontSize = '10px';
+          recentLabel.style.color = 'var(--text-faint, #aaa)';
+          recentLabel.style.textTransform = 'uppercase';
+          recentLabel.textContent = 'Frequent';
+          for (const f of top5) {
+            const pill = createItemRow(f.name, f.name, f.count, 0, false);
+            pill.style.background = this.host.selectedTags.includes(f.name)
+              ? 'var(--interactive-accent, #483699)'
+              : 'var(--background-modifier-hover, #f5f5f5)';
+          }
+          const sep = listContainer.createDiv();
+          sep.style.margin = '4px 10px';
+          sep.style.height = '1px';
+          sep.style.background = 'var(--background-modifier-border, #ddd)';
+        }
+      }
 
       if (q && hasHierarchy) {
         // 有搜索且有层级：走扁平路径（搜索模式）

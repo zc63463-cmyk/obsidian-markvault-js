@@ -47,6 +47,7 @@ const FIELD_WEIGHTS: Record<string, number> = {
   filePath: 4,
   groups: 3,
   fields: 2,
+  motivation: 2, // v6.1: 标注意图可搜索
 };
 
 /** CJK bigram 命中额外系数 */
@@ -55,6 +56,10 @@ const BIGRAM_BONUS = 1.5;
 /** BM25 参数 */
 const BM25_K1 = 1.5;  // TF 饱和参数
 const BM25_B  = 0.75; // 长度归一化参数
+
+/** 字段乘数映射 */
+const FIELD_MULTIPLIER_SCALE = 100;    // 权重归一化分母
+const FIELD_MULTIPLIER_FACTOR = 5;     // 字段差异放大因子
 
 /** 模糊搜索参数 */
 const FUZZY_DEFAULT_MAX_EXPANSIONS = 5;   // 每 token 最多扩展数
@@ -231,16 +236,15 @@ export class AnnotationSearchEngine {
    * 获取搜索建议（用于输入自动补全 / Relation Picker）。
    *
    * @param query 搜索查询
-   * @param limit 返回上限（默认 10）
+   * @param scoringModel 评分模型（默认 'weighted' 强调精确匹配，'bm25' 强调稀有词）
    */
-  suggest(query: string, limit: number = 10): Suggestion[] {
+  suggest(query: string, limit: number = 10, scoringModel: 'weighted' | 'bm25' = 'weighted'): Suggestion[] {
     if (!query || !query.trim()) return [];
 
     const tokens = tokenize(query);
     this._ensureIndex();
 
-    // suggest 默认使用 weighted 模型（更强调精确匹配，降低 IDF 噪声）
-    const scoredUuids = this._searchByTokens(tokens, { scoringModel: 'weighted' });
+    const scoredUuids = this._searchByTokens(tokens, { scoringModel });
     const suggestions: Suggestion[] = [];
 
     // 按分数降序排序，确保前 limit 条是最高分结果
@@ -641,7 +645,7 @@ export class AnnotationSearchEngine {
       const bm25Base = idf * tfComponent;
 
       // 字段权重：作为中等 multiplier（text:10 → 1.5x, fields:2 → 1.1x）
-      const fieldMultiplier = 1 + (maxFieldWeight / 100) * 5;
+      const fieldMultiplier = 1 + (maxFieldWeight / FIELD_MULTIPLIER_SCALE) * FIELD_MULTIPLIER_FACTOR;
 
       // CJK bigram 额外加成
       const isBigram = token.length >= 2 && [...token].some(ch => isCJK(ch.codePointAt(0) ?? 0));

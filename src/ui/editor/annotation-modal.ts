@@ -3,7 +3,7 @@ import { logger } from '../../utils/logger';
 import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
 import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS, MOTIVATION_OPTIONS, normalizeUserFieldKey, inferMotivation } from '../../types/annotation';
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations } from '../../db/annotation-repo';
+import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations, getTagFrequencies } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
 import { ConfirmModal, PromptModal } from '../confirm-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
@@ -177,7 +177,7 @@ export class AnnotationModal extends Modal {
         text.inputEl.addClass('markvault-modal-note-input');
       });
 
-    // 标签编辑
+    // 标签编辑（带自动补全）
     new Setting(contentEl)
       .setName('Tags')
       .setDesc('Comma-separated tags')
@@ -187,6 +187,9 @@ export class AnnotationModal extends Modal {
             this.tagsValue = value;
           });
         text.inputEl.addClass('markvault-modal-tags-input');
+
+        // 自动补全：监听输入，提示已有标签
+        this._setupTagAutocomplete(text.inputEl);
       });
 
     // ── Fields 编辑区 ──
@@ -435,6 +438,79 @@ export class AnnotationModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.component_.unload();
+  }
+
+  /** 标签自动补全 */
+  private _setupTagAutocomplete(inputEl: HTMLInputElement): void {
+    let suggestionEl2: HTMLElement | null = null;
+    let selectedIdx = 0;
+
+    const close = () => {
+      if (suggestionEl2) { suggestionEl2.remove(); suggestionEl2 = null; }
+      selectedIdx = 0;
+    };
+
+    inputEl.addEventListener('input', () => {
+      close();
+      const val = inputEl.value;
+      const segs = val.split(',');
+      const cur = segs[segs.length - 1].trim();
+      if (!cur) return;
+
+      const matches = getTagFrequencies()
+        .filter(f => f.name.toLowerCase().includes(cur.toLowerCase()) && f.name !== cur)
+        .slice(0, 6);
+      if (!matches.length) return;
+
+      suggestionEl2 = document.body.createDiv({ cls: 'markvault-tag-suggest' });
+      const r = inputEl.getBoundingClientRect();
+      Object.assign(suggestionEl2.style, {
+        position: 'fixed', left: `${r.left}px`, top: `${r.bottom + 2}px`,
+        width: `${r.width}px`, maxHeight: '200px', overflowY: 'auto',
+        background: 'var(--background-primary,#fff)',
+        border: '1px solid var(--background-modifier-border,#ccc)',
+        borderRadius: '6px', boxShadow: '0 2px 8px rgba(0,0,0,.12)',
+        zIndex: '9999', fontSize: '13px',
+      });
+
+      for (let i = 0; i < matches.length; i++) {
+        const item = suggestionEl2.createDiv({ cls: 'markvault-tag-suggest-item' });
+        Object.assign(item.style, { padding: '5px 10px', cursor: 'pointer' });
+        item.textContent = matches[i].name;
+        item.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const pre = segs.slice(0, -1).map(s => s.trim()).filter(Boolean).join(', ');
+          inputEl.value = pre ? `${pre}, ${matches[i].name}` : matches[i].name;
+          inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+          close(); inputEl.focus();
+        });
+        item.addEventListener('mouseenter', () => {
+          suggestionEl2?.querySelectorAll('.markvault-tag-suggest-item').forEach(el => (el as HTMLElement).style.background = '');
+          item.style.background = 'var(--interactive-accent,#483699)'; item.style.color = '#fff'; selectedIdx = i;
+        });
+      }
+
+      const onKey = (e: KeyboardEvent) => {
+        if (!suggestionEl2) return;
+        const items = suggestionEl2.querySelectorAll<HTMLElement>('.markvault-tag-suggest-item');
+        if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = Math.min(selectedIdx + 1, items.length - 1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = Math.max(selectedIdx - 1, 0); }
+        else if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          if (matches[selectedIdx]) {
+            const pre = segs.slice(0, -1).map(s => s.trim()).filter(Boolean).join(', ');
+            inputEl.value = pre ? `${pre}, ${matches[selectedIdx].name}` : matches[selectedIdx].name;
+            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          close(); inputEl.focus(); return;
+        } else if (e.key === 'Escape') { close(); return; }
+        items.forEach((el, i) => {
+          el.style.background = i === selectedIdx ? 'var(--interactive-accent,#483699)' : '';
+          el.style.color = i === selectedIdx ? '#fff' : '';
+        });
+      };
+      inputEl.addEventListener('keydown', onKey, { once: true });
+    }, { passive: true });
   }
 
   /** 更新预览样式 */

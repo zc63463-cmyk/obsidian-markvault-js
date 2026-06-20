@@ -53,6 +53,7 @@ export function hasActiveFilters(filter: AnnotationFilter): boolean {
   if (filter.needsCorrection === true) return true;
   if (filter.motivation && filter.motivation !== 'all') return true;
   if (filter.tag && filter.tag !== 'all') return true;
+  if (filter.tags && filter.tags.length > 0) return true;
   return false;
 }
 
@@ -137,6 +138,15 @@ export function applyUnifiedFilter(
     const tagVal = filter.tag as string;
     results = results.filter(a =>
       a.tags.some(t => t === tagVal || t.startsWith(tagVal + '/'))
+    );
+  }
+
+  // v6.1: 多选 tag (AND 逻辑 + 层级 prefix)
+  if (filter.tags && filter.tags.length > 0) {
+    results = results.filter(a =>
+      filter.tags!.every(requested =>
+        a.tags.some(t => t === requested || t.startsWith(requested + '/'))
+      )
     );
   }
 
