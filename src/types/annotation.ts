@@ -824,6 +824,7 @@ export interface MarkVaultSettings {
   annotationTemplates: AnnotationTemplate[];  // v4.1: 标注模板（预设 type+color+motivation 组合）
   customTemplates: AnnotationTemplate[];      // v5.14: 用户自定义模板（Settings CRUD 管理）
   customRelationTypes: RelationTypeConfig[];  // v4.3: 关系类型配置（Schema-First）
+  knownGroups: string[];                      // v6.1: 用户手动创建的 group 列表（持久化）
 }
 
 export const DEFAULT_SETTINGS: MarkVaultSettings = {
@@ -858,4 +859,5 @@ export const DEFAULT_SETTINGS: MarkVaultSettings = {
   annotationTemplates: DEFAULT_ANNOTATION_TEMPLATES,
   customTemplates: [],                          // v5.14: 用户自定义模板（初始为空）
   customRelationTypes: DEFAULT_RELATION_TYPE_CONFIGS,
+  knownGroups: [],                              // v6.1: 用户手动创建的 group 列表
 };

@@ -6,13 +6,14 @@
  */
 
 import { App, Modal, Notice, Setting, TextComponent } from 'obsidian';
-import { getTagFrequencies, getGroupNames, getAllAnnotations } from '../../../db/annotation-repo';
+import { getTagFrequencies, getGroupNames, getAllAnnotations, getKnownGroups, addKnownGroup } from '../../../db/annotation-repo';
 import type { AnnotationStore } from '../../../db/annotation-store';
 
 interface TagManagerHost {
   app: App;
   store: AnnotationStore;
   refresh(): Promise<void>;
+  onGroupsChanged?(): void;
 }
 
 /** tag 及其出现的 group 信息 */
@@ -24,7 +25,6 @@ interface TagInfo {
 
 export class TagManager {
   private host: TagManagerHost;
-  private _knownGroups: string[] = [];
   private _container: HTMLElement | null = null;
 
   constructor(host: TagManagerHost) {
@@ -82,7 +82,7 @@ export class TagManager {
     const groups = getGroupNames();
 
     // 合并已知分组（用户手动创建但尚无标注使用的）
-    for (const kg of this._knownGroups) {
+    for (const kg of getKnownGroups()) {
       if (!groups.includes(kg)) groups.push(kg);
     }
 
@@ -224,7 +224,8 @@ export class TagManager {
         text.inputEl.style.width = '100%';
         text.inputEl.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' && text.getValue().trim()) {
-            this._knownGroups.push(text.getValue().trim());
+            addKnownGroup(text.getValue().trim());
+            this.host.onGroupsChanged?.();
             modal.close();
             this.render(container);
           }
@@ -239,7 +240,8 @@ export class TagManager {
     okBtn.addEventListener('click', () => {
       const input = contentEl.querySelector('input') as HTMLInputElement;
       if (input?.value.trim()) {
-        this._knownGroups.push(input.value.trim());
+        addKnownGroup(input.value.trim());
+        this.host.onGroupsChanged?.();
         modal.close();
         this.render(container);
       }

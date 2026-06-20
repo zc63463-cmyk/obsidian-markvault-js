@@ -558,7 +558,6 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
 
   async loadSettings() {
     const data = await this.loadData();
-    // loadData() 首次返回 null，Object.assign 能正确处理
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 
     // v4.3: 兼容旧设置 — 如果没有 customRelationTypes，填充默认值
@@ -570,6 +569,10 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
     if (!this.settings.customTemplates) {
       this.settings.customTemplates = [];
     }
+
+    // v6.1: 同步 knownGroups 到 annotation-repo
+    const { setKnownGroups } = await import('./db/annotation-repo');
+    setKnownGroups(this.settings.knownGroups ?? []);
 
     // v4.3: 重建 RelationSchema（设置加载后必须重建）
     this.relationSchema = new RelationSchema(this.settings.customRelationTypes);

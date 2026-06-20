@@ -9,6 +9,7 @@ import {
   getAllAnnotations,
   getAnnotationByUuid,
   getRelations,
+  getKnownGroups,
 } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 import { applyUnifiedFilter, hasActiveFilters } from '../../search/filter-engine';
@@ -142,6 +143,13 @@ export class AnnotationSidebar extends ItemView {
       app: this.app,
       store: annotationStore,
       refresh: async () => { this.activeTab = 'tags'; await this.renderContent(); },
+      onGroupsChanged: () => {
+        const plugin = this.pluginInstance;
+        if (plugin) {
+          plugin.settings.knownGroups = getKnownGroups();
+          plugin.saveSettings();
+        }
+      },
     });
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', () => {

@@ -177,9 +177,19 @@ export async function removeGroupFromAnnotation(uuid: string, group: string): Pr
   await annotationStore.removeGroupFromAnnotation(uuid, group);
 }
 
-/** 获取所有分组名列表 */
+/** 获取所有分组名列表（annotation groups + settings knownGroups） */
 export function getGroupNames(): string[] {
-  return annotationStore.getGroupNames();
+  const names = new Set(annotationStore.getGroupNames());
+  for (const g of __knownGroups) names.add(g);
+  return Array.from(names).sort();
+}
+
+// v6.1: Settings 中的 knownGroups，由插件在 loadSettings 后同步
+let __knownGroups: string[] = [];
+export function getKnownGroups(): string[] { return __knownGroups; }
+export function setKnownGroups(groups: string[]) { __knownGroups = groups; }
+export function addKnownGroup(name: string): void {
+  if (!__knownGroups.includes(name)) { __knownGroups.push(name); __knownGroups.sort(); }
 }
 
 /** 获取合并分组名（groups 字段 + tags 中 group: 前缀） */
