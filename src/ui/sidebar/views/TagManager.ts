@@ -24,6 +24,7 @@ interface TagInfo {
 
 export class TagManager {
   private host: TagManagerHost;
+  private _knownGroups: string[] = [];
 
   constructor(host: TagManagerHost) {
     this.host = host;
@@ -35,9 +36,16 @@ export class TagManager {
     header.style.cssText = 'padding:8px 0 12px;border-bottom:1px solid var(--background-modifier-border,#ddd);margin-bottom:8px';
     header.createSpan({ text: '🏷️ Tag Manager', cls: 'markvault-tagmanager-title' }).style.cssText = 'font-weight:600;font-size:14px';
 
-    const refreshBtn = header.createEl('button', { text: '🔄 Refresh' });
-    refreshBtn.style.cssText = 'float:right;font-size:11px;padding:2px 8px;cursor:pointer';
-    refreshBtn.addEventListener('click', async () => { this.render(container); });
+    const actions = header.createSpan();
+    actions.style.cssText = 'float:right;display:flex;gap:4px';
+
+    const newGroupBtn = actions.createEl('button', { text: '+ Group' });
+    newGroupBtn.style.cssText = 'font-size:11px;padding:2px 8px;cursor:pointer;border:1px solid var(--background-modifier-border,#ccc);border-radius:4px;background:var(--interactive-accent,#483699);color:#fff';
+    newGroupBtn.addEventListener('click', () => { this.showNewGroupDialog(container); });
+
+    const refreshBtn = actions.createEl('button', { text: '🔄' });
+    refreshBtn.style.cssText = 'font-size:11px;padding:2px 6px;cursor:pointer';
+    refreshBtn.addEventListener('click', () => { this.render(container); });
 
     const listEl = container.createDiv({ cls: 'markvault-tagmanager-list' });
     listEl.style.cssText = 'max-height:calc(100vh - 220px);overflow-y:auto';
@@ -69,6 +77,11 @@ export class TagManager {
 
     const tagGroups = await this.collectTagGroups();
     const groups = getGroupNames();
+
+    // 合并已知分组（用户手动创建但尚无标注使用的）
+    for (const kg of this._knownGroups) {
+      if (!groups.includes(kg)) groups.push(kg);
+    }
 
     // 构建 group → tags 映射
     const grouped = new Map<string, Array<{ name: string; count: number }>>();
@@ -174,6 +187,43 @@ export class TagManager {
   }
 
   // ─── Group 操作 ───
+
+  private showNewGroupDialog(container: HTMLElement): void {
+    const modal = new Modal(this.host.app);
+    const { contentEl } = modal;
+    contentEl.style.cssText = 'padding:16px;min-width:280px';
+    modal.titleEl.setText('New Group');
+
+    new Setting(contentEl)
+      .setName('Group name')
+      .setDesc('Create a new group to categorize tags')
+      .addText((text: TextComponent) => {
+        text.setPlaceholder('e.g. 学习, 测试, 练习');
+        text.inputEl.style.width = '100%';
+        text.inputEl.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && text.getValue().trim()) {
+            this._knownGroups.push(text.getValue().trim());
+            modal.close();
+            this.render(container);
+          }
+        });
+      });
+
+    const footer = contentEl.createDiv();
+    footer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:12px';
+    footer.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
+    const okBtn = footer.createEl('button', { text: 'Create' });
+    okBtn.style.cssText = 'background:var(--interactive-accent,#483699);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
+    okBtn.addEventListener('click', () => {
+      const input = contentEl.querySelector('input') as HTMLInputElement;
+      if (input?.value.trim()) {
+        this._knownGroups.push(input.value.trim());
+        modal.close();
+        this.render(container);
+      }
+    });
+    modal.open();
+  }
 
   private showGroupRenameDialog(oldName: string, tags: Array<{ name: string; count: number }>): void {
     const modal = new Modal(this.host.app);
