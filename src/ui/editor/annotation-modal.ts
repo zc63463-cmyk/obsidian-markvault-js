@@ -509,7 +509,17 @@ export class AnnotationModal extends Modal {
           el.style.color = i === selectedIdx ? '#fff' : '';
         });
       };
-      inputEl.addEventListener('keydown', onKey, { once: true });
+      // P1 fix: 移除 { once: true }，允许连续方向键导航
+      // 之前每次 input 事件注册 onKey（once），导致第一次 keydown 后 handler 被移除
+      // 改为持久注册，在 close() 时手动移除
+      const onKeyHandler = (e: KeyboardEvent) => {
+        if (!suggestionEl2 || suggestionEl2.style.display === 'none') {
+          inputEl.removeEventListener('keydown', onKeyHandler);
+          return;
+        }
+        onKey(e);
+      };
+      inputEl.addEventListener('keydown', onKeyHandler);
     }, { passive: true });
   }
 
@@ -750,10 +760,13 @@ export class AnnotationModal extends Modal {
   }
 
   private async save() {
-    const tags = this.tagsValue
-      .split(',')
-      .map(t => t.trim())
-      .filter(Boolean);
+    // P1 fix: tag 去重，避免 ['foo','foo','bar']
+    const tags = [...new Set(
+      this.tagsValue
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean)
+    )];
 
     const updates: Partial<Annotation> = {
       note: this.noteValue,

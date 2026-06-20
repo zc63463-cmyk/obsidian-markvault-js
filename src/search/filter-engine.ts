@@ -97,29 +97,33 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.note && a.note.trim().length > 0);
   }
 
-  // —— 字段过滤（v4.1: u: 命名空间兼容匹配） ——
-  if (filter.fieldFilters && Object.keys(filter.fieldFilters).length > 0) {
+  // —— 字段过滤（P1 fix: 合并 fieldFilters 和 fieldFiltersMulti，避免同 key 冲突） ——
+  // fieldFilters (单值) 先合并到 fieldFiltersMulti (多值)，统一走 OR 逻辑
+  const mergedFieldFilters: Record<string, string[]> = {};
+  if (filter.fieldFilters) {
     for (const [key, value] of Object.entries(filter.fieldFilters)) {
-      results = results.filter(a => {
-        if (!a.fields) return false;
-        if (a.fields[key] !== undefined && a.fields[key] === value) return true;
-        const strippedKey = stripUserFieldPrefix(key);
-        if (strippedKey !== key && a.fields[strippedKey] !== undefined && a.fields[strippedKey] === value) return true;
-        const prefixedKey = 'u:' + key;
-        if (a.fields[prefixedKey] !== undefined && a.fields[prefixedKey] === value) return true;
-        return false;
-      });
+      if (!mergedFieldFilters[key]) mergedFieldFilters[key] = [];
+      if (!mergedFieldFilters[key].includes(value)) mergedFieldFilters[key].push(value);
+    }
+  }
+  if (filter.fieldFiltersMulti) {
+    for (const [key, values] of Object.entries(filter.fieldFiltersMulti)) {
+      if (!mergedFieldFilters[key]) mergedFieldFilters[key] = [];
+      for (const v of values) {
+        if (!mergedFieldFilters[key].includes(v)) mergedFieldFilters[key].push(v);
+      }
     }
   }
 
-  // v6.1: 分面多值过滤（同 key 内 OR，跨 key AND）
-  if (filter.fieldFiltersMulti && Object.keys(filter.fieldFiltersMulti).length > 0) {
-    for (const [key, values] of Object.entries(filter.fieldFiltersMulti)) {
+  if (Object.keys(mergedFieldFilters).length > 0) {
+    for (const [key, values] of Object.entries(mergedFieldFilters)) {
       results = results.filter(a => {
         if (!a.fields) return false;
+        const strippedKey = stripUserFieldPrefix(key);
+        const prefixedKey = 'u:' + key;
         const match = (v: string) => a.fields![key] === v
-          || a.fields![stripUserFieldPrefix(key)] === v
-          || a.fields!['u:' + key] === v;
+          || a.fields![strippedKey] === v
+          || a.fields![prefixedKey] === v;
         return values.some(v => match(v));
       });
     }
@@ -140,20 +144,18 @@ export function applyUnifiedFilter(
     results = results.filter(a => a.groups?.includes(groupVal) ?? false);
   }
 
-  // v5.x: tag 过滤（v6.0 层级支持：筛选父级自动包含所有子标签）
-  if (filter.tag && filter.tag !== 'all') {
-    const tagVal = filter.tag as string;
-    results = results.filter(a =>
-      a.tags.some(t => t === tagVal || t.startsWith(tagVal + '/'))
-    );
-  }
-
-  // v6.1: 多选 tag (AND 逻辑 + 层级 prefix)
+  // v5.x+v6.1: tag 过滤（P1 fix: tag 和 tags 互斥，tags 优先）
+  // 旧 filter.tag 单选已废弃，仅当 tags 未设置时回退使用
   if (filter.tags && filter.tags.length > 0) {
     results = results.filter(a =>
       filter.tags!.every(requested =>
         a.tags.some(t => t === requested || t.startsWith(requested + '/'))
       )
+    );
+  } else if (filter.tag && filter.tag !== 'all') {
+    const tagVal = filter.tag as string;
+    results = results.filter(a =>
+      a.tags.some(t => t === tagVal || t.startsWith(tagVal + '/'))
     );
   }
 
