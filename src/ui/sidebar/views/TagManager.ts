@@ -44,7 +44,8 @@ export class TagManager {
     newGroupBtn.addEventListener('click', () => { this.showNewGroupDialog(container); });
 
     const refreshBtn = actions.createEl('button', { text: '🔄' });
-    refreshBtn.style.cssText = 'font-size:11px;padding:2px 6px;cursor:pointer';
+    refreshBtn.style.cssText = 'font-size:14px;padding:2px 6px;cursor:pointer;border:1px solid var(--background-modifier-border,#ccc);border-radius:4px;background:transparent;line-height:1';
+    Object.assign(refreshBtn, { title: 'Refresh' });
     refreshBtn.addEventListener('click', () => { this.render(container); });
 
     const listEl = container.createDiv({ cls: 'markvault-tagmanager-list' });
