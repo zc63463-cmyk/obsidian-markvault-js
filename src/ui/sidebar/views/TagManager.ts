@@ -25,12 +25,14 @@ interface TagInfo {
 export class TagManager {
   private host: TagManagerHost;
   private _knownGroups: string[] = [];
+  private _container: HTMLElement | null = null;
 
   constructor(host: TagManagerHost) {
     this.host = host;
   }
 
   render(container: HTMLElement): void {
+    this._container = container;
     container.empty();
     const header = container.createDiv({ cls: 'markvault-tagmanager-header' });
     header.style.cssText = 'padding:8px 0 12px;border-bottom:1px solid var(--background-modifier-border,#ddd);margin-bottom:8px';
@@ -155,10 +157,8 @@ export class TagManager {
 
     if (tags.length === 0 && groupName !== '自由') {
       body.createDiv({ text: 'No tags in this group' }).style.cssText = 'padding:8px 16px;color:var(--text-muted,#888);font-size:12px';
-      return;
-    }
-
-    for (const t of tags) {
+    } else {
+      for (const t of tags) {
       const row = body.createDiv();
       row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:4px 12px;border-radius:6px;font-size:12px;transition:background .1s';
       row.addEventListener('mouseenter', () => row.style.background = 'var(--background-modifier-hover,rgba(0,0,0,.05))');
@@ -185,6 +185,27 @@ export class TagManager {
       dl.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
       dl.addEventListener('click', (e) => { e.stopPropagation(); this.showDeleteConfirm(t.name); });
     }
+  }
+
+    // + Add Tag 输入行
+    const addRow = body.createDiv();
+    addRow.style.cssText = 'display:flex;align-items:center;padding:4px 12px;margin-top:2px';
+    const addInput = addRow.createEl('input', { type: 'text', attr: { placeholder: '+ Add tag...' } });
+    addInput.style.cssText = 'flex:1;padding:3px 8px;border:1px dashed var(--background-modifier-border,#ccc);border-radius:4px;font-size:11px;background:transparent;color:var(--text-muted,#888);outline:none;min-width:0';
+    addInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter' && addInput.value.trim()) {
+        const tagName = addInput.value.trim();
+        addInput.value = '';
+        const all = await getAllAnnotations();
+        if (all.length === 0) { new Notice('No annotations. Create one first.'); return; }
+        const target = all.find(a => !a.tags.includes(tagName)) ?? all[0];
+        if (!target.groups) target.groups = [];
+        if (!target.groups.includes(groupName)) target.groups.push(groupName);
+        if (!target.tags.includes(tagName)) target.tags.push(tagName);
+        new Notice(`Added "${tagName}" to ${groupName}`);
+        if (this._container) this.render(this._container);
+      }
+    });
   }
 
   // ─── Group 操作 ───
