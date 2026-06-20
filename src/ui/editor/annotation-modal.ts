@@ -3,7 +3,7 @@ import { logger } from '../../utils/logger';
 import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
 import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS, MOTIVATION_OPTIONS, normalizeUserFieldKey, inferMotivation } from '../../types/annotation';
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations, getTagFrequencies } from '../../db/annotation-repo';
+import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations, getTagFrequencies, getAllAnnotations } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
 import { ConfirmModal, PromptModal } from '../confirm-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
@@ -33,6 +33,7 @@ export class AnnotationModal extends Modal {
   private onSave: (annotation: Annotation) => void;
   private onDelete: (uuid: string) => void;
   private component_: Component;
+  private _groupSuggestionsEl: HTMLElement | null = null; // v6.1: Group 建议容器
 
   constructor(
     app: App,
@@ -177,7 +178,7 @@ export class AnnotationModal extends Modal {
         text.inputEl.addClass('markvault-modal-note-input');
       });
 
-    // 标签编辑（带自动补全）
+    // 标签编辑（带自动补全 + Group 建议）
     new Setting(contentEl)
       .setName('Tags')
       .setDesc('Comma-separated tags')
@@ -185,6 +186,8 @@ export class AnnotationModal extends Modal {
         text.setValue(this.tagsValue)
           .onChange((value) => {
             this.tagsValue = value;
+            // 刷新 Group 建议
+            this.refreshGroupSuggestions();
           });
         text.inputEl.addClass('markvault-modal-tags-input');
 
@@ -318,6 +321,12 @@ export class AnnotationModal extends Modal {
 
     const groupsListEl = groupsSection.createDiv({ cls: 'markvault-modal-groups-list' });
     this.renderGroupTags(groupsListEl);
+
+    // v6.1: Group 智能建议区
+    const suggestionsEl = groupsSection.createDiv({ cls: 'markvault-modal-group-suggestions' });
+    suggestionsEl.style.cssText = 'display:none;margin:4px 0;font-size:12px;color:var(--text-muted,#888)';
+    this._groupSuggestionsEl = suggestionsEl;
+    this.refreshGroupSuggestions();
 
     // Add Group 按钮
     const addGroupBtn = groupsSection.createEl('button', {
@@ -663,6 +672,57 @@ export class AnnotationModal extends Modal {
       removeBtn.addEventListener('click', () => {
         this.groupsValue = this.groupsValue.filter(g => g !== group);
         this.renderGroupTags(container);
+      });
+    }
+  }
+
+  /** v6.1: 根据当前 tags 推荐关联的 Group */
+  private async refreshGroupSuggestions(): Promise<void> {
+    if (!this._groupSuggestionsEl) return;
+    this._groupSuggestionsEl.empty();
+    this._groupSuggestionsEl.style.display = 'none';
+
+    const currentTags = this.tagsValue.split(',').map(t => t.trim()).filter(Boolean);
+    if (currentTags.length === 0) return;
+
+    const groupCounts = new Map<string, number>();
+    const all = await getAllAnnotations();
+    for (const ann of all) {
+      const hasMatch = currentTags.some(t => ann.tags.includes(t));
+      if (!hasMatch) continue;
+      for (const g of (ann.groups || [])) {
+        if (this.groupsValue.includes(g)) continue;
+        groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
+      }
+    }
+    if (groupCounts.size === 0) return;
+
+    this._groupSuggestionsEl.style.display = 'block';
+    const label = this._groupSuggestionsEl.createSpan({ text: '💡 Suggest: ' });
+    label.style.cssText = 'font-size:11px;color:var(--text-muted,#888)';
+
+    const sorted = [...groupCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    for (const [group, count] of sorted) {
+      const chip = this._groupSuggestionsEl.createSpan({
+        text: `${group} (${count})`,
+        cls: 'markvault-modal-group-suggest-chip',
+      });
+      chip.style.cssText = 'display:inline-block;padding:2px 8px;margin:2px 4px;background:var(--background-secondary,#f0f0f0);border:1px dashed var(--background-modifier-border,#ccc);border-radius:10px;cursor:pointer;font-size:11px;transition:all .15s';
+      chip.addEventListener('mouseenter', () => {
+        chip.style.background = 'var(--interactive-accent,#483699)'; chip.style.color = '#fff';
+        chip.style.borderColor = 'var(--interactive-accent,#483699)';
+      });
+      chip.addEventListener('mouseleave', () => {
+        chip.style.background = 'var(--background-secondary,#f0f0f0)'; chip.style.color = '';
+        chip.style.borderColor = 'var(--background-modifier-border,#ccc)';
+      });
+      chip.addEventListener('click', () => {
+        if (!this.groupsValue.includes(group)) {
+          this.groupsValue.push(group);
+          const groupsListEl = this.contentEl.querySelector('.markvault-modal-groups-list') as HTMLElement;
+          if (groupsListEl) this.renderGroupTags(groupsListEl);
+          this.refreshGroupSuggestions();
+        }
       });
     }
   }
