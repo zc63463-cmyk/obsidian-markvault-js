@@ -1,7 +1,7 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
-import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
+import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies, getAllAnnotations } from '../../../db/annotation-repo';
 
 /** 标签树节点 */
 interface TagTreeNode {
@@ -792,6 +792,53 @@ export class FilterBar {
     const hasTags = this.host.getSelectedTags().length > 0;
     const { body: tagsBody } = createSection(scrollContainer, 'Tags', hasTags);
 
+    // v6.1: Group 筛选栏 — 按关联分组过滤标签
+    const groupChips = tagsBody.createDiv();
+    groupChips.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;padding:4px 10px';
+    let activeGroup: string | null = null;
+
+    // 一次性构建 tag→groups 映射
+    let tagGroupsMap: Map<string, Set<string>> | null = null;
+    const ensureTagGroups = async () => {
+      if (tagGroupsMap) return;
+      tagGroupsMap = new Map();
+      const all = await getAllAnnotations();
+      for (const ann of all) {
+        const gs = ann.groups ?? [];
+        for (const t of ann.tags) {
+          let set = tagGroupsMap.get(t);
+          if (!set) { set = new Set(); tagGroupsMap.set(t, set); }
+          for (const g of gs) set.add(g);
+        }
+      }
+    };
+
+    const getFilteredFrequencies = (groupFilter: string | null) => {
+      const allFreqs = getTagFrequencies();
+      if (!groupFilter || !tagGroupsMap) return allFreqs;
+      return allFreqs.filter(f => tagGroupsMap!.get(f.name)?.has(groupFilter));
+    };
+
+    const renderGroupChips = () => {
+      groupChips.empty();
+      const groups = getGroupNames();
+      const allChip = groupChips.createSpan({ text: 'All' });
+      allChip.style.cssText = 'padding:1px 8px;border-radius:8px;cursor:pointer;font-size:11px;border:1px solid var(--background-modifier-border,#ddd);transition:all .15s';
+      if (!activeGroup) { allChip.style.background = 'var(--interactive-accent,#483699)'; allChip.style.color = '#fff'; allChip.style.borderColor = 'var(--interactive-accent,#483699)'; }
+      allChip.addEventListener('click', () => { activeGroup = null; renderGroupChips(); renderTagList(tagSearch.value); });
+
+      for (const g of groups.slice(0, 5)) {
+        const chip = groupChips.createSpan({ text: g });
+        chip.style.cssText = 'padding:1px 8px;border-radius:8px;cursor:pointer;font-size:11px;border:1px solid var(--background-modifier-border,#ddd);transition:all .15s;white-space:nowrap';
+        if (activeGroup === g) { chip.style.background = 'var(--interactive-accent,#483699)'; chip.style.color = '#fff'; chip.style.borderColor = 'var(--interactive-accent,#483699)'; }
+        chip.addEventListener('click', async () => { await ensureTagGroups(); activeGroup = g; renderGroupChips(); renderTagList(tagSearch.value); });
+      }
+    };
+    renderGroupChips();
+
+    // 后台加载 tag→groups 映射
+    ensureTagGroups();
+
     const tagSearch = tagsBody.createEl('input', {
       type: 'text',
       attr: { placeholder: 'Search tags...' },
@@ -813,34 +860,49 @@ export class FilterBar {
     tagList.style.overflowY = 'auto';
     tagList.style.padding = '4px 0';
 
-    const tagTree = this.buildTagTree();
-    const { rootNodes, nodeMap, frequencies } = tagTree;
+    // 动态构建标签树（按 Group 筛选后重建）
+    const rebuildTagTree = () => {
+      const filteredFreqs = getFilteredFrequencies(activeGroup);
+      // 重建树：复制 buildTagTree 逻辑但用 filteredFreqs
+      const rootNodes: TagTreeNode[] = [];
+      const nodeMap = new Map<string, TagTreeNode>();
+      for (const f of filteredFreqs) {
+        const parts = f.name.split('/');
+        let parentList = rootNodes;
+        let parentPath = '';
+        for (let i = 0; i < parts.length; i++) {
+          const seg = parts[i];
+          const currentPath = parentPath ? `${parentPath}/${seg}` : seg;
+          let node = nodeMap.get(currentPath);
+          if (!node) { node = { fullPath: currentPath, label: seg, children: [], count: 0 }; nodeMap.set(currentPath, node); parentList.push(node); }
+          if (i === parts.length - 1) node.count = f.count;
+          parentList = node.children;
+          parentPath = currentPath;
+        }
+      }
+      const computeCounts = (nodes: TagTreeNode[]): number => {
+        let total = 0;
+        for (const n of nodes) { const s = computeCounts(n.children); if (n.count === 0) n.count = s; total += n.count; }
+        return total;
+      };
+      computeCounts(rootNodes);
+      return { rootNodes, nodeMap, filteredFreqs };
+    };
 
     // v6.1: 标签行渲染（内联版）
-    const createTagRow = (fullPath: string, label: string, count: number, depth: number): HTMLElement => {
+    const createTagRow = (fullPath: string, label: string, count: number, depth: number, _nm: Map<string, TagTreeNode>): HTMLElement => {
       const isActive = this.host.getSelectedTags().includes(fullPath);
       const item = tagList.createDiv();
       Object.assign(item.style, {
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: '4px 10px',
-        paddingLeft: `${10 + depth * 14}px`,
-        borderRadius: '4px',
-        cursor: 'pointer',
-        fontSize: '12px',
-        transition: 'background 0.1s',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '4px 10px', paddingLeft: `${10 + depth * 14}px`,
+        borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: 'background 0.1s',
       });
-      if (isActive) {
-        item.style.background = 'var(--interactive-accent, #483699)';
-        item.style.color = '#fff';
-      }
+      if (isActive) { item.style.background = 'var(--interactive-accent, #483699)'; item.style.color = '#fff'; }
 
       const leftSide = item.createSpan();
-      if (depth > 0 && !isActive) {
-        leftSide.style.color = 'var(--text-faint, #bbb)';
-      }
-      const hasChildren = (nodeMap.get(fullPath)?.children?.length ?? 0) > 0;
+      if (depth > 0 && !isActive) { leftSide.style.color = 'var(--text-faint, #bbb)'; }
+      const hasChildren = (_nm.get(fullPath)?.children?.length ?? 0) > 0;
       const icon = hasChildren ? '▸ ' : '  ';
       leftSide.appendText(icon + label);
 
@@ -871,56 +933,49 @@ export class FilterBar {
       return item;
     };
 
-    const renderTagTree = (nodes: TagTreeNode[], depth: number, query: string) => {
-      const q = query.toLowerCase();
-      for (const node of nodes) {
-        const matchSelf = !q || node.label.toLowerCase().includes(q);
-        const hasMatchingChildren = !q || node.children.some(c => c.label.toLowerCase().includes(q));
-        if (matchSelf || hasMatchingChildren) {
-          createTagRow(node.fullPath, node.label, node.count, depth);
-          if (node.children.length > 0) {
-            renderTagTree(node.children, depth + 1, query);
-          }
-        }
-      }
-    };
-
-    const renderFlatSearch = (query: string) => {
-      const q = query.toLowerCase();
-      const allNodes = [...nodeMap.values()];
-      allNodes.sort((a, b) => {
-        const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
-        const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
-        if (aStarts !== bStarts) return aStarts - bStarts;
-        return b.count - a.count || a.label.localeCompare(b.label);
-      });
-      for (const node of allNodes) {
-        if (node.label.toLowerCase().includes(q)) {
-          const displayLabel = node.fullPath.includes('/') ? node.fullPath : node.label;
-          createTagRow(node.fullPath, displayLabel, node.count, 0);
-        }
-      }
-    };
+    // (旧 renderTagTree / renderFlatSearch 已由 renderTagList 内的 renderLocalTagTree / renderLocalFlat 取代)
 
     const renderTagList = (query: string) => {
       tagList.empty();
       const q = query.toLowerCase().trim();
+      const { rootNodes: rn, nodeMap: nm } = rebuildTagTree();
 
-      if (rootNodes.length === 0) {
+      if (rn.length === 0) {
         const noItem = tagList.createDiv();
-        noItem.style.padding = '12px 10px';
-        noItem.style.textAlign = 'center';
-        noItem.style.color = 'var(--text-muted, #888)';
-        noItem.style.fontSize = '11px';
-        noItem.textContent = 'No tags in any annotation';
+        noItem.style.padding = '12px 10px'; noItem.style.textAlign = 'center';
+        noItem.style.color = 'var(--text-muted, #888)'; noItem.style.fontSize = '11px';
+        noItem.textContent = activeGroup ? `No tags in "${activeGroup}"` : 'No tags in any annotation';
         return;
       }
 
-      if (q) {
-        renderFlatSearch(q);
-      } else {
-        renderTagTree(rootNodes, 0, '');
-      }
+      const renderLocalTagTree = (nodes: TagTreeNode[], depth: number) => {
+        for (const node of nodes) {
+          const matchSelf = !q || node.label.toLowerCase().includes(q);
+          const hasMatchingChildren = !q || node.children.some(c => c.label.toLowerCase().includes(q));
+          if (matchSelf || hasMatchingChildren) {
+            createTagRow(node.fullPath, node.label, node.count, depth, nm);
+            if (node.children.length > 0) renderLocalTagTree(node.children, depth + 1);
+          }
+        }
+      };
+
+      const renderLocalFlat = () => {
+        const allNodes = [...nm.values()];
+        allNodes.sort((a, b) => {
+          const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
+          const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
+          if (aStarts !== bStarts) return aStarts - bStarts;
+          return b.count - a.count || a.label.localeCompare(b.label);
+        });
+        for (const node of allNodes) {
+          if (node.label.toLowerCase().includes(q)) {
+            const displayLabel = node.fullPath.includes('/') ? node.fullPath : node.label;
+            createTagRow(node.fullPath, displayLabel, node.count, 0, nm);
+          }
+        }
+      };
+
+      if (q) { renderLocalFlat(); } else { renderLocalTagTree(rn, 0); }
     };
 
     renderTagList('');
