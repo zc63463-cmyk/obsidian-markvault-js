@@ -669,23 +669,39 @@ export class AnnotationStore {
     return count;
   }
 
-  /** 将 tag 关联到 group：找到第一个含此 tag 但无此 group 的标注，添加 group */
+  /** 将 tag 关联到 group */
   async addTagToGroup(tag: string, group: string): Promise<boolean> {
     this._assertInitialized();
     const tagUuids = this.indexLayer.byTag.get(tag);
-    if (!tagUuids || tagUuids.size === 0) return false;
 
-    // 优先找已有此 tag 但无此 group 的标注
-    let target: string | null = null;
-    for (const uuid of tagUuids) {
-      const ann = this.indexLayer.byUuid.get(uuid);
-      if (ann && !(ann.groups?.includes(group))) { target = uuid; break; }
-    }
-    if (!target) {
-      // 所有含此 tag 的标注都已有此 group — 无需操作
+    if (tagUuids && tagUuids.size > 0) {
+      // 优先找已有此 tag 但无此 group 的标注
+      for (const uuid of tagUuids) {
+        const ann = this.indexLayer.byUuid.get(uuid);
+        if (ann && !(ann.groups?.includes(group))) {
+          await this.addGroupToAnnotation(uuid, group);
+          return true;
+        }
+      }
+      // 所有标注都已有此 group
       return false;
     }
-    await this.addGroupToAnnotation(target, group);
+
+    // 该 tag 尚不存在于任何标注 → 找到任意标注，同时加上 tag + group
+    const all = this.indexLayer.byUuid;
+    if (all.size === 0) return false;
+
+    const firstUuid = all.keys().next().value as string;
+    const ann = this.indexLayer.byUuid.get(firstUuid);
+    if (!ann) return false;
+
+    this.indexLayer.removeFromIndex(firstUuid);
+    ann.updatedAt = Date.now();
+    if (!ann.tags.includes(tag)) ann.tags.push(tag);
+    if (!ann.groups) ann.groups = [];
+    if (!ann.groups.includes(group)) ann.groups.push(group);
+    this.indexLayer.addToIndex(ann);
+    this.persistLayer._markDirty(ann.filePath);
     return true;
   }
 
