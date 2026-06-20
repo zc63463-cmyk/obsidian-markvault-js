@@ -273,51 +273,89 @@ export class RelationPickerModal extends Modal {
     const activeFiltersEl = contentEl.createDiv({ cls: 'markvault-relation-picker-active-filters' });
     activeFiltersEl.id = 'markvault-active-filters';
 
-    // ── 关系类型选择器 v5.12: 语义分组 dot+label 芯片 ──
+    // ── 关系类型选择器 v6.1: Tab 分组切换 ──
     const relationSection = contentEl.createDiv({ cls: 'markvault-relation-picker-relation-section' });
     relationSection.createSpan({ cls: 'markvault-relation-picker-relation-label', text: 'Relation type:' });
 
-    const relationBtns = relationSection.createDiv({ cls: 'markvault-relation-picker-chips' });
     const activeTypes = this.schema.getActiveTypes();
-    let isFirstGroup = true;
-    for (const group of SEMANTIC_GROUPS) {
-      const groupTypes = group.types.filter(rt => activeTypes.includes(rt));
-      if (groupTypes.length === 0) continue;
 
-      // 组间分隔
-      if (!isFirstGroup) {
-        relationBtns.createSpan({ cls: 'markvault-relation-picker-group-divider' });
+    // 构建按 group 分组的类型
+    const groupedTypes = SEMANTIC_GROUPS
+      .map(g => ({ label: g.label, types: g.types.filter(rt => activeTypes.includes(rt)) }))
+      .filter(g => g.types.length > 0);
+
+    // 找到当前选中类型所在的组
+    let activeGroupIdx = 0;
+    if (this.selectedType) {
+      for (let i = 0; i < groupedTypes.length; i++) {
+        if (groupedTypes[i].types.includes(this.selectedType)) { activeGroupIdx = i; break; }
       }
-      isFirstGroup = false;
+    }
 
-      // 组标题
-      relationBtns.createSpan({ text: group.label, cls: 'markvault-relation-picker-group-header' });
+    // Group Tab 按钮行
+    const tabRow = relationSection.createDiv({ cls: 'markvault-relation-picker-tabs' });
+    tabRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;margin:4px 0 6px';
 
-      // 组内芯片
-      for (const type of groupTypes) {
+    const typeChipsArea = relationSection.createDiv({ cls: 'markvault-relation-picker-chips' });
+    typeChipsArea.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;min-height:28px';
+
+    const renderTypeChips = (groupIdx: number) => {
+      typeChipsArea.empty();
+      const group = groupedTypes[groupIdx];
+      for (const type of group.types) {
         const label = this.schema.getLabel(type);
         const config = this.schema.getConfig(type);
         const color = config?.color || '#78716C';
 
-        const chip = relationBtns.createEl('span', {
+        const chip = typeChipsArea.createSpan({
           cls: `markvault-relation-picker-chip ${this.selectedType === type ? 'active' : ''}`,
         });
-        chip.createSpan({
-          cls: 'markvault-relation-picker-chip-dot',
-          attr: { style: `background: ${color}` },
+        chip.style.cssText = 'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s;user-select:none';
+        if (this.selectedType === type) { chip.style.background = 'var(--interactive-accent,#483699)'; chip.style.color = '#fff'; chip.style.borderColor = 'var(--interactive-accent,#483699)'; }
+
+        chip.createSpan({ cls: 'markvault-relation-picker-chip-dot' }).style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}`;
+        chip.createSpan({ text: label || type });
+
+        chip.addEventListener('mouseenter', () => {
+          if (this.selectedType === type) return;
+          chip.style.background = 'var(--background-modifier-hover,rgba(0,0,0,.05))';
         });
-        chip.createSpan({
-          text: label || type,
-          cls: 'markvault-relation-picker-chip-label',
+        chip.addEventListener('mouseleave', () => {
+          if (this.selectedType === type) return;
+          chip.style.background = '';
         });
         chip.addEventListener('click', () => {
-          relationBtns.querySelectorAll('.markvault-relation-picker-chip').forEach(c => c.removeClass('active'));
-          chip.addClass('active');
           this.selectedType = type;
+          renderTypeChips(activeGroupIdx);
           this._updateLinkBtnState();
         });
       }
+    };
+
+    for (let i = 0; i < groupedTypes.length; i++) {
+      const group = groupedTypes[i];
+      const tab = tabRow.createSpan({
+        text: group.label,
+        cls: `markvault-relation-picker-tab ${i === activeGroupIdx ? 'active' : ''}`,
+      });
+      tab.style.cssText = `padding:2px 10px;border-radius:10px;cursor:pointer;font-size:11px;transition:all .15s;user-select:none;white-space:nowrap`;
+      if (i === activeGroupIdx) {
+        tab.style.background = 'var(--interactive-accent,#483699)'; tab.style.color = '#fff';
+      } else {
+        tab.style.background = 'var(--background-secondary,#f0f0f0)'; tab.style.color = 'var(--text-muted,#888)';
+      }
+      const idx = i;
+      tab.addEventListener('click', () => {
+        activeGroupIdx = idx;
+        tabRow.querySelectorAll('.markvault-relation-picker-tab').forEach((t, j) => {
+          (t as HTMLElement).style.background = j === idx ? 'var(--interactive-accent,#483699)' : 'var(--background-secondary,#f0f0f0)';
+          (t as HTMLElement).style.color = j === idx ? '#fff' : 'var(--text-muted,#888)';
+        });
+        renderTypeChips(idx);
+      });
     }
+
+    renderTypeChips(activeGroupIdx);
 
     // ── P2-1: 关系说明 note 输入框（一等公民） ──
     const noteSection = contentEl.createDiv({ cls: 'markvault-relation-picker-note-section' });
