@@ -901,6 +901,7 @@ export class AnnotationSearchEngine {
     check('text', ann.text);
     check('note', ann.note || '');
     check('alias', ann.alias || '');    // v5.3: 图谱别名命中检测
+    check('motivation', ann.motivation || '');  // P1 fix: motivation 评分补齐
     for (const t of ann.tags) { if (t) check('tags', t); }
     check('filePath', ann.filePath);
     for (const g of (ann.groups || [])) { if (g) check('groups', g); }
@@ -926,6 +927,7 @@ export class AnnotationSearchEngine {
       { field: 'note', text: ann.note || '' },
       { field: 'tags', text: ann.tags.join(' ') },
       { field: 'alias', text: ann.alias || '' },
+      { field: 'motivation', text: ann.motivation || '' },  // P1 fix: motivation snippet
       { field: 'groups', text: (ann.groups || []).join(' ') },
       { field: 'fields', text: ann.fields ? Object.values(ann.fields).join(' ') : '' },
     ];
@@ -956,7 +958,7 @@ export class AnnotationSearchEngine {
   }
 
   private _determineMatchField(ann: Annotation, tokens: string[]): string {
-    const order: Array<keyof typeof FIELD_WEIGHTS> = ['text', 'note', 'tags', 'alias', 'filePath', 'groups', 'fields', 'uuid'];
+    const order: Array<keyof typeof FIELD_WEIGHTS> = ['text', 'note', 'tags', 'alias', 'filePath', 'motivation', 'groups', 'fields', 'uuid'];
     for (const field of order) {
       const texts: string[] = [];
       if (field === 'text') texts.push(ann.text);
@@ -964,6 +966,7 @@ export class AnnotationSearchEngine {
       else if (field === 'tags') texts.push(...ann.tags);
       else if (field === 'alias') texts.push(ann.alias || '');    // v5.3: 图谱别名匹配
       else if (field === 'filePath') texts.push(ann.filePath);
+      else if (field === 'motivation') texts.push(ann.motivation || '');  // P1 fix
       else if (field === 'groups') texts.push(...(ann.groups || []));
       else if (field === 'uuid') texts.push(ann.uuid);
       else if (field === 'fields' && ann.fields) texts.push(...Object.values(ann.fields));
@@ -986,6 +989,7 @@ export class AnnotationSearchEngine {
       { label: '📝 ', text: ann.note || '' },
       { label: '#', text: ann.tags.join(' ') },
       { label: '', text: ann.alias || '' },
+      { label: '🎯 ', text: ann.motivation || '' },  // P1 fix: motivation snippet
       { label: '📂 ', text: (ann.groups || []).join(' ') },
       { label: '', text: ann.fields ? Object.values(ann.fields).join(' ') : '' },
     ];

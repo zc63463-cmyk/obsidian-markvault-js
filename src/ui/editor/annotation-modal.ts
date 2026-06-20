@@ -1,9 +1,10 @@
 import { App, Modal, TextAreaComponent, TextComponent, Setting, TFile, MarkdownRenderer, Component } from 'obsidian';
 import { logger } from '../../utils/logger';
-import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, PresetColorId, RelationType } from '../../types/annotation';
+import { debounce } from '../../utils/debounce';
+import type { Annotation, AnnotationType, AnnotationFlag, AnnotationMotivation, AnnotationRelation, RelationType } from '../../types/annotation';
 import { PRESET_COLORS, RELATION_SOURCE_LABELS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS, MOTIVATION_OPTIONS, normalizeUserFieldKey, inferMotivation } from '../../types/annotation';
 import type { MasteryLevel, ReviewPriority } from '../../types/annotation';
-import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, addGroupToAnnotation, removeGroupFromAnnotation, getGroupNames, getRelations, getTagFrequencies, getAllAnnotations } from '../../db/annotation-repo';
+import { updateAnnotation, deleteAnnotation, addAnnotation, addRelation, invalidateRelation, restoreRelation, updateFlags, getGroupNames, getRelations, getTagFrequencies, getAllAnnotations } from '../../db/annotation-repo';
 import { RelationPickerModal } from './relation-picker-modal';
 import { ConfirmModal, PromptModal } from '../confirm-modal';
 import { updateMarkTag, removeMarkTag, updateBlockAnchor, removeBlockAnchor, updateSpanAnchor, removeSpanAnchor } from '../../core/annotation-parser';
@@ -186,8 +187,8 @@ export class AnnotationModal extends Modal {
         text.setValue(this.tagsValue)
           .onChange((value) => {
             this.tagsValue = value;
-            // 刷新 Group 建议
-            this.refreshGroupSuggestions();
+            // 刷新 Group 建议 (防抖)
+            this._debouncedRefreshGroupSuggestions();
           });
         text.inputEl.addClass('markvault-modal-tags-input');
 
@@ -444,6 +445,8 @@ export class AnnotationModal extends Modal {
   }
 
   onClose() {
+    // P2 fix: 清理可能残留的 autocomplete suggestion popover
+    document.querySelectorAll('.markvault-tag-suggest').forEach(el => el.remove());
     const { contentEl } = this;
     contentEl.empty();
     this.component_.unload();
@@ -677,6 +680,7 @@ export class AnnotationModal extends Modal {
   }
 
   /** v6.1: 根据当前 tags 推荐关联的 Group */
+  private _debouncedRefreshGroupSuggestions = debounce(() => this.refreshGroupSuggestions(), 300);
   private async refreshGroupSuggestions(): Promise<void> {
     if (!this._groupSuggestionsEl) return;
     this._groupSuggestionsEl.empty();

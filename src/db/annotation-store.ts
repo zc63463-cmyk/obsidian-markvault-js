@@ -359,13 +359,14 @@ export class AnnotationStore {
     // 失败时索引完全未动，无需回滚 13 个倒排索引
     this.indexLayer.removeFromIndex(uuid);
     this.indexLayer.byUuid.set(uuid, newAnn);
-    this.indexLayer.addToIndex(newAnn);
 
-    // S2 审查修复: cascadeUpdateRelations 在索引更新之前执行
-    // 确保迁移失败时零副作用（伙伴标注 + 关系索引完全未动）
+    // P1 修复: cascadeUpdateRelations 必须在 addToIndex 之前执行
+    // 确保伙伴标注的关系同步后，addToIndex 一次性索引正确状态
     if (changes.relations !== undefined && oldAnn.relations) {
       this.relationEngine.cascadeUpdateRelations(uuid, oldAnn.relations, changes.relations);
     }
+
+    this.indexLayer.addToIndex(newAnn);
 
     // 标记 dirty
     if (!changes.filePath || changes.filePath === oldAnn.filePath) {
@@ -532,7 +533,10 @@ export class AnnotationStore {
   /** 合并标签：把 sourceTags 全部合并到 targetTag */
   async mergeTags(targetTag: string, sourceTags: string[]): Promise<number> {
     let count = 0;
-    for (const src of sourceTags) count += await this.renameTag(src, targetTag);
+    for (const src of sourceTags) {
+      if (src === targetTag) continue; // 跳过自身，避免无意义的 no-op rename
+      count += await this.renameTag(src, targetTag);
+    }
     return count;
   }
 
@@ -687,22 +691,8 @@ export class AnnotationStore {
       return false;
     }
 
-    // 该 tag 尚不存在于任何标注 → 找到任意标注，同时加上 tag + group
-    const all = this.indexLayer.byUuid;
-    if (all.size === 0) return false;
-
-    const firstUuid = all.keys().next().value as string;
-    const ann = this.indexLayer.byUuid.get(firstUuid);
-    if (!ann) return false;
-
-    this.indexLayer.removeFromIndex(firstUuid);
-    ann.updatedAt = Date.now();
-    if (!ann.tags.includes(tag)) ann.tags.push(tag);
-    if (!ann.groups) ann.groups = [];
-    if (!ann.groups.includes(group)) ann.groups.push(group);
-    this.indexLayer.addToIndex(ann);
-    this.persistLayer._markDirty(ann.filePath);
-    return true;
+    // 该 tag 尚不存在于任何标注 → 无法关联到 group
+    return false;
   }
 
   // ═══════════════════════════════════════════════════════

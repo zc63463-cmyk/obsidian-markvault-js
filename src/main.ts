@@ -570,9 +570,13 @@ export default class MarkVaultPlugin extends Plugin implements MarkVaultPluginIn
       this.settings.customTemplates = [];
     }
 
-    // v6.1: 同步 knownGroups 到 annotation-repo
-    const { setKnownGroups } = await import('./db/annotation-repo');
+    // v6.1: 同步 knownGroups 到 annotation-repo + 持久化回调
+    const { setKnownGroups, getKnownGroups, onKnownGroupsChanged } = await import('./db/annotation-repo');
     setKnownGroups(this.settings.knownGroups ?? []);
+    onKnownGroupsChanged(() => {
+      this.settings.knownGroups = getKnownGroups();
+      this.saveSettings();
+    });
 
     // v4.3: 重建 RelationSchema（设置加载后必须重建）
     this.relationSchema = new RelationSchema(this.settings.customRelationTypes);

@@ -13,13 +13,21 @@
  */
 
 import { Modal, App, Menu, TextComponent } from 'obsidian';
-import type { AnnotationRelation, RelationType, AnnotationFilter, AnnotationType, AnnotationMotivation, MasteryLevel } from '../../types/annotation';
+import type { RelationType, AnnotationFilter, AnnotationMotivation } from '../../types/annotation';
 import type { RelationSchema } from '../../types/annotation';
-import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS, SEMANTIC_GROUPS } from '../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, SEMANTIC_GROUPS } from '../../types/annotation';
 import type { AnnotationSearchEngine } from '../../search/search-engine';
 import type { SearchResult } from '../../search/types';
-import { getGroupNames, getFieldKeys, getFieldValues, getTagFrequencies } from '../../db/annotation-repo';
+import { getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
+import {
+  PickerFilterState,
+  renderTypeFilterBtn,
+  renderMasteryFilterBtn,
+  renderTagsFilterBtn,
+  renderGroupFilterBtn,
+  doPickerSearch,
+} from '../components/search-filter-bar';
 
 // v5.12: SEMANTIC_GROUPS 已提取到 annotation.ts 作为共享常量
 
@@ -49,13 +57,8 @@ export class RelationPickerModal extends Modal {
   // v5.2: 筛选状态
   // 注意：不能用 `scope` 作为属性名，Obsidian Modal 基类已有 scope: Scope 属性
   private searchScope: SearchScope = 'file';
-  private filter: AnnotationFilter = {
-    type: 'all',
-    color: 'all',
-    sortBy: 'position',
-  };
+  private filterState = new PickerFilterState();
   private fieldFilterEntries: Array<{ key: string; value: string }> = [];
-  private selectedTags: string[] = []; // v6.1: tag 多选筛选
   private searchQuery: string = '';
 
   constructor(
@@ -127,156 +130,59 @@ export class RelationPickerModal extends Modal {
     // ── v5.2: 筛选栏 ──
     const filterRow = contentEl.createDiv({ cls: 'markvault-relation-picker-filters' });
 
-    // Type 筛选
-    const typeBtn = filterRow.createEl('button', {
-      text: this.filter.type !== 'all' ? this.filter.type : 'Type',
-      cls: `markvault-picker-filter-btn ${this.filter.type !== 'all' ? 'active' : ''}`,
-      attr: { title: 'Filter by annotation type' },
-    });
-    typeBtn.addEventListener('click', () => {
-      const menu = new Menu();
-      menu.addItem((item) => {
-        item.setTitle('All types').setChecked(this.filter.type === 'all')
-          .onClick(() => { this.filter.type = 'all'; typeBtn.textContent = 'Type'; typeBtn.removeClass('active'); this._doSearch(); });
-      });
-      for (const t of ['highlight', 'bold', 'underline'] as AnnotationType[]) {
-        menu.addItem((item) => {
-          const labels: Record<string, string> = { highlight: '🖍️ Highlight', bold: '𝗕 Bold', underline: 'U̲ Underline' };
-          item.setTitle(labels[t] || t).setChecked(this.filter.type === t)
-            .onClick(() => { this.filter.type = t; typeBtn.textContent = t; typeBtn.addClass('active'); this._doSearch(); });
-        });
-      }
-      menu.showAtMouseEvent({ clientX: typeBtn.getBoundingClientRect().left, clientY: typeBtn.getBoundingClientRect().bottom } as MouseEvent);
-    });
+    const _onFilterChange = () => this._doSearch();
 
-    // Color 筛选
+    // 共享筛选按钮（Type / Mastery / Tags / Group）
+    renderTypeFilterBtn(filterRow, this.filterState, _onFilterChange);
+    renderMasteryFilterBtn(filterRow, this.filterState, _onFilterChange);
+    renderTagsFilterBtn(filterRow, this.filterState, _onFilterChange);
+    renderGroupFilterBtn(filterRow, this.filterState, _onFilterChange);
+
+    // Color 筛选（RelationPicker 独有）
     const colorBtn = filterRow.createEl('button', {
       text: '🎨',
-      cls: `markvault-picker-filter-btn ${this.filter.color !== 'all' ? 'active' : ''}`,
+      cls: `markvault-picker-filter-btn ${this.filterState.filter.color !== 'all' ? 'active' : ''}`,
       attr: { title: 'Filter by color' },
     });
     colorBtn.addEventListener('click', () => {
       const menu = new Menu();
       menu.addItem((item) => {
-        item.setTitle('All colors').setChecked(this.filter.color === 'all')
-          .onClick(() => { this.filter.color = 'all'; colorBtn.removeClass('active'); this._doSearch(); });
+        item.setTitle('All colors').setChecked(this.filterState.filter.color === 'all')
+          .onClick(() => { this.filterState.filter.color = 'all'; colorBtn.removeClass('active'); this._doSearch(); });
       });
       for (const pc of PRESET_COLORS) {
         menu.addItem((item) => {
-          item.setTitle(pc.label).setChecked(this.filter.color === pc.id)
-            .onClick(() => { this.filter.color = pc.id; colorBtn.addClass('active'); this._doSearch(); });
+          item.setTitle(pc.label).setChecked(this.filterState.filter.color === pc.id)
+            .onClick(() => { this.filterState.filter.color = pc.id; colorBtn.addClass('active'); this._doSearch(); });
         });
       }
       menu.showAtMouseEvent({ clientX: colorBtn.getBoundingClientRect().left, clientY: colorBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
-    // Mastery 筛选
-    const masteryBtn = filterRow.createEl('button', {
-      text: this.filter.mastery && this.filter.mastery !== 'all' ? (MASTERY_LABELS[this.filter.mastery] || this.filter.mastery) : '📊 Mastery',
-      cls: `markvault-picker-filter-btn ${this.filter.mastery && this.filter.mastery !== 'all' ? 'active' : ''}`,
-      attr: { title: 'Filter by mastery level' },
-    });
-    masteryBtn.addEventListener('click', () => {
-      const menu = new Menu();
-      menu.addItem((item) => {
-        item.setTitle('All').setChecked(!this.filter.mastery || this.filter.mastery === 'all')
-          .onClick(() => { this.filter.mastery = 'all'; masteryBtn.textContent = '📊 Mastery'; masteryBtn.removeClass('active'); this._doSearch(); });
-      });
-      for (const [value, label] of Object.entries(MASTERY_LABELS)) {
-        menu.addItem((item) => {
-          item.setTitle(label).setChecked(this.filter.mastery === value)
-            .onClick(() => { this.filter.mastery = value as MasteryLevel; masteryBtn.textContent = label; masteryBtn.addClass('active'); this._doSearch(); });
-        });
-      }
-      menu.showAtMouseEvent({ clientX: masteryBtn.getBoundingClientRect().left, clientY: masteryBtn.getBoundingClientRect().bottom } as MouseEvent);
-    });
-
-    // Motivation 筛选
+    // Motivation 筛选（RelationPicker 独有）
     const motBtn = filterRow.createEl('button', {
-      text: this.filter.motivation && this.filter.motivation !== 'all' ? (MOTIVATION_LABELS[this.filter.motivation] || this.filter.motivation) : '🎯 Intent',
-      cls: `markvault-picker-filter-btn ${this.filter.motivation && this.filter.motivation !== 'all' ? 'active' : ''}`,
+      text: this.filterState.filter.motivation && this.filterState.filter.motivation !== 'all'
+        ? (MOTIVATION_LABELS[this.filterState.filter.motivation] || this.filterState.filter.motivation)
+        : '🎯 Intent',
+      cls: `markvault-picker-filter-btn ${this.filterState.filter.motivation && this.filterState.filter.motivation !== 'all' ? 'active' : ''}`,
       attr: { title: 'Filter by motivation (annotation intent)' },
     });
     motBtn.addEventListener('click', () => {
       const menu = new Menu();
       menu.addItem((item) => {
-        item.setTitle('All').setChecked(!this.filter.motivation || this.filter.motivation === 'all')
-          .onClick(() => { this.filter.motivation = 'all'; motBtn.textContent = '🎯 Intent'; motBtn.removeClass('active'); this._doSearch(); });
+        item.setTitle('All').setChecked(!this.filterState.filter.motivation || this.filterState.filter.motivation === 'all')
+          .onClick(() => { this.filterState.filter.motivation = 'all'; motBtn.textContent = '🎯 Intent'; motBtn.removeClass('active'); this._doSearch(); });
       });
-      for (const m of ['highlighting', 'commenting', 'questioning', 'editing', 'bookmarking'] as AnnotationMotivation[]) {
-        const labels: Record<string, string> = { highlighting: '🖍️ Highlighting', commenting: '💬 Commenting', questioning: '❓ Questioning', editing: '✏️ Editing', bookmarking: '🔖 Bookmarking' };
+      for (const [m, label] of Object.entries(MOTIVATION_LABELS)) {
         menu.addItem((item) => {
-          item.setTitle(labels[m] || m).setChecked(this.filter.motivation === m)
-            .onClick(() => { this.filter.motivation = m; motBtn.textContent = labels[m]; motBtn.addClass('active'); this._doSearch(); });
+          item.setTitle(label).setChecked(this.filterState.filter.motivation === m)
+            .onClick(() => { this.filterState.filter.motivation = m as AnnotationMotivation; motBtn.textContent = label; motBtn.addClass('active'); this._doSearch(); });
         });
       }
       menu.showAtMouseEvent({ clientX: motBtn.getBoundingClientRect().left, clientY: motBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
-    // Group 筛选
-    const groupBtn = filterRow.createEl('button', {
-      text: this.filter.group && this.filter.group !== 'all' ? this.filter.group : '🏷️ Group',
-      cls: `markvault-picker-filter-btn ${this.filter.group && this.filter.group !== 'all' ? 'active' : ''}`,
-      attr: { title: 'Filter by group' },
-    });
-    groupBtn.addEventListener('click', () => {
-      const groups = getGroupNames();
-      const menu = new Menu();
-      menu.addItem((item) => {
-        item.setTitle('All').setChecked(!this.filter.group || this.filter.group === 'all')
-          .onClick(() => { this.filter.group = 'all'; groupBtn.textContent = '🏷️ Group'; groupBtn.removeClass('active'); this._doSearch(); });
-      });
-      for (const g of groups) {
-        menu.addItem((item) => {
-          item.setTitle(g).setChecked(this.filter.group === g)
-            .onClick(() => { this.filter.group = g; groupBtn.textContent = g; groupBtn.addClass('active'); this._doSearch(); });
-        });
-      }
-      menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
-    });
-
-    // v6.1: Tags 多选筛选
-    const tagsBtn = filterRow.createEl('button', {
-      text: this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags',
-      cls: `markvault-picker-filter-btn ${this.selectedTags.length > 0 ? 'active' : ''}`,
-      attr: { title: 'Filter by tags (multi-select AND)' },
-    });
-    tagsBtn.addEventListener('click', () => {
-      const frequencies = getTagFrequencies();
-      const menu = new Menu();
-      if (frequencies.length === 0) {
-        menu.addItem((item) => { item.setTitle('No tags found').setDisabled(true); });
-      } else {
-        // Clear all
-        menu.addItem((item) => {
-          item.setTitle('- Clear All -').onClick(() => {
-            this.selectedTags = [];
-            tagsBtn.textContent = '# Tags';
-            tagsBtn.removeClass('active');
-            this._doSearch();
-          });
-        });
-        menu.addSeparator();
-        for (const f of frequencies.slice(0, 30)) {
-          const isSelected = this.selectedTags.includes(f.name);
-          menu.addItem((item) => {
-            item.setTitle(f.name).setChecked(isSelected).onClick(() => {
-              if (isSelected) {
-                this.selectedTags = this.selectedTags.filter(t => t !== f.name);
-              } else {
-                this.selectedTags.push(f.name);
-              }
-              tagsBtn.textContent = this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags';
-              if (this.selectedTags.length > 0) tagsBtn.addClass('active'); else tagsBtn.removeClass('active');
-              this._doSearch();
-            });
-          });
-        }
-      }
-      menu.showAtMouseEvent({ clientX: tagsBtn.getBoundingClientRect().left, clientY: tagsBtn.getBoundingClientRect().bottom } as MouseEvent);
-    });
-
-    // Field 筛选（与侧边栏 FilterBar 一致的 + Field 按钮）
+    // Field 筛选（RelationPicker 独有 — 与侧边栏 FilterBar 一致的 + Field 按钮）
     const fieldBtn = filterRow.createEl('button', {
       text: this.fieldFilterEntries.length > 0 ? `🏷️+${this.fieldFilterEntries.length}` : '+ Field',
       cls: `markvault-picker-filter-btn ${this.fieldFilterEntries.length > 0 ? 'active' : ''}`,
@@ -451,39 +357,29 @@ export class RelationPickerModal extends Modal {
    * v5.2: 统一搜索入口 — 使用 SearchEngine.search() 走完整 BM25 + filter 路径
    */
   private _doSearch() {
-    // 构建 fieldFilters
+    // 构建 fieldFilters（RelationPicker 独有）
+    let extraFilter: Partial<AnnotationFilter> = {};
     if (this.fieldFilterEntries.length > 0) {
-      this.filter.fieldFilters = {};
+      extraFilter.fieldFilters = {};
       for (const entry of this.fieldFilterEntries) {
-        this.filter.fieldFilters[entry.key] = entry.value;
+        (extraFilter.fieldFilters as Record<string, string>)[entry.key] = entry.value;
       }
-    } else {
-      this.filter.fieldFilters = undefined;
     }
 
-    // v6.1: 同步 selectedTags → filter.tags
-    if (this.selectedTags.length > 0) {
-      this.filter.tags = this.selectedTags;
-    } else {
-      this.filter.tags = undefined;
-    }
-
-    const results = this.engine.search({
+    const { results: rawResults, totalBeforeExclude } = doPickerSearch({
+      engine: this.engine,
+      filterState: this.filterState,
       query: this.searchQuery || undefined,
-      scope: this.searchScope === 'file' ? 'file' : 'all',
+      scope: this.searchScope,
       filePath: this.searchScope === 'file' ? this.sourceFilePath : undefined,
-      filter: this.filter,
-      sortByRelevance: !!this.searchQuery,
-      limit: 30,
-      facets: true,
+      excludeUuid: this.sourceUuid,
     });
 
-    // 排除自己
-    const filtered = results.filter(r => r.annotation.uuid !== this.sourceUuid);
+    const results = rawResults.slice(0, 30);
 
-    this._renderResults(filtered);
+    this._renderResults(results);
     this._renderActiveFilters();
-    this._renderCount(filtered.length, results.length);
+    this._renderCount(results.length, totalBeforeExclude);
   }
 
   /**
@@ -588,30 +484,30 @@ export class RelationPickerModal extends Modal {
     if (!container) return;
     container.empty();
 
-    // 非默认的 filter 条件
+    const f = this.filterState.filter;
     const tags: Array<{ label: string; onRemove: () => void }> = [];
 
     if (this.searchScope === 'all') {
       tags.push({ label: '📂 All Files', onRemove: () => { this.searchScope = 'file'; this._doSearch(); } });
     }
-    if (this.filter.type && this.filter.type !== 'all') {
-      tags.push({ label: `Type: ${this.filter.type}`, onRemove: () => { this.filter.type = 'all'; this._doSearch(); } });
+    if (f.type && f.type !== 'all') {
+      tags.push({ label: `Type: ${f.type}`, onRemove: () => { this.filterState.filter.type = 'all'; this._doSearch(); } });
     }
-    if (this.filter.color && this.filter.color !== 'all') {
-      tags.push({ label: `Color: ${this.filter.color}`, onRemove: () => { this.filter.color = 'all'; this._doSearch(); } });
+    if (f.color && f.color !== 'all') {
+      tags.push({ label: `Color: ${f.color}`, onRemove: () => { this.filterState.filter.color = 'all'; this._doSearch(); } });
     }
-    if (this.filter.mastery && this.filter.mastery !== 'all') {
-      tags.push({ label: `Mastery: ${MASTERY_LABELS[this.filter.mastery]}`, onRemove: () => { this.filter.mastery = 'all'; this._doSearch(); } });
+    if (f.mastery && f.mastery !== 'all') {
+      tags.push({ label: `Mastery: ${MASTERY_LABELS[f.mastery]}`, onRemove: () => { this.filterState.filter.mastery = 'all'; this._doSearch(); } });
     }
-    if (this.filter.motivation && this.filter.motivation !== 'all') {
-      tags.push({ label: `${MOTIVATION_LABELS[this.filter.motivation]}`, onRemove: () => { this.filter.motivation = 'all'; this._doSearch(); } });
+    if (f.motivation && f.motivation !== 'all') {
+      tags.push({ label: `${MOTIVATION_LABELS[f.motivation]}`, onRemove: () => { this.filterState.filter.motivation = 'all'; this._doSearch(); } });
     }
-    if (this.filter.group && this.filter.group !== 'all') {
-      tags.push({ label: `Group: ${this.filter.group}`, onRemove: () => { this.filter.group = 'all'; this._doSearch(); } });
+    if (f.group && f.group !== 'all') {
+      tags.push({ label: `Group: ${f.group}`, onRemove: () => { this.filterState.filter.group = 'all'; this._doSearch(); } });
     }
     // v6.1: tag 多选芯片
-    for (const t of this.selectedTags) {
-      tags.push({ label: `#${t}`, onRemove: () => { this.selectedTags = this.selectedTags.filter(st => st !== t); this._doSearch(); } });
+    for (const t of this.filterState.selectedTags) {
+      tags.push({ label: `#${t}`, onRemove: () => { this.filterState.selectedTags = this.filterState.selectedTags.filter(st => st !== t); this._doSearch(); } });
     }
     for (let i = 0; i < this.fieldFilterEntries.length; i++) {
       const entry = this.fieldFilterEntries[i];
@@ -639,7 +535,7 @@ export class RelationPickerModal extends Modal {
       });
       clearBtn.addEventListener('click', () => {
         this.searchScope = 'file';
-        this.filter = { type: 'all', color: 'all', sortBy: 'position' };
+        this.filterState.reset();
         this.fieldFilterEntries = [];
         this._doSearch();
       });

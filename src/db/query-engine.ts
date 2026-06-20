@@ -53,7 +53,7 @@ export class QueryEngine {
     // 按自定义字段过滤 (单值)
     if (filter.fieldFilters && Object.keys(filter.fieldFilters).length > 0) {
       for (const [fieldKey, fieldValue] of Object.entries(filter.fieldFilters)) {
-        const fieldMap = this._indexLayer.byField.get(fieldKey);
+        const fieldMap = resolveFieldMap(this._indexLayer.byField, fieldKey);
         if (!fieldMap) return [];
         const valueSet = fieldMap.get(fieldValue);
         if (!valueSet) return [];
@@ -68,7 +68,7 @@ export class QueryEngine {
     // P3 fix: 按自定义字段过滤 (分面多值, 同 key OR 跨 key AND)
     if (filter.fieldFiltersMulti && Object.keys(filter.fieldFiltersMulti).length > 0) {
       for (const [fieldKey, fieldValues] of Object.entries(filter.fieldFiltersMulti)) {
-        const fieldMap = this._indexLayer.byField.get(fieldKey);
+        const fieldMap = resolveFieldMap(this._indexLayer.byField, fieldKey);
         if (!fieldMap) return [];
         // 同 key 内 OR：union 所有值的 UUID 集合
         let keyUuids: Set<string> | null = null;
@@ -121,6 +121,46 @@ export class QueryEngine {
         candidateUuids = intersection(candidateUuids, groupSet);
       } else {
         candidateUuids = new Set(groupSet);
+      }
+    }
+
+    // 按动机过滤
+    if (filter.motivation && filter.motivation !== 'all') {
+      const motSet = this._indexLayer.byMotivation.get(filter.motivation);
+      if (!motSet) return [];
+      if (candidateUuids) {
+        candidateUuids = intersection(candidateUuids, motSet);
+      } else {
+        candidateUuids = new Set(motSet);
+      }
+    }
+
+    // 按标签过滤 (AND 语义 + 层级前缀匹配)
+    if (filter.tags && filter.tags.length > 0) {
+      let tagCandidates: Set<string> | null = null;
+      for (const requested of filter.tags) {
+        // 收集该标签及所有子标签的 UUID
+        let tagUuids: Set<string> | null = null;
+        for (const [tagName, uuidSet] of this._indexLayer.byTag.entries()) {
+          if (tagName === requested || tagName.startsWith(requested + '/')) {
+            if (tagUuids) {
+              for (const uuid of uuidSet) tagUuids.add(uuid);
+            } else {
+              tagUuids = new Set(uuidSet);
+            }
+          }
+        }
+        if (!tagUuids) return []; // 有标签完全无匹配
+        if (tagCandidates) {
+          tagCandidates = intersection(tagCandidates, tagUuids);
+        } else {
+          tagCandidates = tagUuids;
+        }
+      }
+      if (candidateUuids) {
+        candidateUuids = intersection(candidateUuids, tagCandidates!);
+      } else {
+        candidateUuids = tagCandidates!;
       }
     }
 
@@ -190,6 +230,28 @@ export class QueryEngine {
 }
 
 // ─── 工具函数 ─────────────────────────────────────────
+
+/**
+ * 按 field key 查找 byField 索引，做 u: 前缀规范化
+ * 与 filter-engine.applyUnifiedFilter 的字段匹配逻辑保持一致。
+ */
+function resolveFieldMap(
+  byField: Map<string, Map<string, Set<string>>>,
+  key: string,
+): Map<string, Set<string>> | null {
+  // 1. 精确匹配
+  let m = byField.get(key);
+  if (m) return m;
+  // 2. 尝试添加 u: 前缀
+  m = byField.get('u:' + key);
+  if (m) return m;
+  // 3. 如果本身以 u: 开头，尝试去掉前缀
+  if (key.startsWith('u:')) {
+    m = byField.get(key.slice(2));
+    if (m) return m;
+  }
+  return null;
+}
 
 /** 计算两个 Set 的交集 */
 function intersection<T>(a: Set<T>, b: Set<T>): Set<T> {

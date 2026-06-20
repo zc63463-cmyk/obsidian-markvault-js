@@ -1,15 +1,8 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
-import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS, MOTIVATION_LABELS } from '../../../types/annotation';
 import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies, getAllAnnotations } from '../../../db/annotation-repo';
-
-/** 标签树节点 */
-interface TagTreeNode {
-  fullPath: string;
-  label: string;
-  children: TagTreeNode[];
-  count: number;
-}
+import { buildTagTree, type TagTreeNode } from '../../../utils/tag-tree';
 
 /**
  * FilterBar —— 侧边栏过滤栏
@@ -265,96 +258,7 @@ export class FilterBar {
     setTimeout(() => document.addEventListener('click', _onOutside, true), 0);
   }
 
-  private showAddFieldFilterMenu(anchor: HTMLElement, fieldKeys: string[]) {
-    const menu = new Menu();
-
-    if (fieldKeys.length === 0) {
-      menu.addItem((item) => {
-        item.setTitle('No fields found in annotations').setDisabled(true);
-      });
-    } else {
-      for (const key of fieldKeys) {
-        menu.addItem((item) => {
-          item.setTitle(key).onClick(async () => {
-            const values = await getFieldValues(key);
-            this.showFieldValueMenu(anchor, key, values);
-          });
-        });
-      }
-    }
-
-    menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
-  }
-
-  private showFieldValueMenu(anchor: HTMLElement, key: string, values: string[]) {
-    const menu = new Menu();
-
-    for (const val of values) {
-      menu.addItem((item) => {
-        item.setTitle(val).onClick(async () => {
-          this.host.getFieldFilterEntries().push({ key, value: val });
-          await this.host.refreshListOnly();
-        });
-      });
-    }
-
-    if (values.length === 0) {
-      menu.addItem((item) => {
-        item.setTitle('No values found').setDisabled(true);
-      });
-    }
-
-    menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
-  }
-
   // ─── 共享工具方法 ──────────────────────────────────────
-
-  /** 构建层级化标签树，供多个 Popover 复用 */
-  private buildTagTree(): {
-    rootNodes: TagTreeNode[];
-    nodeMap: Map<string, TagTreeNode>;
-    frequencies: ReturnType<typeof getTagFrequencies>;
-  } {
-    const frequencies = getTagFrequencies();
-    const rootNodes: TagTreeNode[] = [];
-    const nodeMap = new Map<string, TagTreeNode>();
-
-    for (const f of frequencies) {
-      const parts = f.name.split('/');
-      let parentList = rootNodes;
-      let parentPath = '';
-
-      for (let i = 0; i < parts.length; i++) {
-        const seg = parts[i];
-        const currentPath = parentPath ? `${parentPath}/${seg}` : seg;
-        let node = nodeMap.get(currentPath);
-        if (!node) {
-          node = { fullPath: currentPath, label: seg, children: [], count: 0 };
-          nodeMap.set(currentPath, node);
-          parentList.push(node);
-        }
-        if (i === parts.length - 1) {
-          node.count = f.count;
-        }
-        parentList = node.children;
-        parentPath = currentPath;
-      }
-    }
-
-    // 计算非叶子节点计数
-    function computeCounts(nodes: TagTreeNode[]): number {
-      let total = 0;
-      for (const n of nodes) {
-        const childSum = computeCounts(n.children);
-        if (n.count === 0) n.count = childSum;
-        total += n.count;
-      }
-      return total;
-    }
-    computeCounts(rootNodes);
-
-    return { rootNodes, nodeMap, frequencies };
-  }
 
   /** 统计活跃的元数据过滤条件数量 */
   private countActiveMetaFilters(): number {
@@ -366,317 +270,8 @@ export class FilterBar {
     if (f.hasRelations === true) count++;
     if (f.needsCorrection === true) count++;
     if (f.motivation && f.motivation !== 'all') count++;
+    if (f.reviewPriority && f.reviewPriority !== 'all') count++;
     return count;
-  }
-
-  /** Tag 过滤器 Popover：内置搜索 + 频率排序 + 层级缩进 */
-  private showTagFilterPopover(anchor: HTMLElement): void {
-    // 关闭旧 popover（如果存在）
-    const existing = document.querySelector('.markvault-tag-filter-popover');
-    if (existing) { existing.remove(); return; }
-
-    const frequencies = getTagFrequencies();
-    const currentTag = this.host.filter.tag;
-    const rect = anchor.getBoundingClientRect();
-    const popoverWidth = 240;
-
-    // ── 构建层级树 ──
-    interface TagTreeNode {
-      fullPath: string;
-      label: string;
-      children: TagTreeNode[];
-      count: number;
-    }
-    const rootNodes: TagTreeNode[] = [];
-    const nodeMap = new Map<string, TagTreeNode>();
-
-    for (const f of frequencies) {
-      const parts = f.name.split('/');
-      let parentList = rootNodes;
-      let parentPath = '';
-
-      for (let i = 0; i < parts.length; i++) {
-        const seg = parts[i];
-        const currentPath = parentPath ? `${parentPath}/${seg}` : seg;
-        let node = nodeMap.get(currentPath);
-        if (!node) {
-          node = { fullPath: currentPath, label: seg, children: [], count: 0 };
-          nodeMap.set(currentPath, node);
-          parentList.push(node);
-        }
-        // leaf count（终端的 count 来自 frequencies）
-        if (i === parts.length - 1) {
-          node.count = f.count;
-        }
-        parentList = node.children;
-        parentPath = currentPath;
-      }
-    }
-
-    // 计算非叶子节点的总标注数（子节点 count 之和）
-    function computeCounts(nodes: TagTreeNode[]): number {
-      let total = 0;
-      for (const n of nodes) {
-        const childSum = computeCounts(n.children);
-        if (n.count === 0) n.count = childSum; // 非叶子节点用子节点合计
-        total += n.count;
-      }
-      return total;
-    }
-    computeCounts(rootNodes);
-
-    // ── Popover 容器 ──
-    const popover = document.body.createDiv({ cls: 'markvault-tag-filter-popover' });
-    popover.style.position = 'fixed';
-    popover.style.left = `${rect.left}px`;
-    popover.style.top = `${rect.bottom + 4}px`;
-    popover.style.width = `${popoverWidth}px`;
-    popover.style.maxHeight = '360px';
-    popover.style.display = 'flex';
-    popover.style.flexDirection = 'column';
-    popover.style.background = 'var(--background-primary, #fff)';
-    popover.style.border = '1px solid var(--background-modifier-border, #ccc)';
-    popover.style.borderRadius = '8px';
-    popover.style.boxShadow = '0 4px 16px rgba(0,0,0,0.15)';
-    popover.style.zIndex = '9999';
-    popover.style.overflow = 'hidden';
-
-    // ── 搜索框 ──
-    const searchInput = popover.createEl('input', {
-      type: 'text',
-      cls: 'markvault-tag-filter-search',
-      attr: { placeholder: 'Search tags...' },
-    });
-    searchInput.style.width = '100%';
-    searchInput.style.boxSizing = 'border-box';
-    searchInput.style.padding = '10px 12px';
-    searchInput.style.border = 'none';
-    searchInput.style.borderBottom = '1px solid var(--background-modifier-border, #ddd)';
-    searchInput.style.fontSize = '14px';
-    searchInput.style.background = 'var(--background-primary, #fff)';
-    searchInput.style.color = 'var(--text-normal, #333)';
-    searchInput.style.outline = 'none';
-
-    // ── 列表容器 ──
-    const listContainer = popover.createDiv({ cls: 'markvault-tag-filter-list' });
-    listContainer.style.flex = '1';
-    listContainer.style.overflowY = 'auto';
-    listContainer.style.padding = '4px';
-
-    // ── 通用行渲染 ──
-    const createItemRow = (label: string, fullPath: string, count: number, depth: number, isActive: boolean): HTMLElement => {
-      const actuallyActive = isActive || this.host.getSelectedTags().includes(fullPath);
-      const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
-      item.style.display = 'flex';
-      item.style.justifyContent = 'space-between';
-      item.style.alignItems = 'center';
-      item.style.padding = '5px 10px';
-      item.style.paddingLeft = `${10 + depth * 14}px`;
-      item.style.borderRadius = '6px';
-      item.style.cursor = 'pointer';
-      item.style.fontSize = '13px';
-      item.style.transition = 'background 0.1s';
-
-      if (isActive) {
-        item.style.background = 'var(--interactive-accent, #483699)';
-        item.style.color = '#fff';
-      }
-
-      const leftSide = item.createSpan();
-      // 层级引导线
-      if (depth > 0) {
-        leftSide.style.color = isActive ? 'rgba(255,255,255,0.5)' : 'var(--text-faint, #bbb)';
-        leftSide.style.marginRight = '4px';
-        leftSide.style.fontSize = '11px';
-      }
-
-      // leaf 图标 vs folder 图标
-      const hasChildren = nodeMap.get(fullPath)?.children?.length ?? 0 > 0;
-      const icon = hasChildren ? '▸ ' : '  ';
-      leftSide.appendText(icon + label);
-
-      const countBadge = item.createSpan({ text: `${count}`, cls: 'markvault-tag-filter-count' });
-      countBadge.style.fontSize = '11px';
-      countBadge.style.padding = '1px 6px';
-      countBadge.style.borderRadius = '10px';
-      countBadge.style.background = isActive ? 'rgba(255,255,255,0.3)' : 'var(--background-modifier-hover, #f0f0f0)';
-
-      item.addEventListener('mouseenter', () => {
-        if (!isActive) item.style.background = 'var(--background-modifier-hover, rgba(0,0,0,0.05))';
-      });
-      item.addEventListener('mouseleave', () => {
-        if (!isActive) item.style.background = '';
-      });
-      item.addEventListener('click', async () => {
-        // 多选 toggle：如果已在选中列表则移除，否则添加
-        const idx = this.host.getSelectedTags().indexOf(fullPath);
-        if (idx >= 0) {
-          this.host.getSelectedTags().splice(idx, 1);
-        } else {
-          this.host.getSelectedTags().push(fullPath);
-        }
-        // 不关闭 popover，允许连续选择；关闭 popover 需点击外部或按 Esc
-        await this.host.refreshListOnly();
-      });
-      return item;
-    };
-
-    // ── 递归渲染树节点 ──
-    const renderTree = (nodes: TagTreeNode[], depth: number, query: string) => {
-      const q = query.toLowerCase();
-      for (const node of nodes) {
-        const matchSelf = !q || node.label.toLowerCase().includes(q);
-        const hasMatchingChildren = !q || node.children.some(c => c.label.toLowerCase().includes(q));
-
-        if (matchSelf || hasMatchingChildren) {
-          createItemRow(node.label, node.fullPath, node.count, depth, false);
-          if (node.children.length > 0) {
-            renderTree(node.children, depth + 1, query);
-          }
-        }
-      }
-    };
-
-    // ── 搜索模式的扁平渲染 ──
-    const renderFlatSearch = (query: string) => {
-      const q = query.toLowerCase();
-      const allNodes = [...nodeMap.values()];
-      // 先排序：以 q 开头的排前面，再按 count 降序
-      allNodes.sort((a, b) => {
-        const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
-        const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
-        if (aStarts !== bStarts) return aStarts - bStarts;
-        return b.count - a.count || a.label.localeCompare(b.label);
-      });
-
-      for (const node of allNodes) {
-        if (node.label.toLowerCase().includes(q)) {
-          // 搜索模式显示完整路径
-          const displayLabel = node.fullPath.includes('/') ? node.fullPath : node.label;
-          createItemRow(displayLabel, node.fullPath, node.count, 0, false);
-        }
-      }
-    };
-
-    // ── 主渲染 ──
-    const renderList = (query: string) => {
-      listContainer.empty();
-
-      // "All" 选项
-      const allItem = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
-      allItem.style.display = 'flex';
-      allItem.style.justifyContent = 'space-between';
-      allItem.style.padding = '6px 10px';
-      allItem.style.borderRadius = '6px';
-      allItem.style.cursor = 'pointer';
-      allItem.style.fontSize = '13px';
-      if (!currentTag || currentTag === 'all') {
-        allItem.style.background = 'var(--interactive-accent, #483699)';
-        allItem.style.color = '#fff';
-      }
-      allItem.createSpan({ text: 'All tags' });
-      allItem.addEventListener('click', async () => {
-        this.host.getSelectedTags().length = 0; // 清空多选
-        popover.remove();
-        await this.host.refreshListOnly();
-      });
-
-      const q = query.toLowerCase().trim();
-
-      if (rootNodes.length === 0) {
-        const noItem = listContainer.createDiv();
-        noItem.style.padding = '16px 10px';
-        noItem.style.textAlign = 'center';
-        noItem.style.color = 'var(--text-muted, #888)';
-        noItem.style.fontSize = '12px';
-        noItem.textContent = 'No tags in any annotation';
-        return;
-      }
-
-      const hasHierarchy = rootNodes.some(n => n.children.length > 0);
-
-      // v6.1: 最近使用区（前5个高频标签，仅在无搜索时显示）
-      if (!q) {
-        const top5 = frequencies.slice(0, 5);
-        if (top5.length > 0) {
-          const recentLabel = listContainer.createDiv();
-          recentLabel.style.padding = '4px 10px 2px';
-          recentLabel.style.fontSize = '10px';
-          recentLabel.style.color = 'var(--text-faint, #aaa)';
-          recentLabel.style.textTransform = 'uppercase';
-          recentLabel.textContent = 'Frequent';
-          for (const f of top5) {
-            const pill = createItemRow(f.name, f.name, f.count, 0, false);
-            pill.style.background = this.host.getSelectedTags().includes(f.name)
-              ? 'var(--interactive-accent, #483699)'
-              : 'var(--background-modifier-hover, #f5f5f5)';
-          }
-          const sep = listContainer.createDiv();
-          sep.style.margin = '4px 10px';
-          sep.style.height = '1px';
-          sep.style.background = 'var(--background-modifier-border, #ddd)';
-        }
-      }
-
-      if (q && hasHierarchy) {
-        // 有搜索且有层级：走扁平路径（搜索模式）
-        renderFlatSearch(q);
-      } else if (q) {
-        // 有搜索但无层级：扁平过滤
-        const flat = [...nodeMap.values()];
-        flat.sort((a, b) => {
-          const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
-          const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
-          if (aStarts !== bStarts) return aStarts - bStarts;
-          return b.count - a.count;
-        });
-        let shown = 0;
-        for (const node of flat) {
-          if (node.label.toLowerCase().includes(q)) {
-            createItemRow(node.label, node.fullPath, node.count, 0, currentTag === node.fullPath);
-            shown++;
-          }
-        }
-        if (shown === 0) {
-          const noItem = listContainer.createDiv();
-          noItem.style.padding = '16px 10px';
-          noItem.style.textAlign = 'center';
-          noItem.style.color = 'var(--text-muted, #888)';
-          noItem.style.fontSize = '12px';
-          noItem.textContent = 'No matching tags';
-        }
-      } else {
-        // 无搜索：树形渲染
-        renderTree(rootNodes, 0, '');
-      }
-    };
-
-    // 初始渲染
-    renderList('');
-
-    // 搜索事件
-    searchInput.addEventListener('input', () => {
-      renderList(searchInput.value);
-    });
-
-    // 键盘 Escape
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') popover.remove();
-    });
-
-    // 点击外部关闭
-    const onClickOutside = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && e.target !== anchor) {
-        popover.remove();
-        document.removeEventListener('click', onClickOutside, true);
-      }
-    };
-    setTimeout(() => {
-      document.addEventListener('click', onClickOutside, true);
-    }, 0);
-
-    // 自动聚焦搜索框
-    setTimeout(() => searchInput.focus(), 50);
   }
 
   /** 统一元数据过滤 Popover：折叠式分段 + 标签树 + 活跃条件气泡 */
@@ -827,7 +422,7 @@ export class FilterBar {
       if (!activeGroup) { allChip.style.background = 'var(--interactive-accent,#483699)'; allChip.style.color = '#fff'; allChip.style.borderColor = 'var(--interactive-accent,#483699)'; }
       allChip.addEventListener('click', () => { activeGroup = null; renderGroupChips(); renderTagList(tagSearch.value); });
 
-      for (const g of groups.slice(0, 5)) {
+      for (const g of groups) {
         const chip = groupChips.createSpan({ text: g });
         chip.style.cssText = 'padding:1px 8px;border-radius:8px;cursor:pointer;font-size:11px;border:1px solid var(--background-modifier-border,#ddd);transition:all .15s;white-space:nowrap';
         if (activeGroup === g) { chip.style.background = 'var(--interactive-accent,#483699)'; chip.style.color = '#fff'; chip.style.borderColor = 'var(--interactive-accent,#483699)'; }
@@ -863,30 +458,7 @@ export class FilterBar {
     // 动态构建标签树（按 Group 筛选后重建）
     const rebuildTagTree = () => {
       const filteredFreqs = getFilteredFrequencies(activeGroup);
-      // 重建树：复制 buildTagTree 逻辑但用 filteredFreqs
-      const rootNodes: TagTreeNode[] = [];
-      const nodeMap = new Map<string, TagTreeNode>();
-      for (const f of filteredFreqs) {
-        const parts = f.name.split('/');
-        let parentList = rootNodes;
-        let parentPath = '';
-        for (let i = 0; i < parts.length; i++) {
-          const seg = parts[i];
-          const currentPath = parentPath ? `${parentPath}/${seg}` : seg;
-          let node = nodeMap.get(currentPath);
-          if (!node) { node = { fullPath: currentPath, label: seg, children: [], count: 0 }; nodeMap.set(currentPath, node); parentList.push(node); }
-          if (i === parts.length - 1) node.count = f.count;
-          parentList = node.children;
-          parentPath = currentPath;
-        }
-      }
-      const computeCounts = (nodes: TagTreeNode[]): number => {
-        let total = 0;
-        for (const n of nodes) { const s = computeCounts(n.children); if (n.count === 0) n.count = s; total += n.count; }
-        return total;
-      };
-      computeCounts(rootNodes);
-      return { rootNodes, nodeMap, filteredFreqs };
+      return { ...buildTagTree(filteredFreqs), filteredFreqs };
     };
 
     // v6.1: 标签行渲染（内联版）
@@ -1111,22 +683,15 @@ export class FilterBar {
     const hasMotivation = !!(this.host.filter.motivation && this.host.filter.motivation !== 'all');
     const { body: motBody } = createSection(scrollContainer, 'Motivation', hasMotivation);
 
-    const motConfig: Array<{ value: string; label: string }> = [
-      { value: 'highlighting', label: '🖍️ Highlighting' },
-      { value: 'commenting', label: '💬 Commenting' },
-      { value: 'questioning', label: '❓ Questioning' },
-      { value: 'editing', label: '✏️ Editing' },
-      { value: 'bookmarking', label: '🔖 Bookmarking' },
-    ];
-
+    const motEntries = Object.entries(MOTIVATION_LABELS) as [string, string][];
     createOptionRow(motBody, 'All', !this.host.filter.motivation || this.host.filter.motivation === 'all', async () => {
       this.host.filter.motivation = 'all';
       await this.host.refreshListOnly();
       this.refreshUnifiedPopoverSections(popover);
     });
-    for (const mc of motConfig) {
-      createOptionRow(motBody, mc.label, this.host.filter.motivation === mc.value, async () => {
-        this.host.filter.motivation = mc.value as any;
+    for (const [value, label] of motEntries) {
+      createOptionRow(motBody, label, this.host.filter.motivation === value, async () => {
+        this.host.filter.motivation = value as any;
         await this.host.refreshListOnly();
         this.refreshUnifiedPopoverSections(popover);
       });
@@ -1208,7 +773,7 @@ export class FilterBar {
       });
     }
     if (this.host.filter.motivation && this.host.filter.motivation !== 'all') {
-      const motLabel = motConfig.find(m => m.value === this.host.filter.motivation)?.label || this.host.filter.motivation;
+      const motLabel = MOTIVATION_LABELS[this.host.filter.motivation] || this.host.filter.motivation;
       makeChip(`Motivation: ${motLabel}`, async () => {
         this.host.filter.motivation = 'all';
         await this.host.refreshListOnly();
@@ -1240,6 +805,7 @@ export class FilterBar {
       this.host.filter.hasRelations = undefined;
       this.host.filter.needsCorrection = undefined;
       this.host.filter.motivation = 'all';
+      this.host.filter.reviewPriority = undefined;
       popover.remove();
       await this.host.refreshListOnly();
     });
@@ -1279,14 +845,6 @@ export class FilterBar {
     const chipsRow = footer.firstElementChild as HTMLElement;
     if (!chipsRow) return;
     chipsRow.empty();
-
-    const motConfig: Array<{ value: string; label: string }> = [
-      { value: 'highlighting', label: '🖍️ Highlighting' },
-      { value: 'commenting', label: '💬 Commenting' },
-      { value: 'questioning', label: '❓ Questioning' },
-      { value: 'editing', label: '✏️ Editing' },
-      { value: 'bookmarking', label: '🔖 Bookmarking' },
-    ];
 
     const makeChip = (text: string, onRemove: () => Promise<void>) => {
       const chip = chipsRow.createDiv();
@@ -1345,7 +903,7 @@ export class FilterBar {
       });
     }
     if (this.host.filter.motivation && this.host.filter.motivation !== 'all') {
-      const motLabel = motConfig.find(m => m.value === this.host.filter.motivation)?.label || this.host.filter.motivation;
+      const motLabel = MOTIVATION_LABELS[this.host.filter.motivation] || this.host.filter.motivation;
       makeChip(`Motivation: ${motLabel}`, async () => {
         this.host.filter.motivation = 'all';
         await this.host.refreshListOnly();

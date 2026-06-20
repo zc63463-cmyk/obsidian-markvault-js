@@ -69,6 +69,7 @@ export interface ConnectionsContext {
 
   // App
   app: App;
+  filePath: string;
 
   // View 操作委托
   debouncedSave: () => void;
@@ -476,6 +477,7 @@ export function openAnnotationPicker(ctx: ConnectionsContext): void {
       await ctx.layoutAndRender();
       ctx.selectNode(newNode.id);
     },
+    ctx.filePath,
   );
   modal.open();
 }

@@ -6,7 +6,7 @@
  */
 
 import { App, Modal, Notice, Setting, TextComponent } from 'obsidian';
-import { getTagFrequencies, getGroupNames, getAllAnnotations, getKnownGroups, addKnownGroup } from '../../../db/annotation-repo';
+import { getTagFrequencies, getGroupNames, getAllAnnotations, getKnownGroups, addKnownGroup, removeKnownGroup } from '../../../db/annotation-repo';
 import type { AnnotationStore } from '../../../db/annotation-store';
 
 interface TagManagerHost {
@@ -274,6 +274,7 @@ export class TagManager {
       // P0 fix: 走 Store API
       const count = await this.host.store.renameGroup(oldName, newName);
       // 同步更新 knownGroups
+      removeKnownGroup(oldName);
       addKnownGroup(newName);
       this.host.onGroupsChanged?.();
       new Notice(`Renamed group "${oldName}" → "${newName}" (${count} annotations)`);
@@ -299,6 +300,8 @@ export class TagManager {
     delBtn.addEventListener('click', async () => {
       // P0 fix: 走 Store API
       const count = await this.host.store.deleteGroup(group);
+      removeKnownGroup(group);
+      this.host.onGroupsChanged?.();
       new Notice(`Removed group "${group}" from ${count} annotations`);
       modal.close();
       await this.host.refresh();

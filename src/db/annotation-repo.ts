@@ -186,15 +186,28 @@ export function getGroupNames(): string[] {
 
 // v6.1: Settings 中的 knownGroups，由插件在 loadSettings 后同步
 let __knownGroups: string[] = [];
+let _onKnownGroupsChanged: (() => void) | null = null;
+
 export function getKnownGroups(): string[] { return __knownGroups; }
-export function setKnownGroups(groups: string[]) { __knownGroups = groups; }
+export function setKnownGroups(groups: string[] | undefined | null) { __knownGroups = Array.isArray(groups) ? groups : []; }
+export function onKnownGroupsChanged(cb: () => void) { _onKnownGroupsChanged = cb; }
+
 export function addKnownGroup(name: string): void {
+  if (!name || !name.trim()) return;
   if (!__knownGroups.includes(name)) { __knownGroups.push(name); __knownGroups.sort(); }
+  _onKnownGroupsChanged?.();
 }
 
-/** 获取合并分组名（groups 字段 + tags 中 group: 前缀） */
+export function removeKnownGroup(name: string): void {
+  const idx = __knownGroups.indexOf(name);
+  if (idx >= 0) { __knownGroups.splice(idx, 1); _onKnownGroupsChanged?.(); }
+}
+
+/** 获取合并分组名（groups 字段 + tags 中 group: 前缀 + 已知分组） */
 export function getMergedGroupNames(): string[] {
-  return annotationStore.getMergedGroupNames();
+  const names = new Set(annotationStore.getMergedGroupNames());
+  for (const g of __knownGroups) names.add(g);
+  return Array.from(names).sort();
 }
 
 // ─── 孤儿标注清理 ─────────────────────────────────────

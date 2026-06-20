@@ -23,14 +23,21 @@ import {
   SearchComponent,
   Component,
   Menu,
-  Notice,
 } from 'obsidian';
 import type { StructureType } from '../types/mind-node';
 import type { AnnotationSearchEngine } from '../../search/search-engine';
-import type { AnnotationFilter } from '../../types/annotation';
-import { MASTERY_LABELS } from '../../types/annotation';
-import { getGroupNames, getTagFrequencies } from '../../db/annotation-repo';
+import type { AnnotationFilter, AnnotationMotivation } from '../../types/annotation';
+import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS } from '../../types/annotation';
+import { getFieldKeys, getFieldValues } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
+import {
+  PickerFilterState,
+  renderTypeFilterBtn,
+  renderMasteryFilterBtn,
+  renderTagsFilterBtn,
+  renderGroupFilterBtn,
+  doPickerSearch,
+} from '../../ui/components/search-filter-bar';
 
 // ═══════════════════════════════════════════════════════
 // 接口
@@ -64,9 +71,9 @@ export interface AnnotationDetail {
   createdAt: number;
   updatedAt: number;
   flags?: {
-    mastery?: number;
+    mastery?: string;
     confidence?: number;
-    reviewPriority?: number;
+    reviewPriority?: string;
     needsCorrection?: boolean;
   };
   relations?: Array<{ type: string; targetUuid: string }>;
@@ -131,8 +138,11 @@ export class AnnotationPickerModal extends Modal {
   private listEl!: HTMLElement;
   private countEl!: HTMLElement;
 
-  private filter: AnnotationFilter = { type: 'all', color: 'all', sortBy: 'position' };
-  private selectedTags: string[] = [];
+  // 搜索 + 筛选状态
+  private filterState = new PickerFilterState();
+  private searchScope: 'file' | 'all' = 'all';
+  private fieldFilterEntries: Array<{ key: string; value: string }> = [];
+  private filePath?: string;
   private searchQuery: string = '';
 
   private results: Array<{ uuid: string; text: string; note?: string; filePath?: string; tags?: string[] }> = [];
@@ -142,17 +152,19 @@ export class AnnotationPickerModal extends Modal {
     app: App,
     engine: AnnotationSearchEngine,
     onSelect: (uuid: string, summary: string) => void,
+    filePath?: string,
   ) {
     super(app);
     this.engine = engine;
     this.onSelect = onSelect;
+    this.filePath = filePath;
   }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.style.minWidth = '420px';
-    contentEl.style.maxWidth = '520px';
+    contentEl.style.minWidth = '460px';
+    contentEl.style.maxWidth = '580px';
     contentEl.style.maxHeight = '80vh';
     contentEl.style.overflow = 'hidden';
     contentEl.style.display = 'flex';
@@ -170,57 +182,125 @@ export class AnnotationPickerModal extends Modal {
       });
     });
 
+    // ── Scope 切换 ──
+    const scopeRow = contentEl.createDiv();
+    scopeRow.style.cssText = 'display:flex;gap:6px;margin:4px 0';
+
+    const fileBtn = scopeRow.createEl('button', {
+      text: '📄 Current File',
+    });
+    const allBtn = scopeRow.createEl('button', {
+      text: '📂 All Files',
+    });
+    const scopeBtnStyle = (btn: HTMLElement, active: boolean) => {
+      btn.style.cssText = 'padding:3px 12px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;' +
+        (active ? 'background:var(--interactive-accent,#483699);color:#fff;border-color:var(--interactive-accent,#483699);' :
+                'background:var(--background-primary,#fff);');
+    };
+    scopeBtnStyle(fileBtn, this.searchScope === 'file');
+    scopeBtnStyle(allBtn, this.searchScope === 'all');
+
+    fileBtn.addEventListener('click', () => {
+      this.searchScope = 'file';
+      scopeBtnStyle(fileBtn, true);
+      scopeBtnStyle(allBtn, false);
+      this._doSearch();
+    });
+    allBtn.addEventListener('click', () => {
+      this.searchScope = 'all';
+      scopeBtnStyle(fileBtn, false);
+      scopeBtnStyle(allBtn, true);
+      this._doSearch();
+    });
+
     // ── 筛选栏 ──
     const filterRow = contentEl.createDiv();
     filterRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:4px 0';
 
-    // Type
-    const typeBtn = this._addFilterBtn(filterRow, 'Type', () => {
+    const _onChange = () => this._doSearch();
+
+    // 共享筛选按钮
+    renderTypeFilterBtn(filterRow, this.filterState, _onChange);
+    renderMasteryFilterBtn(filterRow, this.filterState, _onChange);
+    renderTagsFilterBtn(filterRow, this.filterState, _onChange);
+    renderGroupFilterBtn(filterRow, this.filterState, _onChange);
+
+    // Color 筛选
+    const colorBtn = filterRow.createEl('button', {
+      text: '🎨',
+      cls: this.filterState.filter.color !== 'all' ? 'active' : '',
+      attr: { title: 'Filter by color' },
+    });
+    colorBtn.style.cssText = 'padding:2px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;background:var(--background-primary,#fff)';
+    colorBtn.addEventListener('click', () => {
       const menu = new Menu();
-      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.type = 'all'; typeBtn.textContent = 'Type'; this._doSearch(); }));
-      for (const t of ['highlight' as const, 'bold' as const, 'underline' as const]) {
-        menu.addItem(i => i.setTitle(t).onClick(() => { this.filter.type = t; typeBtn.textContent = t; this._doSearch(); }));
+      menu.addItem((item) => {
+        item.setTitle('All colors').setChecked(this.filterState.filter.color === 'all')
+          .onClick(() => { this.filterState.filter.color = 'all'; colorBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const pc of PRESET_COLORS) {
+        menu.addItem((item) => {
+          item.setTitle(pc.label).setChecked(this.filterState.filter.color === pc.id)
+            .onClick(() => { this.filterState.filter.color = pc.id; colorBtn.addClass('active'); this._doSearch(); });
+        });
       }
-      menu.showAtMouseEvent({ clientX: typeBtn.getBoundingClientRect().left, clientY: typeBtn.getBoundingClientRect().bottom } as MouseEvent);
+      menu.showAtMouseEvent({ clientX: colorBtn.getBoundingClientRect().left, clientY: colorBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
-    // Mastery
-    const masteryBtn = this._addFilterBtn(filterRow, 'Mastery', () => {
+    // Motivation 筛选
+    const motBtn = filterRow.createEl('button', {
+      text: '🎯 Intent',
+      attr: { title: 'Filter by motivation' },
+    });
+    motBtn.style.cssText = 'padding:2px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;background:var(--background-primary,#fff)';
+    motBtn.addEventListener('click', () => {
       const menu = new Menu();
-      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.mastery = 'all'; masteryBtn.textContent = 'Mastery'; this._doSearch(); }));
-      for (const [v, label] of Object.entries(MASTERY_LABELS)) {
-        menu.addItem(i => i.setTitle(label).onClick(() => { this.filter.mastery = v as any; masteryBtn.textContent = label; this._doSearch(); }));
+      menu.addItem((item) => {
+        item.setTitle('All').setChecked(!this.filterState.filter.motivation || this.filterState.filter.motivation === 'all')
+          .onClick(() => { this.filterState.filter.motivation = 'all'; motBtn.textContent = '🎯 Intent'; motBtn.removeClass('active'); this._doSearch(); });
+      });
+      for (const [m, label] of Object.entries(MOTIVATION_LABELS)) {
+        menu.addItem((item) => {
+          item.setTitle(label).setChecked(this.filterState.filter.motivation === m)
+            .onClick(() => { this.filterState.filter.motivation = m as AnnotationMotivation; motBtn.textContent = label; motBtn.addClass('active'); this._doSearch(); });
+        });
       }
-      menu.showAtMouseEvent({ clientX: masteryBtn.getBoundingClientRect().left, clientY: masteryBtn.getBoundingClientRect().bottom } as MouseEvent);
+      menu.showAtMouseEvent({ clientX: motBtn.getBoundingClientRect().left, clientY: motBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
-    // Tags
-    const tagsBtn = this._addFilterBtn(filterRow, '# Tags', () => {
-      const freqs = getTagFrequencies();
-      const menu = new Menu();
-      menu.addItem(i => i.setTitle('- Clear All -').onClick(() => { this.selectedTags = []; tagsBtn.textContent = '# Tags'; this._doSearch(); }));
-      menu.addSeparator();
-      for (const f of freqs.slice(0, 25)) {
-        const sel = this.selectedTags.includes(f.name);
-        menu.addItem(i => i.setTitle(f.name).setChecked(sel).onClick(() => {
-          if (sel) this.selectedTags = this.selectedTags.filter(t => t !== f.name);
-          else this.selectedTags.push(f.name);
-          tagsBtn.textContent = this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags';
-          this._doSearch();
-        }));
-      }
-      menu.showAtMouseEvent({ clientX: tagsBtn.getBoundingClientRect().left, clientY: tagsBtn.getBoundingClientRect().bottom } as MouseEvent);
+    // Field 筛选
+    const fieldBtn = filterRow.createEl('button', {
+      text: this.fieldFilterEntries.length > 0 ? `🏷️+${this.fieldFilterEntries.length}` : '+ Field',
+      attr: { title: 'Filter by custom field' },
     });
-
-    // Group
-    const groupBtn = this._addFilterBtn(filterRow, 'Group', () => {
-      const groups = getGroupNames();
+    fieldBtn.style.cssText = 'padding:2px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;background:var(--background-primary,#fff)';
+    fieldBtn.addEventListener('click', () => {
+      const keys = getFieldKeys();
       const menu = new Menu();
-      menu.addItem(i => i.setTitle('All').onClick(() => { this.filter.group = 'all'; groupBtn.textContent = 'Group'; this._doSearch(); }));
-      for (const g of groups.slice(0, 20)) {
-        menu.addItem(i => i.setTitle(g).onClick(() => { this.filter.group = g; groupBtn.textContent = g; this._doSearch(); }));
+      if (keys.length === 0) {
+        menu.addItem((item) => { item.setTitle('No fields found').setDisabled(true); });
+      } else {
+        for (const key of keys) {
+          menu.addItem((item) => {
+            item.setTitle(key).onClick(() => {
+              const values = getFieldValues(key);
+              const subMenu = new Menu();
+              for (const val of values) {
+                subMenu.addItem((si) => {
+                  si.setTitle(val).onClick(() => {
+                    this.fieldFilterEntries.push({ key, value: val });
+                    fieldBtn.textContent = `🏷️+${this.fieldFilterEntries.length}`;
+                    fieldBtn.addClass('active');
+                    this._doSearch();
+                  });
+                });
+              }
+              subMenu.showAtMouseEvent({ clientX: fieldBtn.getBoundingClientRect().left, clientY: fieldBtn.getBoundingClientRect().bottom } as MouseEvent);
+            });
+          });
+        }
       }
-      menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
+      menu.showAtMouseEvent({ clientX: fieldBtn.getBoundingClientRect().left, clientY: fieldBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
     // ── 结果计数 ──
@@ -237,30 +317,25 @@ export class AnnotationPickerModal extends Modal {
     setTimeout(() => this.searchComp.inputEl.focus(), 50);
   }
 
-  private _addFilterBtn(parent: HTMLElement, label: string, onClick: () => void): HTMLElement {
-    const btn = parent.createEl('button', { text: label });
-    btn.style.cssText = 'padding:2px 10px;border:1px solid var(--background-modifier-border,#ddd);border-radius:4px;cursor:pointer;font-size:11px;background:var(--background-primary,#fff)';
-    btn.addEventListener('click', onClick);
-    return btn;
-  }
-
   private _doSearch() {
-    // Sync filter
-    if (this.selectedTags.length > 0) {
-      this.filter.tags = this.selectedTags;
-    } else {
-      this.filter.tags = undefined;
+    // 构建额外筛选
+    const extraFilter: Partial<AnnotationFilter> = {};
+    if (this.fieldFilterEntries.length > 0) {
+      extraFilter.fieldFilters = {};
+      for (const entry of this.fieldFilterEntries) {
+        (extraFilter.fieldFilters as Record<string, string>)[entry.key] = entry.value;
+      }
     }
 
-    const results = this.engine.search({
+    const { results } = doPickerSearch({
+      engine: this.engine,
+      filterState: this.filterState,
       query: this.searchQuery || undefined,
-      scope: 'all',
-      filter: this.filter,
-      sortByRelevance: !!this.searchQuery,
-      limit: 25,
+      scope: this.searchScope,
+      filePath: this.searchScope === 'file' ? this.filePath : undefined,
     });
 
-    this.results = results.map(r => ({
+    this.results = results.slice(0, 25).map(r => ({
       uuid: r.annotation.uuid,
       text: r.annotation.text,
       note: r.annotation.note,
@@ -431,7 +506,7 @@ export class AnnotationDetailModal extends Modal {
 
       if (ann.flags.mastery !== undefined) {
         const m = flagContainer.createEl('span', { cls: 'mf-annotation-detail__flag' });
-        m.textContent = `掌握度: ${ann.flags.mastery}/5`;
+        m.textContent = `掌握度: ${MASTERY_LABELS[ann.flags.mastery as keyof typeof MASTERY_LABELS] || ann.flags.mastery}`;
       }
       if (ann.flags.confidence !== undefined) {
         const c = flagContainer.createEl('span', { cls: 'mf-annotation-detail__flag' });
@@ -439,7 +514,7 @@ export class AnnotationDetailModal extends Modal {
       }
       if (ann.flags.reviewPriority !== undefined) {
         const r = flagContainer.createEl('span', { cls: 'mf-annotation-detail__flag' });
-        r.textContent = `复习优先级: ${ann.flags.reviewPriority}`;
+        r.textContent = `复习优先级: ${REVIEW_PRIORITY_LABELS[ann.flags.reviewPriority as keyof typeof REVIEW_PRIORITY_LABELS] || ann.flags.reviewPriority}`;
       }
       if (ann.flags.needsCorrection) {
         const nc = flagContainer.createEl('span', { cls: 'mf-annotation-detail__flag mf-annotation-detail__flag--warning' });

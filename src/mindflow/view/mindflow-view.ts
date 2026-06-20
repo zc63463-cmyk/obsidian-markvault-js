@@ -1019,6 +1019,7 @@ export class MindFlowView extends ItemView {
       get meta() { return self.meta; },
       get selectedNodeId() { return self.selectedNodeId; },
       get app() { return self.app; },
+      get filePath() { return self.currentFile?.path ?? ''; },
       debouncedSave: () => self.debouncedSave(),
       layoutAndRender: () => self.layoutAndRender(),
       selectNode: (id) => self.selectNode(id),
