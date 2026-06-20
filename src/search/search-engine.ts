@@ -61,6 +61,16 @@ const BM25_B  = 0.75; // 长度归一化参数
 const FIELD_MULTIPLIER_SCALE = 100;    // 权重归一化分母
 const FIELD_MULTIPLIER_FACTOR = 5;     // 字段差异放大因子
 
+/** FNV-1a 32-bit hash (用于索引完整性校验) */
+function fnv1a(str: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 /** 模糊搜索参数 */
 const FUZZY_DEFAULT_MAX_EXPANSIONS = 5;   // 每 token 最多扩展数
 const FUZZY_MIN_TOKEN_LENGTH     = 3;     // token 最短长度才做模糊
@@ -304,13 +314,18 @@ export class AnnotationSearchEngine {
       docLengthEntries.push([uuid, len]);
     }
 
-    return {
+    const snapshot: IndexSnapshot = {
       version: 1,
       invertedIndex: indexEntries,
       docLengths: docLengthEntries,
       indexedCount: this._indexedCount,
       avgDocLength: this._avgDocLength,
     };
+
+    // v6.1: FNV-1a 校验和（排除 checksum 字段自身）
+    const { checksum: _, ...body } = snapshot as any;
+    snapshot.checksum = fnv1a(JSON.stringify(body));
+    return snapshot;
   }
 
   /**
@@ -320,6 +335,17 @@ export class AnnotationSearchEngine {
    * 再调用此方法。如果快照不可用或版本不匹配，则走普通 _ensureIndex 路径。
    */
   importIndex(snapshot: IndexSnapshot): void {
+    // v6.1: 校验和验证（旧版本快照无 checksum 则跳过）
+    if (snapshot.checksum) {
+      const { checksum: _, ...body } = snapshot as any;
+      const expected = fnv1a(JSON.stringify(body));
+      if (expected !== snapshot.checksum) {
+        throw new Error(
+          `MarkVault: search index checksum mismatch (expected ${expected}, got ${snapshot.checksum}). Index will be rebuilt.`,
+        );
+      }
+    }
+
     this._invertedIndex.clear();
     for (const [token, uuids] of snapshot.invertedIndex) {
       this._invertedIndex.set(token, new Set(uuids));
@@ -333,6 +359,7 @@ export class AnnotationSearchEngine {
     this._indexedCount = snapshot.indexedCount;
     this._avgDocLength = snapshot.avgDocLength;
     this._dirty = false;
+    this._sortedTokensCache = null; // 重建缓存
   }
 
   // ─── Private: 索引管理 ─────────────────────────────────
@@ -351,6 +378,7 @@ export class AnnotationSearchEngine {
   private _rebuildIndex(): void {
     this._invertedIndex.clear();
     this._docLengths.clear();
+    this._sortedTokensCache = null;
     const all = this.store.getAllAnnotations();
 
     let totalDocLen = 0;
@@ -689,13 +717,23 @@ export class AnnotationSearchEngine {
     const seen = new Set(tokens);
 
     for (const token of tokens) {
-      // 跳过长段过短 / 已在索引中 → 不需要扩展
       if (token.length < PREFIX_MIN_TOKEN_LENGTH) continue;
       if (this._invertedIndex.has(token)) continue;
 
+      // v6.1: 二分查找 + 范围扫描替代 O(n) 遍历
       let expansions = 0;
-      for (const [indexedToken] of this._invertedIndex) {
-        if (!indexedToken.startsWith(token)) continue;
+      const sortedTokens = this._getSortedTokens();
+      // 找到第一个 ≥ token 的位置
+      let lo = 0, hi = sortedTokens.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (sortedTokens[mid] < token) lo = mid + 1;
+        else hi = mid;
+      }
+      // 从 lo 开始扫描所有以 token 为前缀的 token
+      for (let i = lo; i < sortedTokens.length; i++) {
+        const indexedToken = sortedTokens[i];
+        if (!indexedToken.startsWith(token)) break;
         if (seen.has(indexedToken)) continue;
 
         seen.add(indexedToken);
@@ -708,6 +746,16 @@ export class AnnotationSearchEngine {
     }
 
     return result;
+  }
+
+  /** v6.1: 排序后的索引 token 数组（惰性缓存） */
+  private _sortedTokensCache: string[] | null = null;
+
+  private _getSortedTokens(): string[] {
+    if (!this._sortedTokensCache) {
+      this._sortedTokensCache = [...this._invertedIndex.keys()].sort();
+    }
+    return this._sortedTokensCache;
   }
 
   // ─── Private: 模糊搜索 ─────────────────────────────────
@@ -905,11 +953,22 @@ export class AnnotationSearchEngine {
     return 'text';
   }
 
+  /** v6.1: 多字段 snippet 提取 (text > note > tags > alias > fields) */
   private _findBestSnippet(ann: Annotation, tokens: string[]): string {
-    const lowerText = ann.text.toLowerCase();
-    for (const token of tokens) {
-      if (lowerText.includes(token)) {
-        return this._snippetAround(ann.text, token);
+    const fieldTexts: Array<{ label: string; text: string }> = [
+      { label: '', text: ann.text },
+      { label: '📝 ', text: ann.note || '' },
+      { label: '#', text: ann.tags.join(' ') },
+      { label: '', text: ann.alias || '' },
+      { label: '', text: ann.fields ? Object.values(ann.fields).join(' ') : '' },
+    ];
+    for (const { label, text } of fieldTexts) {
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      for (const token of tokens) {
+        if (lower.includes(token)) {
+          return label + this._snippetAround(text, token);
+        }
       }
     }
     return ann.text.slice(0, 60) + (ann.text.length > 60 ? '…' : '');

@@ -94,6 +94,7 @@ export interface IndexSnapshot {
   docLengths: Array<[string, number]>;        // uuid → tokenCount
   indexedCount: number;
   avgDocLength: number;
+  checksum?: string;                          // v6.1: FNV-1a hash of content for integrity check
 }
 
 /** 搜索 Facets：结果集按维度的分布统计（参考 Orama facets） */
