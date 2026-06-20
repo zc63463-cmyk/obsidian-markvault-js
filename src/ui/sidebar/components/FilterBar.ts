@@ -1,7 +1,7 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
-import { getFieldKeys, getFieldValues, getGroupNames, getMergedGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
+import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
 
 /** 标签树节点 */
 interface TagTreeNode {
@@ -982,7 +982,7 @@ export class FilterBar {
     const hasGroup = !!(this.host.filter.group && this.host.filter.group !== 'all');
     const { body: groupBody } = createSection(scrollContainer, 'Group', hasGroup);
 
-    const groups = getMergedGroupNames();
+    const groups = getGroupNames();
     createOptionRow(groupBody, 'All', !this.host.filter.group || this.host.filter.group === 'all', async () => {
       this.host.filter.group = 'all';
       await this.host.refreshListOnly();

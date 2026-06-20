@@ -282,13 +282,14 @@ async function testFilterEngine() {
     if (r.length !== 0) throw new Error(`'范式' should NOT match path tags, got ${r.length}`);
   });
 
-  await test('Group filter: groups field + group: prefix tag', () => {
-    // h5/h6 有 tags: ["group:ch12"], a4 有 groups: ["ch12"]
+  await test('Group filter: groups field only', () => {
+    // groups 是独立维度，不混入 tags group: 前缀
+    // h5/h6 有 tags group:ch12 但无 groups 字段, a4 有 groups: ["ch12"]
     const r1 = applyUnifiedFilter(annsHierarchy, { group: 'ch12' });
-    if (r1.length !== 2) throw new Error(`group:ch12 from tags should match 2, got ${r1.length}`);
-    // 验证旧 groups 字段仍然有效
+    if (r1.length !== 0) throw new Error(`no annotations should have groups=['ch12']`);
+    // 旧 groups 字段仍然有效
     const r2 = applyUnifiedFilter(anns, { group: 'ch12' });
-    if (r2.length !== 1 || r2[0].uuid !== 'a4') throw new Error('legacy groups still work');
+    if (r2.length !== 1 || r2[0].uuid !== 'a4') throw new Error('legacy groups should work');
   });
 
   await test('Multi-tag AND filter', () => {

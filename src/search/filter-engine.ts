@@ -137,11 +137,7 @@ export function applyUnifiedFilter(
 
   if (filter.group && filter.group !== 'all') {
     const groupVal = filter.group as string;
-    // v6.0 双读：groups 字段 + tags 中 group: 前缀
-    results = results.filter(a =>
-      (a.groups?.includes(groupVal) ?? false) ||
-      a.tags.some(t => t === `group:${groupVal}`)
-    );
+    results = results.filter(a => a.groups?.includes(groupVal) ?? false);
   }
 
   // v5.x: tag 过滤（v6.0 层级支持：筛选父级自动包含所有子标签）
