@@ -18,7 +18,7 @@ import type { RelationSchema } from '../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, MOTIVATION_LABELS, REVIEW_PRIORITY_LABELS, SEMANTIC_GROUPS } from '../../types/annotation';
 import type { AnnotationSearchEngine } from '../../search/search-engine';
 import type { SearchResult } from '../../search/types';
-import { getGroupNames, getFieldKeys, getFieldValues } from '../../db/annotation-repo';
+import { getGroupNames, getFieldKeys, getFieldValues, getTagFrequencies } from '../../db/annotation-repo';
 import { debounce } from '../../utils/debounce';
 
 // v5.12: SEMANTIC_GROUPS 已提取到 annotation.ts 作为共享常量
@@ -55,6 +55,7 @@ export class RelationPickerModal extends Modal {
     sortBy: 'position',
   };
   private fieldFilterEntries: Array<{ key: string; value: string }> = [];
+  private selectedTags: string[] = []; // v6.1: tag 多选筛选
   private searchQuery: string = '';
 
   constructor(
@@ -232,6 +233,47 @@ export class RelationPickerModal extends Modal {
         });
       }
       menu.showAtMouseEvent({ clientX: groupBtn.getBoundingClientRect().left, clientY: groupBtn.getBoundingClientRect().bottom } as MouseEvent);
+    });
+
+    // v6.1: Tags 多选筛选
+    const tagsBtn = filterRow.createEl('button', {
+      text: this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags',
+      cls: `markvault-picker-filter-btn ${this.selectedTags.length > 0 ? 'active' : ''}`,
+      attr: { title: 'Filter by tags (multi-select AND)' },
+    });
+    tagsBtn.addEventListener('click', () => {
+      const frequencies = getTagFrequencies();
+      const menu = new Menu();
+      if (frequencies.length === 0) {
+        menu.addItem((item) => { item.setTitle('No tags found').setDisabled(true); });
+      } else {
+        // Clear all
+        menu.addItem((item) => {
+          item.setTitle('- Clear All -').onClick(() => {
+            this.selectedTags = [];
+            tagsBtn.textContent = '# Tags';
+            tagsBtn.removeClass('active');
+            this._doSearch();
+          });
+        });
+        menu.addSeparator();
+        for (const f of frequencies.slice(0, 30)) {
+          const isSelected = this.selectedTags.includes(f.name);
+          menu.addItem((item) => {
+            item.setTitle(f.name).setChecked(isSelected).onClick(() => {
+              if (isSelected) {
+                this.selectedTags = this.selectedTags.filter(t => t !== f.name);
+              } else {
+                this.selectedTags.push(f.name);
+              }
+              tagsBtn.textContent = this.selectedTags.length > 0 ? `# ${this.selectedTags.length}` : '# Tags';
+              if (this.selectedTags.length > 0) tagsBtn.addClass('active'); else tagsBtn.removeClass('active');
+              this._doSearch();
+            });
+          });
+        }
+      }
+      menu.showAtMouseEvent({ clientX: tagsBtn.getBoundingClientRect().left, clientY: tagsBtn.getBoundingClientRect().bottom } as MouseEvent);
     });
 
     // Field 筛选（与侧边栏 FilterBar 一致的 + Field 按钮）
@@ -419,6 +461,13 @@ export class RelationPickerModal extends Modal {
       this.filter.fieldFilters = undefined;
     }
 
+    // v6.1: 同步 selectedTags → filter.tags
+    if (this.selectedTags.length > 0) {
+      this.filter.tags = this.selectedTags;
+    } else {
+      this.filter.tags = undefined;
+    }
+
     const results = this.engine.search({
       query: this.searchQuery || undefined,
       scope: this.searchScope === 'file' ? 'file' : 'all',
@@ -559,6 +608,10 @@ export class RelationPickerModal extends Modal {
     }
     if (this.filter.group && this.filter.group !== 'all') {
       tags.push({ label: `Group: ${this.filter.group}`, onRemove: () => { this.filter.group = 'all'; this._doSearch(); } });
+    }
+    // v6.1: tag 多选芯片
+    for (const t of this.selectedTags) {
+      tags.push({ label: `#${t}`, onRemove: () => { this.selectedTags = this.selectedTags.filter(st => st !== t); this._doSearch(); } });
     }
     for (let i = 0; i < this.fieldFilterEntries.length; i++) {
       const entry = this.fieldFilterEntries[i];
