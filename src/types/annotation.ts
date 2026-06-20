@@ -731,7 +731,8 @@ export interface AnnotationFilter {
   color?: string | 'all';
   hasNote?: boolean;
   searchQuery?: string;
-  fieldFilters?: Record<string, string>;  // v3.0: 字段过滤
+  fieldFilters?: Record<string, string>;  // v3.0: 字段过滤(单值)
+  fieldFiltersMulti?: Record<string, string[]>; // v6.1: 字段过滤(分面多值 OR)
   sortBy?: 'position' | 'createdAt' | 'updatedAt';
 
   // v4.0: 元数据扩展过滤

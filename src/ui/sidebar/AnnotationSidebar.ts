@@ -53,6 +53,7 @@ export class AnnotationSidebar extends ItemView {
 
   // Phase 3: 字段过滤状态
   private fieldFilterEntries: Array<{ key: string; value: string }> = [];
+  private fieldMultiValues: Record<string, string[]> = {}; // v6.1: 分面多值
 
   // v6.1: 多选 tag 状态
   private selectedTags: string[] = [];
@@ -96,6 +97,7 @@ export class AnnotationSidebar extends ItemView {
       filter: this.filter,
       fieldFilterEntries: this.fieldFilterEntries,
       selectedTags: this.selectedTags,
+      fieldMultiValues: this.fieldMultiValues,
       refreshListOnly: () => this.refreshListOnly(),
     });
     this.batchBar = new BatchBar({
@@ -519,6 +521,13 @@ export class AnnotationSidebar extends ItemView {
       }
     } else {
       this.filter.fieldFilters = undefined;
+    }
+
+    // v6.1: 同步分面多值到 filter
+    if (Object.keys(this.fieldMultiValues).length > 0) {
+      this.filter.fieldFiltersMulti = this.fieldMultiValues;
+    } else {
+      this.filter.fieldFiltersMulti = undefined;
     }
 
     // v6.1: 同步多选 tag 到 filter

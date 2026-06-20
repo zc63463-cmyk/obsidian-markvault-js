@@ -46,6 +46,7 @@ export function hasActiveFilters(filter: AnnotationFilter): boolean {
   if (filter.color && filter.color !== 'all') return true;
   if (filter.hasNote) return true;
   if (filter.fieldFilters && Object.keys(filter.fieldFilters).length > 0) return true;
+  if (filter.fieldFiltersMulti && Object.keys(filter.fieldFiltersMulti).length > 0) return true;
   if (filter.mastery && filter.mastery !== 'all') return true;
   if (filter.reviewPriority && filter.reviewPriority !== 'all') return true;
   if (filter.group && filter.group !== 'all') return true;
@@ -101,15 +102,25 @@ export function applyUnifiedFilter(
     for (const [key, value] of Object.entries(filter.fieldFilters)) {
       results = results.filter(a => {
         if (!a.fields) return false;
-        // 精确匹配：key 完全一致
         if (a.fields[key] !== undefined && a.fields[key] === value) return true;
-        // u: 命名空间兼容：裸键 "source" 也能匹配 "u:source"
         const strippedKey = stripUserFieldPrefix(key);
         if (strippedKey !== key && a.fields[strippedKey] !== undefined && a.fields[strippedKey] === value) return true;
-        // 反向兼容：filter 中的裸键匹配带 u: 前缀的字段
         const prefixedKey = 'u:' + key;
         if (a.fields[prefixedKey] !== undefined && a.fields[prefixedKey] === value) return true;
         return false;
+      });
+    }
+  }
+
+  // v6.1: 分面多值过滤（同 key 内 OR，跨 key AND）
+  if (filter.fieldFiltersMulti && Object.keys(filter.fieldFiltersMulti).length > 0) {
+    for (const [key, values] of Object.entries(filter.fieldFiltersMulti)) {
+      results = results.filter(a => {
+        if (!a.fields) return false;
+        const match = (v: string) => a.fields![key] === v
+          || a.fields![stripUserFieldPrefix(key)] === v
+          || a.fields!['u:' + key] === v;
+        return values.some(v => match(v));
       });
     }
   }

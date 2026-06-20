@@ -297,6 +297,23 @@ async function testFilterEngine() {
     if (r[0].uuid !== 'h1') throw new Error('multi-tag wrong uuid');
   });
 
+  // Phase 3: 分面多值 field 过滤
+  const annsFields: Annotation[] = [
+    makeAnn({ uuid: 'f1', text: '欧拉公式', fields: { 'u:difficulty': '进阶', 'u:source': '课本' } }),
+    makeAnn({ uuid: 'f2', text: '费马定理', fields: { 'u:difficulty': '进阶', 'u:source': '真题' } }),
+    makeAnn({ uuid: 'f3', text: '高斯定理', fields: { 'u:difficulty': '基础', 'u:source': '课本' } }),
+  ];
+
+  await test('Faceted field: single key multi-value OR', () => {
+    const r = applyUnifiedFilter(annsFields, { fieldFiltersMulti: { 'u:difficulty': ['进阶'] } });
+    if (r.length !== 2) throw new Error(`multi-value OR: expected 2, got ${r.length}`);
+  });
+
+  await test('Faceted field: cross-key AND', () => {
+    const r = applyUnifiedFilter(annsFields, { fieldFiltersMulti: { 'u:difficulty': ['进阶'], 'u:source': ['课本'] } });
+    if (r.length !== 1 || r[0].uuid !== 'f1') throw new Error('cross-key AND wrong');
+  });
+
   await test('Multi-tag AND with hierarchy prefix', () => {
     const r = applyUnifiedFilter(annsHierarchy, { tags: ['数据库', '重要'] });
     if (r.length !== 1) throw new Error(`hierarchy AND wrong, got ${r.length}`);

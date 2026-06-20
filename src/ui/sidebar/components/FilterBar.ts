@@ -20,6 +20,7 @@ export interface FilterBarHost {
   filter: AnnotationFilter;
   fieldFilterEntries: Array<{ key: string; value: string }>;
   selectedTags: string[];
+  fieldMultiValues: Record<string, string[]>; // v6.1: 分面多值
   refreshListOnly(): Promise<void>;
 }
 
@@ -144,15 +145,14 @@ export class FilterBar {
       }
     }
 
-    // 添加字段过滤按钮（+ 图标）
+    // 添加字段过滤按钮（分面 Popover）
     const addFieldFilterBtn = fieldRow.createEl('button', {
       text: this.host.fieldFilterEntries.length > 0 ? '+' : '+ Field',
       cls: 'markvault-add-field-filter-btn',
-      attr: { title: 'Add field filter' },
+      attr: { title: 'Add field filter (faceted)' },
     });
     addFieldFilterBtn.addEventListener('click', async () => {
-      const keys = await getFieldKeys();
-      this.showAddFieldFilterMenu(addFieldFilterBtn, keys);
+      this.showFacetedFieldPopover(addFieldFilterBtn);
     });
 
     // ── 第四行：v4.0 元数据过滤（统一面板） ──
@@ -168,6 +168,97 @@ export class FilterBar {
     filterBtn.addEventListener('click', () => {
       this.showUnifiedMetaPopover(filterBtn);
     });
+  }
+
+  /** v6.1: 分面字段 Popover — 折叠面板 + 多选 */
+  private async showFacetedFieldPopover(anchor: HTMLElement): Promise<void> {
+    const existing = document.querySelector('.markvault-faceted-field-popover');
+    if (existing) { existing.remove(); return; }
+
+    const keys = await getFieldKeys();
+    const fv = this.host.fieldMultiValues ?? {};
+
+    const popover = document.body.createDiv({ cls: 'markvault-faceted-field-popover' });
+    const r = anchor.getBoundingClientRect();
+    Object.assign(popover.style, {
+      position: 'fixed', left: `${r.left}px`, top: `${r.bottom + 4}px`,
+      width: '240px', maxHeight: '400px', overflowY: 'auto',
+      background: 'var(--background-primary,#fff)',
+      border: '1px solid var(--background-modifier-border,#ccc)',
+      borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,.15)', zIndex: '9999',
+    });
+
+    if (keys.length === 0) {
+      popover.createDiv({ text: 'No fields in annotations' }).style.padding = '12px';
+      return;
+    }
+
+    for (const key of keys) {
+      const section = popover.createDiv();
+      const header = section.createDiv();
+      Object.assign(header.style, { padding: '6px 12px', fontWeight: '600', fontSize: '12px', cursor: 'pointer',
+        background: 'var(--background-secondary,#f5f5f5)', borderBottom: '1px solid var(--background-modifier-border,#ddd)' });
+      header.textContent = key;
+
+      const selected = fv[key] ?? [];
+      const values = await getFieldValues(key);
+      for (const val of values) {
+        const row = section.createDiv();
+        const checked = selected.includes(val);
+        Object.assign(row.style, { display: 'flex', alignItems: 'center', padding: '3px 16px', fontSize: '12px',
+          cursor: 'pointer', transition: 'background .1s' });
+        if (checked) { row.style.background = 'var(--interactive-accent,#483699)'; row.style.color = '#fff'; }
+
+        const cb = row.createSpan({ text: checked ? '☑ ' : '☐ ' });
+        row.createSpan({ text: val });
+        row.addEventListener('click', () => {
+          const arr = fv[key] ?? [];
+          if (arr.includes(val)) {
+            arr.splice(arr.indexOf(val), 1);
+            if (arr.length === 0) delete fv[key];
+          } else {
+            if (!fv[key]) fv[key] = [];
+            fv[key].push(val);
+          }
+          row.style.background = !arr.includes(val) ? 'none' : 'var(--interactive-accent,#483699)';
+          row.style.color = !arr.includes(val) ? '' : '#fff';
+          cb.textContent = !arr.includes(val) ? '☐ ' : '☑ ';
+        });
+      }
+    }
+
+    const footer = popover.createDiv();
+    footer.style.cssText = 'display:flex;justify-content:flex-end;padding:8px 12px;border-top:1px solid var(--background-modifier-border,#ddd);gap:6px';
+
+    const applyBtn = footer.createEl('button', { text: 'Apply' });
+    applyBtn.style.cssText = 'padding:4px 12px;border:none;border-radius:4px;cursor:pointer;color:#fff;background:var(--interactive-accent,#483699);font-size:12px';
+    applyBtn.addEventListener('click', async () => {
+      this.host.fieldMultiValues = fv;
+      // 同步到旧 fieldFilterEntries
+      this.host.fieldFilterEntries.length = 0;
+      for (const [k, vs] of Object.entries(fv)) {
+        for (const v of vs) this.host.fieldFilterEntries.push({ key: k, value: v });
+      }
+      popover.remove();
+      await this.host.refreshListOnly();
+    });
+
+    const clearBtn = footer.createEl('button', { text: 'Clear' });
+    Object.assign(clearBtn.style, { padding: '4px 12px', border: '1px solid var(--background-modifier-border,#ccc)',
+      borderRadius: '4px', cursor: 'pointer', background: 'var(--background-secondary,#f5f5f5)', fontSize: '12px' });
+    clearBtn.addEventListener('click', async () => {
+      this.host.fieldMultiValues = {};
+      this.host.fieldFilterEntries.length = 0;
+      popover.remove();
+      await this.host.refreshListOnly();
+    });
+
+    const _onOutside = (e: MouseEvent) => {
+      if (!popover.contains(e.target as Node) && e.target !== anchor) {
+        popover.remove(); document.removeEventListener('click', _onOutside, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', _onOutside, true), 0);
   }
 
   private showAddFieldFilterMenu(anchor: HTMLElement, fieldKeys: string[]) {
