@@ -156,6 +156,16 @@ export class IndexLayer {
     return Array.from(this._byGroup.keys()).sort();
   }
 
+  /** 获取合并后的分组名（groups 字段 + tags 中 group: 前缀） */
+  getMergedGroupNames(): string[] {
+    const names = new Set<string>();
+    for (const g of this._byGroup.keys()) names.add(g);
+    for (const tag of this._byTag.keys()) {
+      if (tag.startsWith('group:')) names.add(tag.slice(6));
+    }
+    return Array.from(names).sort();
+  }
+
   // ─── v6.0: 多文档类型查询 ─────────────────────────────
 
   /** 按文档类型获取标注 UUID 集合 */

@@ -182,6 +182,11 @@ export function getGroupNames(): string[] {
   return annotationStore.getGroupNames();
 }
 
+/** 获取合并分组名（groups 字段 + tags 中 group: 前缀） */
+export function getMergedGroupNames(): string[] {
+  return annotationStore.getMergedGroupNames();
+}
+
 // ─── 孤儿标注清理 ─────────────────────────────────────
 
 /**

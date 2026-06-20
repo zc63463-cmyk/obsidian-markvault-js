@@ -1,7 +1,7 @@
 import { Menu } from 'obsidian';
 import type { AnnotationFilter } from '../../../types/annotation';
 import { PRESET_COLORS, MASTERY_LABELS, REVIEW_PRIORITY_LABELS } from '../../../types/annotation';
-import { getFieldKeys, getFieldValues, getGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
+import { getFieldKeys, getFieldValues, getGroupNames, getMergedGroupNames, getTagFrequencies } from '../../../db/annotation-repo';
 
 /**
  * FilterBar —— 侧边栏过滤栏
@@ -183,7 +183,7 @@ export class FilterBar {
       attr: { title: 'Filter by group' },
     });
     groupBtn.addEventListener('click', () => {
-      const groups = getGroupNames();
+      const groups = getMergedGroupNames(); // v6.0: 合并 groups 字段 + tags group: 前缀
       const menu = new Menu();
       menu.addItem((item) => {
         item.setTitle('All').setChecked(!this.host.filter.group || this.host.filter.group === 'all')
@@ -297,7 +297,7 @@ export class FilterBar {
     menu.showAtMouseEvent({ clientX: anchor.getBoundingClientRect().left, clientY: anchor.getBoundingClientRect().bottom } as MouseEvent);
   }
 
-  /** Tag 过滤器 Popover：内置搜索 + 频率排序 */
+  /** Tag 过滤器 Popover：内置搜索 + 频率排序 + 层级缩进 */
   private showTagFilterPopover(anchor: HTMLElement): void {
     // 关闭旧 popover（如果存在）
     const existing = document.querySelector('.markvault-tag-filter-popover');
@@ -306,14 +306,60 @@ export class FilterBar {
     const frequencies = getTagFrequencies();
     const currentTag = this.host.filter.tag;
     const rect = anchor.getBoundingClientRect();
+    const popoverWidth = 240;
+
+    // ── 构建层级树 ──
+    interface TagTreeNode {
+      fullPath: string;
+      label: string;
+      children: TagTreeNode[];
+      count: number;
+    }
+    const rootNodes: TagTreeNode[] = [];
+    const nodeMap = new Map<string, TagTreeNode>();
+
+    for (const f of frequencies) {
+      const parts = f.name.split('/');
+      let parentList = rootNodes;
+      let parentPath = '';
+
+      for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i];
+        const currentPath = parentPath ? `${parentPath}/${seg}` : seg;
+        let node = nodeMap.get(currentPath);
+        if (!node) {
+          node = { fullPath: currentPath, label: seg, children: [], count: 0 };
+          nodeMap.set(currentPath, node);
+          parentList.push(node);
+        }
+        // leaf count（终端的 count 来自 frequencies）
+        if (i === parts.length - 1) {
+          node.count = f.count;
+        }
+        parentList = node.children;
+        parentPath = currentPath;
+      }
+    }
+
+    // 计算非叶子节点的总标注数（子节点 count 之和）
+    function computeCounts(nodes: TagTreeNode[]): number {
+      let total = 0;
+      for (const n of nodes) {
+        const childSum = computeCounts(n.children);
+        if (n.count === 0) n.count = childSum; // 非叶子节点用子节点合计
+        total += n.count;
+      }
+      return total;
+    }
+    computeCounts(rootNodes);
 
     // ── Popover 容器 ──
     const popover = document.body.createDiv({ cls: 'markvault-tag-filter-popover' });
     popover.style.position = 'fixed';
     popover.style.left = `${rect.left}px`;
     popover.style.top = `${rect.bottom + 4}px`;
-    popover.style.width = '220px';
-    popover.style.maxHeight = '320px';
+    popover.style.width = `${popoverWidth}px`;
+    popover.style.maxHeight = '360px';
     popover.style.display = 'flex';
     popover.style.flexDirection = 'column';
     popover.style.background = 'var(--background-primary, #fff)';
@@ -339,34 +385,108 @@ export class FilterBar {
     searchInput.style.color = 'var(--text-normal, #333)';
     searchInput.style.outline = 'none';
 
-    // ── 列表容器（可滚动） ──
+    // ── 列表容器 ──
     const listContainer = popover.createDiv({ cls: 'markvault-tag-filter-list' });
     listContainer.style.flex = '1';
     listContainer.style.overflowY = 'auto';
     listContainer.style.padding = '4px';
 
-    // ── 渲染函数 ──
+    // ── 通用行渲染 ──
+    const createItemRow = (label: string, fullPath: string, count: number, depth: number, isActive: boolean): HTMLElement => {
+      const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
+      item.style.display = 'flex';
+      item.style.justifyContent = 'space-between';
+      item.style.alignItems = 'center';
+      item.style.padding = '5px 10px';
+      item.style.paddingLeft = `${10 + depth * 14}px`;
+      item.style.borderRadius = '6px';
+      item.style.cursor = 'pointer';
+      item.style.fontSize = '13px';
+      item.style.transition = 'background 0.1s';
+
+      if (isActive) {
+        item.style.background = 'var(--interactive-accent, #483699)';
+        item.style.color = '#fff';
+      }
+
+      const leftSide = item.createSpan();
+      // 层级引导线
+      if (depth > 0) {
+        leftSide.style.color = isActive ? 'rgba(255,255,255,0.5)' : 'var(--text-faint, #bbb)';
+        leftSide.style.marginRight = '4px';
+        leftSide.style.fontSize = '11px';
+      }
+
+      // leaf 图标 vs folder 图标
+      const hasChildren = nodeMap.get(fullPath)?.children?.length ?? 0 > 0;
+      const icon = hasChildren ? '▸ ' : '  ';
+      leftSide.appendText(icon + label);
+
+      const countBadge = item.createSpan({ text: `${count}`, cls: 'markvault-tag-filter-count' });
+      countBadge.style.fontSize = '11px';
+      countBadge.style.padding = '1px 6px';
+      countBadge.style.borderRadius = '10px';
+      countBadge.style.background = isActive ? 'rgba(255,255,255,0.3)' : 'var(--background-modifier-hover, #f0f0f0)';
+
+      item.addEventListener('mouseenter', () => {
+        if (!isActive) item.style.background = 'var(--background-modifier-hover, rgba(0,0,0,0.05))';
+      });
+      item.addEventListener('mouseleave', () => {
+        if (!isActive) item.style.background = '';
+      });
+      item.addEventListener('click', async () => {
+        this.host.filter.tag = fullPath;
+        popover.remove();
+        await this.host.refreshListOnly();
+      });
+      return item;
+    };
+
+    // ── 递归渲染树节点 ──
+    const renderTree = (nodes: TagTreeNode[], depth: number, query: string) => {
+      const q = query.toLowerCase();
+      for (const node of nodes) {
+        const matchSelf = !q || node.label.toLowerCase().includes(q);
+        const hasMatchingChildren = !q || node.children.some(c => c.label.toLowerCase().includes(q));
+
+        if (matchSelf || hasMatchingChildren) {
+          createItemRow(node.label, node.fullPath, node.count, depth, currentTag === node.fullPath);
+          if (node.children.length > 0) {
+            renderTree(node.children, depth + 1, query);
+          }
+        }
+      }
+    };
+
+    // ── 搜索模式的扁平渲染 ──
+    const renderFlatSearch = (query: string) => {
+      const q = query.toLowerCase();
+      const allNodes = [...nodeMap.values()];
+      // 先排序：以 q 开头的排前面，再按 count 降序
+      allNodes.sort((a, b) => {
+        const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
+        const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
+        if (aStarts !== bStarts) return aStarts - bStarts;
+        return b.count - a.count || a.label.localeCompare(b.label);
+      });
+
+      for (const node of allNodes) {
+        if (node.label.toLowerCase().includes(q)) {
+          // 搜索模式显示完整路径
+          const displayLabel = node.fullPath.includes('/') ? node.fullPath : node.label;
+          createItemRow(displayLabel, node.fullPath, node.count, 0, currentTag === node.fullPath);
+        }
+      }
+    };
+
+    // ── 主渲染 ──
     const renderList = (query: string) => {
       listContainer.empty();
-      const q = query.toLowerCase().trim();
-
-      let filtered = frequencies;
-      if (q) {
-        filtered = frequencies.filter(f => f.name.toLowerCase().includes(q));
-        // 搜索模式下优先匹配开头（排序微调）
-        filtered.sort((a, b) => {
-          const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
-          const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
-          if (aStarts !== bStarts) return aStarts - bStarts;
-          return b.count - a.count || a.name.localeCompare(b.name);
-        });
-      }
 
       // "All" 选项
       const allItem = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
       allItem.style.display = 'flex';
       allItem.style.justifyContent = 'space-between';
-      allItem.style.alignItems = 'center';
       allItem.style.padding = '6px 10px';
       allItem.style.borderRadius = '6px';
       allItem.style.cursor = 'pointer';
@@ -382,78 +502,64 @@ export class FilterBar {
         await this.host.refreshListOnly();
       });
 
-      if (filtered.length === 0) {
+      const q = query.toLowerCase().trim();
+
+      if (rootNodes.length === 0) {
         const noItem = listContainer.createDiv();
-        noItem.style.padding = '20px 10px';
+        noItem.style.padding = '16px 10px';
         noItem.style.textAlign = 'center';
         noItem.style.color = 'var(--text-muted, #888)';
         noItem.style.fontSize = '12px';
-        noItem.textContent = 'No matching tags';
+        noItem.textContent = 'No tags in any annotation';
         return;
       }
 
-      for (const f of filtered) {
-        const item = listContainer.createDiv({ cls: 'markvault-tag-filter-item' });
-        item.style.display = 'flex';
-        item.style.justifyContent = 'space-between';
-        item.style.alignItems = 'center';
-        item.style.padding = '6px 10px';
-        item.style.borderRadius = '6px';
-        item.style.cursor = 'pointer';
-        item.style.fontSize = '13px';
-        item.style.transition = 'background 0.1s';
+      const hasHierarchy = rootNodes.some(n => n.children.length > 0);
 
-        if (currentTag === f.name) {
-          item.style.background = 'var(--interactive-accent, #483699)';
-          item.style.color = '#fff';
+      if (q && hasHierarchy) {
+        // 有搜索且有层级：走扁平路径（搜索模式）
+        renderFlatSearch(q);
+      } else if (q) {
+        // 有搜索但无层级：扁平过滤
+        const flat = [...nodeMap.values()];
+        flat.sort((a, b) => {
+          const aStarts = a.label.toLowerCase().startsWith(q) ? 0 : 1;
+          const bStarts = b.label.toLowerCase().startsWith(q) ? 0 : 1;
+          if (aStarts !== bStarts) return aStarts - bStarts;
+          return b.count - a.count;
+        });
+        let shown = 0;
+        for (const node of flat) {
+          if (node.label.toLowerCase().includes(q)) {
+            createItemRow(node.label, node.fullPath, node.count, 0, currentTag === node.fullPath);
+            shown++;
+          }
         }
-
-        // 标签名（搜索匹配高亮）
-        const nameSpan = item.createSpan({ text: f.name });
-
-        // 使用频率标记
-        const countBadge = item.createSpan({
-          text: `${f.count}`,
-          cls: 'markvault-tag-filter-count',
-        });
-        countBadge.style.fontSize = '11px';
-        countBadge.style.padding = '1px 6px';
-        countBadge.style.borderRadius = '10px';
-        countBadge.style.background = currentTag === f.name
-          ? 'rgba(255,255,255,0.3)'
-          : 'var(--background-modifier-hover, #f0f0f0)';
-
-        item.addEventListener('mouseenter', () => {
-          if (currentTag !== f.name) {
-            item.style.background = 'var(--background-modifier-hover, rgba(0,0,0,0.05))';
-          }
-        });
-        item.addEventListener('mouseleave', () => {
-          if (currentTag !== f.name) {
-            item.style.background = '';
-          }
-        });
-        item.addEventListener('click', async () => {
-          this.host.filter.tag = f.name;
-          popover.remove();
-          await this.host.refreshListOnly();
-        });
+        if (shown === 0) {
+          const noItem = listContainer.createDiv();
+          noItem.style.padding = '16px 10px';
+          noItem.style.textAlign = 'center';
+          noItem.style.color = 'var(--text-muted, #888)';
+          noItem.style.fontSize = '12px';
+          noItem.textContent = 'No matching tags';
+        }
+      } else {
+        // 无搜索：树形渲染
+        renderTree(rootNodes, 0, '');
       }
     };
 
     // 初始渲染
     renderList('');
 
-    // 搜索输入事件
+    // 搜索事件
     searchInput.addEventListener('input', () => {
       renderList(searchInput.value);
     });
 
-    // 键盘：Escape 关闭
+    // 键盘 Escape
     searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        popover.remove();
-      }
+      if (e.key === 'Escape') popover.remove();
     });
 
     // 点击外部关闭
@@ -463,7 +569,6 @@ export class FilterBar {
         document.removeEventListener('click', onClickOutside, true);
       }
     };
-    // 延迟注册防止立即触发
     setTimeout(() => {
       document.addEventListener('click', onClickOutside, true);
     }, 0);

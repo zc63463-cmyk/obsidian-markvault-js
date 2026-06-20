@@ -133,6 +133,11 @@ export class AnnotationStore {
     return this.indexLayer.getGroupNames();
   }
 
+  /** 获取合并分组名（groups + tags group: 前缀） */
+  getMergedGroupNames(): string[] {
+    return this.indexLayer.getMergedGroupNames();
+  }
+
   // ═══════════════════════════════════════════════════════
   // 查询引擎（委托 QueryEngine）
   // ═══════════════════════════════════════════════════════

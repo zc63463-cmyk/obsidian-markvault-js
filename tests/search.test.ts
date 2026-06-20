@@ -244,6 +244,53 @@ async function testFilterEngine() {
     if (uuids[0] !== 'a4' || uuids[1] !== 'a5') throw new Error('tag filter: wrong uuids');
   });
 
+  // Phase 1: 层级标签 prefix 匹配
+  const annsHierarchy: Annotation[] = [
+    // 层级标签
+    makeAnn({ uuid: 'h1', text: 'BCNF范式', tags: ['数据库/范式/BCNF', '重要'] }),
+    makeAnn({ uuid: 'h2', text: '第三范式', tags: ['数据库/范式/3NF'] }),
+    makeAnn({ uuid: 'h3', text: '事务ACID', tags: ['数据库/事务'] }),
+    makeAnn({ uuid: 'h4', text: 'TCP协议', tags: ['计算机网络/TCP'] }),
+    // group: 前缀 tags
+    makeAnn({ uuid: 'h5', text: '欧拉公式', tags: ['group:ch12', '重要'] }),
+    makeAnn({ uuid: 'h6', text: '费马定理', tags: ['group:ch12'] }),
+  ];
+
+  await test('Hierarchical tag: parent matches all children', () => {
+    const r = applyUnifiedFilter(annsHierarchy, { tag: '数据库' });
+    if (r.length !== 3) throw new Error(`parent '数据库' should match 3, got ${r.length}`);
+    const uuids = r.map(a => a.uuid).sort();
+    if (uuids.join(',') !== 'h1,h2,h3') throw new Error(`got ${uuids.join(',')}`);
+  });
+
+  await test('Hierarchical tag: sub-level matches itself + deeper', () => {
+    const r = applyUnifiedFilter(annsHierarchy, { tag: '数据库/范式' });
+    if (r.length !== 2) throw new Error(`'数据库/范式' should match 2, got ${r.length}`);
+    const uuids = r.map(a => a.uuid).sort();
+    if (uuids.join(',') !== 'h1,h2') throw new Error(`got ${uuids.join(',')}`);
+  });
+
+  await test('Hierarchical tag: leaf exact match', () => {
+    const r = applyUnifiedFilter(annsHierarchy, { tag: '数据库/范式/BCNF' });
+    if (r.length !== 1) throw new Error(`leaf exact match should be 1, got ${r.length}`);
+    if (r[0].uuid !== 'h1') throw new Error('leaf wrong');
+  });
+
+  await test('Hierarchical tag: non-path partial does NOT match', () => {
+    // "范式" 不是 "数据库/范式" 的 prefix (因为需要 / 分隔)
+    const r = applyUnifiedFilter(annsHierarchy, { tag: '范式' });
+    if (r.length !== 0) throw new Error(`'范式' should NOT match path tags, got ${r.length}`);
+  });
+
+  await test('Group filter: groups field + group: prefix tag', () => {
+    // h5/h6 有 tags: ["group:ch12"], a4 有 groups: ["ch12"]
+    const r1 = applyUnifiedFilter(annsHierarchy, { group: 'ch12' });
+    if (r1.length !== 2) throw new Error(`group:ch12 from tags should match 2, got ${r1.length}`);
+    // 验证旧 groups 字段仍然有效
+    const r2 = applyUnifiedFilter(anns, { group: 'ch12' });
+    if (r2.length !== 1 || r2[0].uuid !== 'a4') throw new Error('legacy groups still work');
+  });
+
   await test('needsCorrection filter', () => {
     const r = applyUnifiedFilter(anns, { needsCorrection: true });
     if (r.length !== 0) throw new Error('needsCorrection should be 0');

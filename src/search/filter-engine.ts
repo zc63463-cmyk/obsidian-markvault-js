@@ -125,13 +125,19 @@ export function applyUnifiedFilter(
 
   if (filter.group && filter.group !== 'all') {
     const groupVal = filter.group as string;
-    results = results.filter(a => a.groups?.includes(groupVal) ?? false);
+    // v6.0 双读：groups 字段 + tags 中 group: 前缀
+    results = results.filter(a =>
+      (a.groups?.includes(groupVal) ?? false) ||
+      a.tags.some(t => t === `group:${groupVal}`)
+    );
   }
 
-  // v5.x: tag 过滤
+  // v5.x: tag 过滤（v6.0 层级支持：筛选父级自动包含所有子标签）
   if (filter.tag && filter.tag !== 'all') {
     const tagVal = filter.tag as string;
-    results = results.filter(a => a.tags.includes(tagVal));
+    results = results.filter(a =>
+      a.tags.some(t => t === tagVal || t.startsWith(tagVal + '/'))
+    );
   }
 
   // v4.2: hasRelations 只计算有效关系（invalidAt == null）
