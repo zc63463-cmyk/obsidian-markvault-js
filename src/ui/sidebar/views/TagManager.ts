@@ -1,81 +1,247 @@
 /**
- * Tag Manager — 标签治理面板
+ * Tag Manager v2 — 标签治理面板（Group 分组视图）
  *
- * 参考 Obsidian Tag Wrangler 设计，提供标签重命名 / 合并 / 删除功能。
- * 通过 byTag 索引获取使用该标签的所有标注，批量操作。
+ * 标签按所属 Group 分组展示，未分组标签归入"自由"分组。
+ * Group 本身支持重命名 / 删除。
  */
 
 import { App, Modal, Notice, Setting, TextComponent } from 'obsidian';
-import { getTagFrequencies } from '../../../db/annotation-repo';
+import { getTagFrequencies, getGroupNames, getAllAnnotations } from '../../../db/annotation-repo';
 import type { AnnotationStore } from '../../../db/annotation-store';
 
-export interface TagManagerHost {
+interface TagManagerHost {
   app: App;
   store: AnnotationStore;
   refresh(): Promise<void>;
 }
 
+/** tag 及其出现的 group 信息 */
+interface TagInfo {
+  name: string;
+  count: number;
+  groups: Set<string>;  // 该 tag 出现在哪些 group 的标注中
+}
+
 export class TagManager {
-  constructor(private host: TagManagerHost) {}
+  private host: TagManagerHost;
+
+  constructor(host: TagManagerHost) {
+    this.host = host;
+  }
 
   render(container: HTMLElement): void {
     container.empty();
-
     const header = container.createDiv({ cls: 'markvault-tagmanager-header' });
     header.style.cssText = 'padding:8px 0 12px;border-bottom:1px solid var(--background-modifier-border,#ddd);margin-bottom:8px';
     header.createSpan({ text: '🏷️ Tag Manager', cls: 'markvault-tagmanager-title' }).style.cssText = 'font-weight:600;font-size:14px';
 
-    // 刷新按钮
-    const refreshBtn = header.createEl('button', { text: '🔄 Refresh', cls: 'markvault-tagmanager-refresh-btn' });
+    const refreshBtn = header.createEl('button', { text: '🔄 Refresh' });
     refreshBtn.style.cssText = 'float:right;font-size:11px;padding:2px 8px;cursor:pointer';
-    refreshBtn.addEventListener('click', async () => { await this.renderCurrent(container); });
+    refreshBtn.addEventListener('click', async () => { this.render(container); });
 
-    // 标签列表容器
     const listEl = container.createDiv({ cls: 'markvault-tagmanager-list' });
     listEl.style.cssText = 'max-height:calc(100vh - 220px);overflow-y:auto';
-
-    this.renderList(listEl);
+    this.renderGrouped(listEl);
   }
 
-  private renderList(listEl: HTMLElement): void {
+  /** 按 tag 分组所在 annotation 收集 tag → groups 映射 */
+  private async collectTagGroups(): Promise<Map<string, Set<string>>> {
+    const tagGroups = new Map<string, Set<string>>();
+    const all = await getAllAnnotations();
+    for (const ann of all) {
+      const annGroups = ann.groups ?? [];
+      for (const tag of ann.tags) {
+        let set = tagGroups.get(tag);
+        if (!set) { set = new Set(); tagGroups.set(tag, set); }
+        for (const g of annGroups) set.add(g);
+      }
+    }
+    return tagGroups;
+  }
+
+  private async renderGrouped(listEl: HTMLElement): Promise<void> {
     listEl.empty();
     const frequencies = getTagFrequencies();
-
     if (frequencies.length === 0) {
-      listEl.createDiv({ text: 'No tags in any annotation.' }).style.cssText = 'padding:20px;text-align:center;color:var(--text-muted,#888)';
+      listEl.createDiv({ text: 'No tags.', cls: '' }).style.cssText = 'padding:20px;text-align:center;color:var(--text-muted,#888)';
       return;
     }
 
+    const tagGroups = await this.collectTagGroups();
+    const groups = getGroupNames();
+
+    // 构建 group → tags 映射
+    const grouped = new Map<string, Array<{ name: string; count: number }>>();
+    for (const g of groups) grouped.set(g, []);
+
+    // 收集未分组的 tags
+    const freeTags: Array<{ name: string; count: number }> = [];
+
     for (const f of frequencies) {
-      const row = listEl.createDiv({ cls: 'markvault-tagmanager-row' });
-      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px;transition:background .1s';
+      const gs = tagGroups.get(f.name);
+      if (!gs || gs.size === 0) {
+        freeTags.push({ name: f.name, count: f.count });
+      } else {
+        for (const g of gs) {
+          const arr = grouped.get(g);
+          if (arr) arr.push({ name: f.name, count: f.count });
+        }
+      }
+    }
+
+    // 渲染 Group sections
+    const sortedGroups = [...groups].sort();
+    for (const g of sortedGroups) {
+      const tags = grouped.get(g) ?? [];
+      this.renderGroupSection(listEl, g, tags);
+    }
+
+    // 渲染 "自由" 分组
+    if (freeTags.length > 0 || groups.length === 0) {
+      this.renderGroupSection(listEl, '自由', freeTags);
+    }
+  }
+
+  private renderGroupSection(parent: HTMLElement, groupName: string, tags: Array<{ name: string; count: number }>): void {
+    // Group header
+    const header = parent.createDiv({ cls: 'markvault-tagmanager-group-header' });
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:4px 0 2px;background:var(--background-secondary,#f5f5f5);border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;user-select:none';
+
+    const left = header.createSpan();
+    left.style.cssText = 'display:flex;align-items:center;gap:6px';
+    const collapseIcon = left.createSpan({ text: '▾' });
+    collapseIcon.style.cssText = 'font-size:10px;width:12px';
+    left.appendText(`📂 ${groupName}`);
+    const countBadge = header.createSpan({ text: `${tags.length}` });
+    countBadge.style.cssText = 'background:var(--interactive-accent,#483699);color:#fff;padding:0 6px;border-radius:8px;font-size:11px';
+
+    // Group actions (non-"自由")
+    if (groupName !== '自由') {
+      const actions = header.createSpan();
+      actions.style.cssText = 'display:flex;gap:4px';
+      const renameBtn = actions.createEl('button', { text: '✏️', attr: { title: 'Rename group' } });
+      renameBtn.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
+      renameBtn.addEventListener('click', (e) => { e.stopPropagation(); this.showGroupRenameDialog(groupName, tags); });
+
+      const delBtn = actions.createEl('button', { text: '🗑', attr: { title: 'Delete group' } });
+      delBtn.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
+      delBtn.addEventListener('click', (e) => { e.stopPropagation(); this.showGroupDeleteConfirm(groupName); });
+    }
+
+    // Tag body（可折叠）
+    const body = parent.createDiv();
+    body.style.cssText = 'padding-left:8px';
+
+    let collapsed = false;
+    header.addEventListener('click', () => {
+      collapsed = !collapsed;
+      body.style.display = collapsed ? 'none' : 'block';
+      collapseIcon.textContent = collapsed ? '▸' : '▾';
+    });
+
+    if (tags.length === 0 && groupName !== '自由') {
+      body.createDiv({ text: 'No tags in this group' }).style.cssText = 'padding:8px 16px;color:var(--text-muted,#888);font-size:12px';
+      return;
+    }
+
+    for (const t of tags) {
+      const row = body.createDiv();
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:4px 12px;border-radius:6px;font-size:12px;transition:background .1s';
       row.addEventListener('mouseenter', () => row.style.background = 'var(--background-modifier-hover,rgba(0,0,0,.05))');
       row.addEventListener('mouseleave', () => row.style.background = '');
 
-      // 标签名 + 计数
-      const left = row.createDiv();
-      left.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0';
-      left.createSpan({ text: f.name }).style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-      const badge = left.createSpan({ text: `${f.count}`, cls: 'markvault-tagmanager-count' });
-      badge.style.cssText = 'background:var(--background-modifier-hover,#e0e0e0);padding:0 6px;border-radius:8px;font-size:11px;color:var(--text-muted,#666)';
+      const tagLeft = row.createSpan();
+      tagLeft.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1';
+      tagLeft.createSpan({ text: t.name });
+      const cnt = tagLeft.createSpan({ text: ` ${t.count}` });
+      cnt.style.cssText = 'color:var(--text-muted,#888);font-size:11px;margin-left:4px';
 
-      // 操作按钮
-      const actions = row.createDiv();
-      actions.style.cssText = 'display:flex;gap:4px;flex-shrink:0';
+      const tagActions = row.createSpan();
+      tagActions.style.cssText = 'display:flex;gap:3px;flex-shrink:0';
 
-      const renameBtn = actions.createEl('button', { text: '✏️', attr: { title: 'Rename' } });
-      renameBtn.style.cssText = 'padding:1px 6px;cursor:pointer;border:none;background:none;font-size:14px;opacity:.7';
-      renameBtn.addEventListener('click', (e) => { e.stopPropagation(); this.showRenameDialog(f.name); });
+      const rn = tagActions.createEl('button', { text: '✏️', attr: { title: 'Rename' } });
+      rn.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
+      rn.addEventListener('click', (e) => { e.stopPropagation(); this.showRenameDialog(t.name); });
 
-      const mergeBtn = actions.createEl('button', { text: '⇄', attr: { title: 'Merge into...' } });
-      mergeBtn.style.cssText = 'padding:1px 6px;cursor:pointer;border:none;background:none;font-size:14px;opacity:.7';
-      mergeBtn.addEventListener('click', (e) => { e.stopPropagation(); this.showMergeDialog(f.name); });
+      const mg = tagActions.createEl('button', { text: '⇄', attr: { title: 'Merge' } });
+      mg.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
+      mg.addEventListener('click', (e) => { e.stopPropagation(); this.showMergeDialog(t.name); });
 
-      const deleteBtn = actions.createEl('button', { text: '🗑', attr: { title: 'Delete' } });
-      deleteBtn.style.cssText = 'padding:1px 6px;cursor:pointer;border:none;background:none;font-size:14px;opacity:.7';
-      deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); this.showDeleteConfirm(f.name); });
+      const dl = tagActions.createEl('button', { text: '🗑', attr: { title: 'Delete' } });
+      dl.style.cssText = 'padding:0 4px;cursor:pointer;border:none;background:none;font-size:12px;opacity:.7';
+      dl.addEventListener('click', (e) => { e.stopPropagation(); this.showDeleteConfirm(t.name); });
     }
   }
+
+  // ─── Group 操作 ───
+
+  private showGroupRenameDialog(oldName: string, tags: Array<{ name: string; count: number }>): void {
+    const modal = new Modal(this.host.app);
+    const { contentEl } = modal;
+    contentEl.style.cssText = 'padding:16px;min-width:280px';
+    modal.titleEl.setText(`Rename group "${oldName}"`);
+
+    new Setting(contentEl)
+      .setName('New group name')
+      .addText((text: TextComponent) => {
+        text.setValue(oldName);
+        text.inputEl.style.width = '100%';
+      });
+
+    const footer = contentEl.createDiv();
+    footer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:12px';
+    footer.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
+    const confirmBtn = footer.createEl('button', { text: 'Rename' });
+    confirmBtn.style.cssText = 'background:var(--interactive-accent,#483699);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
+    confirmBtn.addEventListener('click', async () => {
+      const input = contentEl.querySelector('input') as HTMLInputElement;
+      if (!input?.value.trim() || input.value.trim() === oldName) return;
+      const newName = input.value.trim();
+      let count = 0;
+      const all2 = await getAllAnnotations();
+      for (const ann of all2) {
+        if (ann.groups?.includes(oldName)) {
+          ann.groups = (ann.groups ?? []).map((g: string) => g === oldName ? newName : g);
+          count++;
+        }
+      }
+      new Notice(`Renamed group "${oldName}" → "${newName}" (${count} annotations)`);
+      modal.close();
+      await this.host.refresh();
+    });
+    modal.open();
+  }
+
+  private showGroupDeleteConfirm(group: string): void {
+    const modal = new Modal(this.host.app);
+    const { contentEl } = modal;
+    contentEl.style.cssText = 'padding:16px;min-width:280px';
+    modal.titleEl.setText(`Delete group "${group}"?`);
+    contentEl.createDiv({ text: `This will remove group "${group}" from ALL annotations. Tags will not be deleted.` })
+      .style.cssText = 'margin:8px 0;color:var(--text-muted,#888);font-size:13px';
+
+    const footer = contentEl.createDiv();
+    footer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:12px';
+    footer.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
+    const delBtn = footer.createEl('button', { text: 'Delete Group' });
+    delBtn.style.cssText = 'background:#e74c3c;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
+    delBtn.addEventListener('click', async () => {
+      let count2 = 0;
+      const all3 = await getAllAnnotations();
+      for (const ann of all3) {
+        if (ann.groups?.includes(group)) {
+          ann.groups = (ann.groups ?? []).filter((g: string) => g !== group);
+          count2++;
+        }
+      }
+      new Notice(`Removed group "${group}" from ${count2} annotations`);
+      modal.close();
+      await this.host.refresh();
+    });
+    modal.open();
+  }
+
+  // ─── Tag 操作（保持原有逻辑）───
 
   private showRenameDialog(oldName: string): void {
     const modal = new Modal(this.host.app);
@@ -90,8 +256,8 @@ export class TagManager {
         text.inputEl.style.width = '100%';
         text.inputEl.addEventListener('keydown', async (e) => {
           if (e.key === 'Enter' && text.getValue().trim() && text.getValue().trim() !== oldName) {
-            const count = await this.host.store.renameTag(oldName, text.getValue().trim());
-            new Notice(`Renamed tag: ${oldName} → ${text.getValue().trim()} (${count} annotations updated)`);
+            const cnt = await this.host.store.renameTag(oldName, text.getValue().trim());
+            new Notice(`Renamed: ${oldName} → ${text.getValue().trim()} (${cnt} annotations)`);
             modal.close();
             await this.host.refresh();
           }
@@ -100,20 +266,18 @@ export class TagManager {
 
     const footer = contentEl.createDiv();
     footer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:12px';
-    const cancelBtn = footer.createEl('button', { text: 'Cancel' });
-    cancelBtn.addEventListener('click', () => modal.close());
+    footer.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
     const confirmBtn = footer.createEl('button', { text: 'Rename' });
     confirmBtn.style.cssText = 'background:var(--interactive-accent,#483699);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
     confirmBtn.addEventListener('click', async () => {
       const input = contentEl.querySelector('input') as HTMLInputElement;
-      if (input && input.value.trim() && input.value.trim() !== oldName) {
-        const count = await this.host.store.renameTag(oldName, input.value.trim());
-        new Notice(`Renamed: ${oldName} → ${input.value.trim()} (${count} annotations)`);
+      if (input?.value.trim() && input.value.trim() !== oldName) {
+        const cnt = await this.host.store.renameTag(oldName, input.value.trim());
+        new Notice(`Renamed: ${oldName} → ${input.value.trim()} (${cnt} annotations)`);
         modal.close();
         await this.host.refresh();
       }
     });
-
     modal.open();
   }
 
@@ -125,18 +289,9 @@ export class TagManager {
 
     new Setting(contentEl)
       .setName('Target tag')
-      .setDesc(`All annotations with "${sourceName}" will be changed to this tag`)
       .addText((text: TextComponent) => {
         text.setPlaceholder('Enter target tag name');
         text.inputEl.style.width = '100%';
-        text.inputEl.addEventListener('keydown', async (e) => {
-          if (e.key === 'Enter' && text.getValue().trim()) {
-            const count = await this.host.store.mergeTags(text.getValue().trim(), [sourceName]);
-            new Notice(`Merged: ${sourceName} → ${text.getValue().trim()} (${count} annotations)`);
-            modal.close();
-            await this.host.refresh();
-          }
-        });
       });
 
     const footer = contentEl.createDiv();
@@ -146,9 +301,9 @@ export class TagManager {
     confirmBtn.style.cssText = 'background:var(--interactive-accent,#483699);color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
     confirmBtn.addEventListener('click', async () => {
       const input = contentEl.querySelector('input') as HTMLInputElement;
-      if (input && input.value.trim()) {
-        const count = await this.host.store.mergeTags(input.value.trim(), [sourceName]);
-        new Notice(`Merged: ${sourceName} → ${input.value.trim()} (${count} annotations)`);
+      if (input?.value.trim()) {
+        const cnt = await this.host.store.mergeTags(input.value.trim(), [sourceName]);
+        new Notice(`Merged: ${sourceName} → ${input.value.trim()} (${cnt} annotations)`);
         modal.close();
         await this.host.refresh();
       }
@@ -161,8 +316,7 @@ export class TagManager {
     const { contentEl } = modal;
     contentEl.style.cssText = 'padding:16px;min-width:280px';
     modal.titleEl.setText(`Delete "${tag}"?`);
-
-    contentEl.createDiv({ text: `This will remove "${tag}" from ALL annotations. This action cannot be undone.` })
+    contentEl.createDiv({ text: `This will remove "${tag}" from ALL annotations. Cannot be undone.` })
       .style.cssText = 'margin:8px 0;color:var(--text-muted,#888);font-size:13px';
 
     const footer = contentEl.createDiv();
@@ -171,16 +325,11 @@ export class TagManager {
     const delBtn = footer.createEl('button', { text: 'Delete' });
     delBtn.style.cssText = 'background:#e74c3c;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer';
     delBtn.addEventListener('click', async () => {
-      const count = await this.host.store.deleteTag(tag);
-      new Notice(`Deleted tag "${tag}" from ${count} annotations`);
+      const cnt = await this.host.store.deleteTag(tag);
+      new Notice(`Deleted "${tag}" from ${cnt} annotations`);
       modal.close();
       await this.host.refresh();
     });
     modal.open();
-  }
-
-  private async renderCurrent(container: HTMLElement): Promise<void> {
-    const listEl = container.querySelector('.markvault-tagmanager-list') as HTMLElement;
-    if (listEl) this.renderList(listEl);
   }
 }
